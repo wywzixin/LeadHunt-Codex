@@ -1,0 +1,33 @@
+{
+  "name": "leadhunt",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.29.3",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:web": "pnpm --filter @leadhunt/web dev",
+    "dev:api": "pnpm --filter @leadhunt/api dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "format": "prettier --check .",
+    "format:write": "prettier --write .",
+    "db:status": "powershell -ExecutionPolicy Bypass -File scripts/db-maintenance.ps1 -Mode status",
+    "db:migrate": "powershell -ExecutionPolicy Bypass -File scripts/db-maintenance.ps1 -Mode migrate",
+    "db:backup": "powershell -ExecutionPolicy Bypass -File scripts/db-maintenance.ps1 -Mode backup",
+    "prisma:validate": "pnpm --filter @leadhunt/api prisma validate",
+    "prisma:generate": "pnpm --filter @leadhunt/api prisma generate"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^4.0.14"
+  }
+}

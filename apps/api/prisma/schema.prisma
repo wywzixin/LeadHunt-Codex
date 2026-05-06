@@ -1,0 +1,381 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                  String               @id @default(uuid()) @db.Uuid
+  email               String               @unique
+  name                String?
+  passwordHash        String               @map("password_hash")
+  role                String               @default("user")
+  status              String               @default("active")
+  emailVerifiedAt     DateTime?            @map("email_verified_at")
+  lastLoginAt         DateTime?            @map("last_login_at")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  authAccounts        AuthAccount[]
+  sessions            UserSession[]
+  passwordResetTokens PasswordResetToken[]
+  gmailAccounts       GmailAccount[]
+  leadTasks           LeadTask[]
+  productProfile      ProductProfile?
+  customerProfile     CustomerProfile?
+
+  @@map("users")
+}
+
+model ProductProfile {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @map("user_id") @db.Uuid
+  websiteUrl     String   @map("website_url") @db.Text
+  productPageUrl String?  @map("product_page_url") @db.Text
+  documentUrls   Json?    @map("document_urls")
+  notes          String?  @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("product_profiles")
+}
+
+model CustomerProfile {
+  id                    String   @id @default(uuid()) @db.Uuid
+  userId                String   @unique @map("user_id") @db.Uuid
+  targetRegions         Json     @map("target_regions")
+  referenceCustomerUrls Json     @map("reference_customer_urls")
+  crmSampleIds          Json?    @map("crm_sample_ids")
+  notes                 String?  @db.Text
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("customer_profiles")
+}
+
+model AuthAccount {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  provider       String
+  providerUserId String   @map("provider_user_id")
+  email          String
+  createdAt      DateTime @default(now()) @map("created_at")
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@map("auth_accounts")
+}
+
+model UserSession {
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
+  refreshTokenHash String   @map("refresh_token_hash")
+  userAgent        String?  @map("user_agent")
+  ipAddress        String?  @map("ip_address")
+  expiresAt        DateTime @map("expires_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([refreshTokenHash])
+  @@map("user_sessions")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+model GmailAccount {
+  id                    String    @id @default(uuid()) @db.Uuid
+  userId                String    @map("user_id") @db.Uuid
+  email                 String
+  refreshTokenEncrypted String    @map("refresh_token_encrypted") @db.Text
+  connectedAt           DateTime  @default(now()) @map("connected_at")
+  revokedAt             DateTime? @map("revoked_at")
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, email])
+  @@index([userId])
+  @@map("gmail_accounts")
+}
+
+model LeadTask {
+  id                String             @id @default(uuid()) @db.Uuid
+  userId            String             @map("user_id") @db.Uuid
+  mode              String             @default("semi_managed")
+  status            String             @default("draft")
+  targetCount       Int                @default(50) @map("target_count")
+  inputPayload      Json?              @map("input_payload")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentSteps        AgentStep[]
+  searchQueries     SearchQuery[]
+  leadCandidates    LeadCandidate[]
+  campaignAnalytics CampaignAnalytic[]
+
+  @@index([userId, status])
+  @@map("lead_tasks")
+}
+
+model AgentStep {
+  id        String    @id @default(uuid()) @db.Uuid
+  taskId    String    @map("task_id") @db.Uuid
+  nodeName  String    @map("node_name")
+  status    String    @default("pending")
+  input     Json?
+  output    Json?
+  error     String?   @db.Text
+  startedAt DateTime? @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  task      LeadTask  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, nodeName])
+  @@map("agent_steps")
+}
+
+model SearchQuery {
+  id                 String         @id @default(uuid()) @db.Uuid
+  taskId             String         @map("task_id") @db.Uuid
+  provider           String         @default("brave")
+  operatorSource     String?        @map("operator_source")
+  executionStatus    String         @default("pending") @map("execution_status")
+  operatorName       String?        @map("operator_name")
+  strategyTemplate   String?        @map("strategy_template") @db.Text
+  query              String         @db.Text
+  keywordGroups      Json?          @map("keyword_groups")
+  country            String?
+  resultCount        Int            @default(0) @map("result_count")
+  qualifiedCount     Int            @default(0) @map("qualified_count")
+  effectivenessScore Float?         @map("effectiveness_score")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  task               LeadTask       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  searchResults      SearchResult[]
+
+  @@index([taskId, executionStatus])
+  @@map("search_queries")
+}
+
+model SearchResult {
+  id        String      @id @default(uuid()) @db.Uuid
+  queryId   String      @map("query_id") @db.Uuid
+  title     String
+  url       String      @db.Text
+  snippet   String?     @db.Text
+  domain    String?
+  createdAt DateTime    @default(now()) @map("created_at")
+  query     SearchQuery @relation(fields: [queryId], references: [id], onDelete: Cascade)
+
+  @@index([queryId])
+  @@index([domain])
+  @@map("search_results")
+}
+
+model LeadCandidate {
+  id             String           @id @default(uuid()) @db.Uuid
+  taskId         String           @map("task_id") @db.Uuid
+  companyName    String           @map("company_name")
+  website        String?          @db.Text
+  country        String?
+  sourceUrl      String?          @map("source_url") @db.Text
+  status         String           @default("new")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+  task           LeadTask         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  contacts       LeadContact[]
+  icpScore       IcpScore?
+  outreachDrafts OutreachDraft[]
+  crmLead        CrmLead?
+  followupTasks  FollowupTask[]
+  stageEvents    LeadStageEvent[]
+
+  @@index([taskId, status])
+  @@index([companyName])
+  @@map("lead_candidates")
+}
+
+model LeadContact {
+  id        String        @id @default(uuid()) @db.Uuid
+  leadId    String        @map("lead_id") @db.Uuid
+  type      String
+  value     String
+  sourceUrl String?       @map("source_url") @db.Text
+  createdAt DateTime      @default(now()) @map("created_at")
+  lead      LeadCandidate @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@unique([leadId, type, value])
+  @@index([leadId])
+  @@map("lead_contacts")
+}
+
+model IcpScore {
+  id        String        @id @default(uuid()) @db.Uuid
+  leadId    String        @unique @map("lead_id") @db.Uuid
+  score     Int
+  grade     String
+  reasons   Json?
+  createdAt DateTime      @default(now()) @map("created_at")
+  lead      LeadCandidate @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@map("icp_scores")
+}
+
+model OutreachDraft {
+  id           String        @id @default(uuid()) @db.Uuid
+  leadId       String        @map("lead_id") @db.Uuid
+  channel      String        @default("email")
+  subject      String
+  body         String        @db.Text
+  status       String        @default("draft")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  lead         LeadCandidate @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  sendLogs     SendLog[]
+  inboxThreads InboxThread[]
+
+  @@index([leadId, status])
+  @@map("outreach_drafts")
+}
+
+model SendLog {
+  id                String            @id @default(uuid()) @db.Uuid
+  draftId           String            @map("draft_id") @db.Uuid
+  channel           String            @default("email")
+  status            String            @default("pending")
+  providerMessageId String?           @map("provider_message_id")
+  sentAt            DateTime?         @map("sent_at")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  draft             OutreachDraft     @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  engagementEvents  EngagementEvent[]
+
+  @@index([draftId, status])
+  @@map("send_logs")
+}
+
+model EngagementEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  sendLogId  String   @map("send_log_id") @db.Uuid
+  eventType  String   @map("event_type")
+  provider   String
+  metadata   Json?
+  occurredAt DateTime @map("occurred_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  sendLog    SendLog  @relation(fields: [sendLogId], references: [id], onDelete: Cascade)
+
+  @@index([sendLogId, eventType])
+  @@map("engagement_events")
+}
+
+model InboxThread {
+  id              String           @id @default(uuid()) @db.Uuid
+  draftId         String           @map("draft_id") @db.Uuid
+  provider        String           @default("gmail")
+  threadId        String           @map("thread_id")
+  status          String           @default("open")
+  lastSyncedAt    DateTime?        @map("last_synced_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  draft           OutreachDraft    @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  inboundMessages InboundMessage[]
+
+  @@unique([provider, threadId])
+  @@index([draftId])
+  @@map("inbox_threads")
+}
+
+model InboundMessage {
+  id                  String               @id @default(uuid()) @db.Uuid
+  threadId            String               @map("thread_id") @db.Uuid
+  fromEmail           String               @map("from_email")
+  subject             String?
+  bodyPreview         String?              @map("body_preview") @db.Text
+  receivedAt          DateTime             @map("received_at")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  thread              InboxThread          @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  replyClassification ReplyClassification?
+
+  @@index([threadId, receivedAt])
+  @@map("inbound_messages")
+}
+
+model ReplyClassification {
+  id             String         @id @default(uuid()) @db.Uuid
+  messageId      String         @unique @map("message_id") @db.Uuid
+  intent         String
+  confidence     Int
+  extractedNeeds Json?          @map("extracted_needs")
+  summary        String?        @db.Text
+  createdAt      DateTime       @default(now()) @map("created_at")
+  message        InboundMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@map("reply_classifications")
+}
+
+model FollowupTask {
+  id        String        @id @default(uuid()) @db.Uuid
+  leadId    String        @map("lead_id") @db.Uuid
+  type      String
+  status    String        @default("pending")
+  dueAt     DateTime      @map("due_at")
+  note      String?       @db.Text
+  createdAt DateTime      @default(now()) @map("created_at")
+  lead      LeadCandidate @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, status])
+  @@index([dueAt])
+  @@map("followup_tasks")
+}
+
+model LeadStageEvent {
+  id        String        @id @default(uuid()) @db.Uuid
+  leadId    String        @map("lead_id") @db.Uuid
+  fromStage String?       @map("from_stage")
+  toStage   String        @map("to_stage")
+  reason    String?       @db.Text
+  createdAt DateTime      @default(now()) @map("created_at")
+  lead      LeadCandidate @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, createdAt])
+  @@map("lead_stage_events")
+}
+
+model CampaignAnalytic {
+  id             String   @id @default(uuid()) @db.Uuid
+  taskId         String   @map("task_id") @db.Uuid
+  dimension      String
+  dimensionValue String   @map("dimension_value")
+  sentCount      Int      @default(0) @map("sent_count")
+  replyCount     Int      @default(0) @map("reply_count")
+  qualifiedCount Int      @default(0) @map("qualified_count")
+  createdAt      DateTime @default(now()) @map("created_at")
+  task           LeadTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, dimension, dimensionValue])
+  @@map("campaign_analytics")
+}
+
+model CrmLead {
+  id        String        @id @default(uuid()) @db.Uuid
+  leadId    String        @unique @map("lead_id") @db.Uuid
+  stage     String        @default("new")
+  tags      Json?
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+  lead      LeadCandidate @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([stage])
+  @@map("crm_leads")
+}
