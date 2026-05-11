@@ -89,6 +89,7 @@ function crmRecord(overrides: Record<string, unknown> = {}) {
 
 function createPrismaMock() {
   return {
+    $queryRaw: vi.fn().mockResolvedValue([]),
     crmLead: {
       findMany: vi.fn(),
       findFirst: vi.fn().mockResolvedValue(crmRecord()),
@@ -181,12 +182,17 @@ describe("CrmService", () => {
     const prisma = createPrismaMock();
     prisma.crmLead.findMany.mockResolvedValue([crmRecord()]);
     const service = new CrmService(prisma as any);
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(new Date("2026-05-04T01:00:00.000Z").getTime());
 
-    const result = await service.listCustomers("user-1", { view: "contacts", group: "contacted_7_days" });
+    try {
+      const result = await service.listCustomers("user-1", { view: "contacts", group: "contacted_7_days" });
 
-    expect(result.contacts).toHaveLength(1);
-    expect(result.contacts[0]?.value).toBe("sales@gulftelecom.example");
-    expect(result.groups.contacted7).toBe(1);
+      expect(result.contacts).toHaveLength(1);
+      expect(result.contacts[0]?.value).toBe("sales@gulftelecom.example");
+      expect(result.groups.contacted7).toBe(1);
+    } finally {
+      dateNow.mockRestore();
+    }
   });
 
   it("syncs a lead to CRM, writes a stage event, and creates a 3-day follow-up", async () => {
@@ -228,74 +234,83 @@ describe("CrmService", () => {
 
   it("builds dashboard analytics from CRM, search, send, and reply data", async () => {
     const prisma = createPrismaMock();
-    prisma.searchQuery.findMany.mockResolvedValue([
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T01:00:00.000Z"));
+    prisma.$queryRaw.mockResolvedValueOnce([
       {
-        id: "query-1",
-        query: "通信 5G distributor",
-        operatorSource: "global_database",
-        operatorName: null,
-        keywordGroups: [{ keyword: "通信5G" }],
-        createdAt: now
-      },
-      {
-        id: "query-2",
-        query: "telecom stockist",
-        operatorSource: "maps",
-        operatorName: null,
-        keywordGroups: null,
-        createdAt: now
-      }
-    ]);
-    prisma.sendLog.findMany.mockResolvedValue([
-      {
-        id: "send-1",
-        status: "sent",
-        channel: "email",
-        sentAt: now,
-        createdAt: now
-      }
-    ]);
-    prisma.inboundMessage.findMany.mockResolvedValue([
-      {
-        id: "reply-1",
-        receivedAt: now
-      }
-    ]);
-    prisma.engagementEvent.findMany.mockResolvedValue([
-      {
-        id: "open-1",
-        sendLogId: "send-1",
-        occurredAt: now
-      }
-    ]);
-    prisma.crmLead.findMany.mockResolvedValue([
-      {
-        id: "crm-1",
-        tags: ["favorite", "通信设备"],
-        updatedAt: now,
-        lead: {
-          contacts: [{ id: "contact-1", type: "email" }]
-        }
+        searchQueries: [
+          {
+            id: "query-1",
+            query: "通信 5G distributor",
+            operatorSource: "global_database",
+            operatorName: null,
+            keywordGroups: [{ keyword: "通信5G" }],
+            createdAt: now
+          },
+          {
+            id: "query-2",
+            query: "telecom stockist",
+            operatorSource: "maps",
+            operatorName: null,
+            keywordGroups: null,
+            createdAt: now
+          }
+        ],
+        sendLogs: [
+          {
+            id: "send-1",
+            status: "sent",
+            channel: "email",
+            sentAt: now,
+            createdAt: now
+          }
+        ],
+        replies: [
+          {
+            id: "reply-1",
+            receivedAt: now
+          }
+        ],
+        openEvents: [
+          {
+            id: "open-1",
+            sendLogId: "send-1",
+            occurredAt: now
+          }
+        ],
+        crmLeads: [
+          {
+            id: "crm-1",
+            tags: ["favorite", "通信设备"],
+            updatedAt: now,
+            favoritePersonCount: 0
+          }
+        ]
       }
     ]);
     const service = new CrmService(prisma as any);
 
-    const result = await service.getAnalytics("user-1", "all");
+    try {
+      const result = await service.getAnalytics("user-1", "all");
 
-    expect(result.overview.emailTasks).toBe(1);
-    expect(result.overview.favoriteCompanies).toBe(1);
-    expect(result.reach.email.rate).toBe(100);
-    expect(result.reach.email.opened).toBe(1);
-    expect(result.reach.email.openRate).toBe(100);
-    expect(result.reach.email.openTrendNote).toContain("trend signals");
-    expect(result.searchPreference[0]).toEqual({ rank: 1, keyword: "通信5G", count: 1 });
-    expect(result.searchTimes).toEqual([
-      { key: "global_database", label: "全球企业库", count: 1 },
-      { key: "maps", label: "地图获客", count: 1 },
-      { key: "customs", label: "海关数据", count: 0 }
-    ]);
-    expect(result.series).toHaveLength(7);
-    expect(result.series.some((point) => point.open === 1)).toBe(true);
+      expect(result.overview.emailTasks).toBe(1);
+      expect(result.overview.favoriteCompanies).toBe(1);
+      expect(result.reach.email.rate).toBe(100);
+      expect(result.reach.email.opened).toBe(1);
+      expect(result.reach.email.openRate).toBe(100);
+      expect(result.reach.email.openTrendNote).toContain("trend signals");
+      expect(result.searchPreference[0]).toEqual({ rank: 1, keyword: "通信5G", count: 1 });
+      expect(result.searchTimes).toEqual([
+        { key: "global_database", label: "全球企业库", count: 1 },
+        { key: "maps", label: "地图获客", count: 1 },
+        { key: "customs", label: "海关数据", count: 0 }
+      ]);
+      expect(result.series).toHaveLength(7);
+      expect(result.series.some((point) => point.open === 1)).toBe(true);
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns a CRM lead detail scoped to the current user", async () => {

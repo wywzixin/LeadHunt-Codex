@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { normalizeTags, syncLeadToCrm, type SyncLeadToCrmInput } from "./crm-sync.js";
 
@@ -45,6 +45,49 @@ type CrmRecord = Prisma.CrmLeadGetPayload<{ include: typeof crmLeadInclude }>;
 type CrmView = "companies" | "contacts" | "favorites";
 type CrmGroup = "all" | "potential" | "contacted_7_days" | "uncontacted";
 type AnalyticsRange = "all" | "month" | "week" | "day";
+
+type AnalyticsSearchQueryRow = {
+  id: string;
+  query: string;
+  operatorSource: string | null;
+  operatorName: string | null;
+  keywordGroups: Prisma.JsonValue | null;
+  createdAt: Date | string;
+};
+
+type AnalyticsSendLogRow = {
+  id: string;
+  status: string;
+  channel: string;
+  sentAt: Date | string | null;
+  createdAt: Date | string;
+};
+
+type AnalyticsReplyRow = {
+  id: string;
+  receivedAt: Date | string;
+};
+
+type AnalyticsOpenEventRow = {
+  id: string;
+  sendLogId: string;
+  occurredAt: Date | string;
+};
+
+type AnalyticsCrmLeadRow = {
+  id: string;
+  tags: Prisma.JsonValue | null;
+  updatedAt: Date | string;
+  favoritePersonCount: number | bigint | null;
+};
+
+type AnalyticsPayloadRow = {
+  searchQueries: unknown;
+  sendLogs: unknown;
+  replies: unknown;
+  openEvents: unknown;
+  crmLeads: unknown;
+};
 
 export type CrmContactInput = {
   type: string;
@@ -255,108 +298,155 @@ export class CrmService {
   async getAnalytics(userId: string, range: AnalyticsRange) {
     const now = new Date();
     const rangeStart = getRangeStart(range, now);
-    const dateFilter = rangeStart ? { gte: rangeStart } : undefined;
+    const searchDateFilter = rangeStart ? Prisma.sql`AND search_queries.created_at >= ${rangeStart}` : Prisma.empty;
+    const sendDateFilter = rangeStart ? Prisma.sql`AND send_logs.created_at >= ${rangeStart}` : Prisma.empty;
+    const replyDateFilter = rangeStart ? Prisma.sql`AND inbound_messages.received_at >= ${rangeStart}` : Prisma.empty;
+    const openDateFilter = rangeStart ? Prisma.sql`AND engagement_events.occurred_at >= ${rangeStart}` : Prisma.empty;
+    const crmDateFilter = rangeStart ? Prisma.sql`AND crm_leads.updated_at >= ${rangeStart}` : Prisma.empty;
 
-    const [searchQueries, sendLogs, replies, openEvents, crmLeads] = await Promise.all([
-      this.prisma.searchQuery.findMany({
-        where: {
-          task: { userId },
-          ...(dateFilter ? { createdAt: dateFilter } : {})
-        },
-        select: {
-          id: true,
-          query: true,
-          operatorSource: true,
-          operatorName: true,
-          keywordGroups: true,
-          createdAt: true
-        }
-      }),
-      this.prisma.sendLog.findMany({
-        where: {
-          draft: {
-            lead: {
-              task: { userId }
-            }
-          },
-          ...(dateFilter ? { createdAt: dateFilter } : {})
-        },
-        select: {
-          id: true,
-          status: true,
-          channel: true,
-          sentAt: true,
-          createdAt: true
-        }
-      }),
-      this.prisma.inboundMessage.findMany({
-        where: {
-          thread: {
-            draft: {
-              lead: {
-                task: { userId }
-              }
-            }
-          },
-          ...(dateFilter ? { receivedAt: dateFilter } : {})
-        },
-        select: {
-          id: true,
-          receivedAt: true
-        }
-      }),
-      this.prisma.engagementEvent.findMany({
-        where: {
-          eventType: "open",
-          sendLog: {
-            draft: {
-              lead: {
-                task: { userId }
-              }
-            }
-          },
-          ...(dateFilter ? { occurredAt: dateFilter } : {})
-        },
-        select: {
-          id: true,
-          sendLogId: true,
-          occurredAt: true
-        }
-      }),
-      this.prisma.crmLead.findMany({
-        where: {
-          lead: {
-            task: { userId }
-          },
-          ...(dateFilter ? { updatedAt: dateFilter } : {})
-        },
-        select: {
-          id: true,
-          tags: true,
-          updatedAt: true,
-          lead: {
-            select: {
-              contacts: {
-                select: {
-                  id: true,
-                  type: true
-                }
-              }
-            }
-          }
-        }
-      })
-    ]);
+    const [analyticsPayload] = await this.prisma.$queryRaw<AnalyticsPayloadRow[]>(Prisma.sql`
+      WITH filtered_search_queries AS (
+        SELECT
+          search_queries.id,
+          search_queries.query,
+          search_queries.operator_source,
+          search_queries.operator_name,
+          search_queries.created_at
+        FROM search_queries
+        INNER JOIN lead_tasks ON lead_tasks.id = search_queries.task_id
+        WHERE lead_tasks.user_id = ${userId}
+        ${searchDateFilter}
+      ),
+      filtered_send_logs AS (
+        SELECT
+          send_logs.id,
+          send_logs.status,
+          send_logs.channel,
+          send_logs.sent_at,
+          send_logs.created_at
+        FROM send_logs
+        INNER JOIN outreach_drafts ON outreach_drafts.id = send_logs.draft_id
+        INNER JOIN lead_candidates ON lead_candidates.id = outreach_drafts.lead_id
+        INNER JOIN lead_tasks ON lead_tasks.id = lead_candidates.task_id
+        WHERE lead_tasks.user_id = ${userId}
+        ${sendDateFilter}
+      ),
+      filtered_replies AS (
+        SELECT
+          inbound_messages.id,
+          inbound_messages.received_at
+        FROM inbound_messages
+        INNER JOIN inbox_threads ON inbox_threads.id = inbound_messages.thread_id
+        INNER JOIN outreach_drafts ON outreach_drafts.id = inbox_threads.draft_id
+        INNER JOIN lead_candidates ON lead_candidates.id = outreach_drafts.lead_id
+        INNER JOIN lead_tasks ON lead_tasks.id = lead_candidates.task_id
+        WHERE lead_tasks.user_id = ${userId}
+        ${replyDateFilter}
+      ),
+      filtered_open_events AS (
+        SELECT
+          engagement_events.id,
+          engagement_events.send_log_id,
+          engagement_events.occurred_at
+        FROM engagement_events
+        INNER JOIN send_logs ON send_logs.id = engagement_events.send_log_id
+        INNER JOIN outreach_drafts ON outreach_drafts.id = send_logs.draft_id
+        INNER JOIN lead_candidates ON lead_candidates.id = outreach_drafts.lead_id
+        INNER JOIN lead_tasks ON lead_tasks.id = lead_candidates.task_id
+        WHERE lead_tasks.user_id = ${userId}
+          AND engagement_events.event_type = 'open'
+        ${openDateFilter}
+      ),
+      filtered_crm_leads AS (
+        SELECT
+          crm_leads.id,
+          crm_leads.tags,
+          crm_leads.updated_at,
+          COALESCE(count(lead_contacts.id) FILTER (WHERE lead_contacts.type = 'favorite_person'), 0)::int AS favorite_person_count
+        FROM crm_leads
+        INNER JOIN lead_candidates ON lead_candidates.id = crm_leads.lead_id
+        INNER JOIN lead_tasks ON lead_tasks.id = lead_candidates.task_id
+        LEFT JOIN lead_contacts ON lead_contacts.lead_id = lead_candidates.id
+        WHERE lead_tasks.user_id = ${userId}
+        ${crmDateFilter}
+        GROUP BY crm_leads.id, crm_leads.tags, crm_leads.updated_at
+      )
+      SELECT
+        COALESCE(
+          (SELECT jsonb_agg(jsonb_build_object(
+            'id', id,
+            'query', query,
+            'operatorSource', operator_source,
+            'operatorName', operator_name,
+            'keywordGroups', NULL,
+            'createdAt', created_at
+          )) FROM filtered_search_queries),
+          '[]'::jsonb
+        ) AS "searchQueries",
+        COALESCE(
+          (SELECT jsonb_agg(jsonb_build_object(
+            'id', id,
+            'status', status,
+            'channel', channel,
+            'sentAt', sent_at,
+            'createdAt', created_at
+          )) FROM filtered_send_logs),
+          '[]'::jsonb
+        ) AS "sendLogs",
+        COALESCE(
+          (SELECT jsonb_agg(jsonb_build_object(
+            'id', id,
+            'receivedAt', received_at
+          )) FROM filtered_replies),
+          '[]'::jsonb
+        ) AS "replies",
+        COALESCE(
+          (SELECT jsonb_agg(jsonb_build_object(
+            'id', id,
+            'sendLogId', send_log_id,
+            'occurredAt', occurred_at
+          )) FROM filtered_open_events),
+          '[]'::jsonb
+        ) AS "openEvents",
+        COALESCE(
+          (SELECT jsonb_agg(jsonb_build_object(
+            'id', id,
+            'tags', tags,
+            'updatedAt', updated_at,
+            'favoritePersonCount', favorite_person_count
+          )) FROM filtered_crm_leads),
+          '[]'::jsonb
+        ) AS "crmLeads"
+    `);
+
+    const searchQueries = analyticsRows<AnalyticsSearchQueryRow>(analyticsPayload?.searchQueries).map((query) => ({
+      ...query,
+      createdAt: toDate(query.createdAt)
+    }));
+    const sendLogs = analyticsRows<AnalyticsSendLogRow>(analyticsPayload?.sendLogs).map((log) => ({
+      ...log,
+      sentAt: log.sentAt ? toDate(log.sentAt) : null,
+      createdAt: toDate(log.createdAt)
+    }));
+    const replies = analyticsRows<AnalyticsReplyRow>(analyticsPayload?.replies).map((reply) => ({
+      ...reply,
+      receivedAt: toDate(reply.receivedAt)
+    }));
+    const openEvents = analyticsRows<AnalyticsOpenEventRow>(analyticsPayload?.openEvents).map((event) => ({
+      ...event,
+      occurredAt: toDate(event.occurredAt)
+    }));
+    const crmLeads = analyticsRows<AnalyticsCrmLeadRow>(analyticsPayload?.crmLeads).map((lead) => ({
+      ...lead,
+      updatedAt: toDate(lead.updatedAt)
+    }));
 
     const emailLogs = sendLogs.filter((log) => log.channel === "email");
     const sentEmailLogs = emailLogs.filter((log) => log.sentAt || ["sent", "delivered"].includes(log.status));
     const openedSendLogIds = new Set(openEvents.map((event) => event.sendLogId));
     const openedEmailCount = sentEmailLogs.filter((log) => openedSendLogIds.has(log.id)).length;
     const favoriteCompanies = crmLeads.filter((lead) => hasFavoriteTag(normalizeTags(lead.tags))).length;
-    const favoritePeople = crmLeads.reduce(
-      (total, lead) => total + lead.lead.contacts.filter((contact) => contact.type === "favorite_person").length,
-      0
-    );
+    const favoritePeople = crmLeads.reduce((total, lead) => total + toNumberCount(lead.favoritePersonCount), 0);
 
     return {
       range,
@@ -506,6 +596,35 @@ function hasFavoriteTag(tags: string[]) {
 
 function percentage(part: number, total: number) {
   return total > 0 ? Math.round((part / total) * 100) : 0;
+}
+
+function analyticsRows<T>(value: unknown): T[] {
+  if (Array.isArray(value)) {
+    return value as T[];
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return Array.isArray(parsed) ? (parsed as T[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function toDate(value: Date | string) {
+  return value instanceof Date ? value : new Date(value);
+}
+
+function toNumberCount(value: number | bigint | null) {
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  return value ?? 0;
 }
 
 function buildSearchPreference(

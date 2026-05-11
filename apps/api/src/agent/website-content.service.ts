@@ -43,8 +43,9 @@ export type ProfileSiteEvidence = {
 
 type FetchLike = typeof fetch;
 
-const productCatalogPageLimit = 20;
-const productCatalogProductLimit = 240;
+const productCatalogPageLimit = 8;
+const productCatalogProductLimit = 160;
+const profileFetchTimeoutMs = 6000;
 
 @Injectable()
 export class WebsiteContentService {
@@ -153,7 +154,7 @@ export class WebsiteContentService {
 
   private async fetchWithTimeout(url: string) {
     const controller = new AbortController();
-    const timeoutMs = 12000;
+    const timeoutMs = profileFetchTimeoutMs;
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {

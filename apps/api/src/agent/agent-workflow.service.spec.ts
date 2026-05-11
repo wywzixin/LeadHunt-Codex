@@ -3,6 +3,17 @@ import { AgentWorkflowService } from "./agent-workflow.service.js";
 
 function createPrismaMock() {
   return {
+    $queryRaw: vi.fn().mockResolvedValue([
+      {
+        id: "task-1",
+        status: "running",
+        created_at: new Date("2026-05-03T08:00:00.000Z"),
+        updated_at: new Date("2026-05-03T08:01:00.000Z"),
+        prompt: "Find UAE telecom distributors and stockists",
+        lead_count: 12,
+        query_count: 15
+      }
+    ]),
     productProfile: {
       findUnique: vi.fn().mockResolvedValue({
         websiteUrl: "https://telecorenet.com/",
@@ -21,6 +32,7 @@ function createPrismaMock() {
     },
     leadTask: {
       create: vi.fn().mockResolvedValue({ id: "task-1", status: "running" }),
+      findMany: vi.fn(),
       findFirst: vi.fn().mockResolvedValue({
         id: "task-1",
         userId: "user-1",
@@ -190,6 +202,30 @@ function createWebsiteContentMock() {
 }
 
 describe("AgentWorkflowService", () => {
+  it("lists task history with candidate and query counts", async () => {
+    const prisma = createPrismaMock();
+    const service = new AgentWorkflowService(prisma as any);
+
+    const result = await service.listTasksForUser("user-1", { limit: 30 });
+
+    expect(result).toEqual({
+      tasks: [
+        {
+          id: "task-1",
+          status: "running",
+          createdAt: new Date("2026-05-03T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-03T08:01:00.000Z"),
+          prompt: "Find UAE telecom distributors and stockists",
+          title: "Find UAE telecom distributors and st",
+          leadCount: 12,
+          queryCount: 15
+        }
+      ]
+    });
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.leadTask.findMany).not.toHaveBeenCalled();
+  });
+
   it("creates a task and writes the full agent_steps timeline", async () => {
     const prisma = createPrismaMock();
     const service = new AgentWorkflowService(prisma as any);

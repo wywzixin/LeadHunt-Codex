@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  createLeadHuntWorkflowGraph,
   createInitialWorkflowSteps,
+  createInitialWorkflowState,
   leadHuntWorkflowNodes,
   markWorkflowNodeFailed,
   resumeWorkflow,
@@ -54,5 +56,54 @@ describe("LeadHunt LangGraph workflow", () => {
     expect(failed.steps.find((step) => step.nodeName === "brave_search")?.status).toBe("failed");
     expect(retrying.status).toBe("running");
     expect(retrying.steps.find((step) => step.nodeName === "brave_search")?.status).toBe("running");
+  });
+
+  it("runs injected handlers from a chosen start node", async () => {
+    const calls: string[] = [];
+    const graph = createLeadHuntWorkflowGraph({
+      startAt: "generate_email",
+      handlers: {
+        generate_email: () => {
+          calls.push("generate_email");
+          return {
+            currentNode: "generate_email",
+            steps: [
+              {
+                nodeName: "generate_email",
+                order: 11,
+                status: "completed",
+                output: { draftCount: 1 }
+              }
+            ]
+          };
+        },
+        wait_email_confirmation: () => {
+          calls.push("wait_email_confirmation");
+          return {
+            status: "paused",
+            currentNode: "wait_email_confirmation",
+            pausedAt: "wait_email_confirmation",
+            steps: [
+              {
+                nodeName: "wait_email_confirmation",
+                order: 12,
+                status: "waiting",
+                output: { waitingForHuman: true }
+              }
+            ]
+          };
+        }
+      }
+    });
+
+    const state = (await graph.invoke(createInitialWorkflowState("task-1") as Record<string, unknown>)) as any;
+
+    expect(calls).toEqual(["generate_email", "wait_email_confirmation"]);
+    expect(state.status).toBe("paused");
+    expect(state.pausedAt).toBe("wait_email_confirmation");
+    expect(state.steps.find((step: { nodeName: string }) => step.nodeName === "generate_email")?.status).toBe("completed");
+    expect(state.steps.find((step: { nodeName: string }) => step.nodeName === "wait_email_confirmation")?.status).toBe(
+      "waiting"
+    );
   });
 });

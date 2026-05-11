@@ -1,14 +1,20 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import {
   createKeywordGroups,
+  createInitialWorkflowState,
   generateSearchQueries,
   countryToSearchApiCode,
+  leadHuntWorkflowNodes,
   type KeywordGroups,
   type LeadHuntWorkflowNode,
+  type LeadHuntWorkflowHandlers,
+  type LeadHuntWorkflowState,
   type WorkflowStepStatus,
+  type WorkflowStep,
+  createLeadHuntWorkflowGraph,
   createInitialWorkflowSteps
 } from "@leadhunt/agent";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { LeadQualificationService, type IcpScoringCriteria } from "../leads/lead-qualification.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { BraveSearchService } from "../search/brave-search.service.js";
@@ -22,6 +28,55 @@ import {
 type CreateTaskInput = {
   prompt: string;
   targetCount?: number;
+};
+
+type LeadTaskListRow = {
+  id: string;
+  status: string;
+  created_at: Date;
+  updated_at: Date;
+  prompt: string | null;
+  lead_count: number | bigint | null;
+  query_count: number | bigint | null;
+};
+
+type PlannedSearchQuery = {
+  provider: string;
+  operatorSource?: string | null;
+  executionStatus?: string | null;
+  operatorName?: string | null;
+  strategyTemplate?: string | null;
+  query: string;
+  keywordGroups: KeywordGroups;
+  country?: string | null;
+  effectivenessScore?: number | null;
+  templateId?: string | null;
+};
+
+type TaskExecutionContext = {
+  productProfile: Record<string, unknown> | null;
+  customerProfile: Record<string, unknown> | null;
+  productProfileAnalysis: Record<string, unknown>;
+  customerProfileAnalysis: Record<string, unknown>;
+  siteEvidence: Record<string, unknown>;
+  profileSignals: Record<string, unknown>;
+  executionPlan: Array<Record<string, unknown>>;
+  keywordGroups: KeywordGroups;
+  searchQueries: PlannedSearchQuery[];
+};
+
+type SearchExecutionResult = {
+  ok: boolean;
+  executedQueries: number;
+  successfulQueries?: number;
+  failedQueries?: number;
+  resultCount: number;
+  createdCandidates: number;
+  skippedCandidates: number;
+  fallback?: boolean;
+  errors?: Array<{ queryId: string; message: string }>;
+  hasMore?: boolean;
+  remainingQueries?: number;
 };
 
 const DEFAULT_SYNC_SEARCH_QUERY_LIMIT = 15;
@@ -41,83 +96,241 @@ export class AgentWorkflowService {
   ) {}
 
   async createTaskWithTimeline(userId: string, input: CreateTaskInput) {
-    const context = await this.buildTaskContext(userId, input);
+    if (shouldPlanTaskInline()) {
+      const context = await this.buildTaskContext(userId, input);
+      const task = await this.prisma.leadTask.create({
+        data: {
+          userId,
+          status: "running",
+          targetCount: input.targetCount ?? 50,
+          inputPayload: {
+            ...input,
+            ...context
+          }
+        }
+      });
+      const steps = await this.createTimeline(task.id);
+      const workflow = await this.runSemiManagedWorkflowToSearchPlan(task.id, input, context);
+
+      return { task, steps, searchQueries: context.searchQueries, workflow };
+    }
+
     const task = await this.prisma.leadTask.create({
       data: {
         userId,
         status: "running",
         targetCount: input.targetCount ?? 50,
+        inputPayload: input
+      }
+    });
+    const steps = await this.createTimeline(task.id);
+
+    if (!shouldPlanTaskInline()) {
+      void this.planTaskSearchQueries(userId, task.id, input).catch((error) =>
+        this.markPlanningWorkflowFailed(task.id, error)
+      );
+
+      return {
+        task,
+        steps,
+        searchQueries: [],
+        workflow: createInitialWorkflowState(task.id)
+      };
+    }
+
+    return {
+      task,
+      steps,
+      searchQueries: [],
+      workflow: createInitialWorkflowState(task.id)
+    };
+  }
+
+  private async planTaskSearchQueries(userId: string, taskId: string, input: CreateTaskInput) {
+    const context = await this.buildTaskContext(userId, input);
+    await this.prisma.leadTask.update({
+      where: { id: taskId },
+      data: {
+        status: "running",
         inputPayload: {
           ...input,
           ...context
         }
       }
     });
-    const steps = await this.createTimeline(task.id);
-    await this.prisma.searchQuery.createMany({
-      data: context.searchQueries.map((query) => ({
-        taskId: task.id,
-        provider: query.provider,
-        operatorSource: query.operatorSource,
-        executionStatus: "pending",
-        operatorName: query.operatorName,
-        strategyTemplate: query.strategyTemplate,
-        query: query.query,
-        keywordGroups: query.keywordGroups,
-        country: query.country,
-        effectivenessScore: query.effectivenessScore
-      }))
-    });
+    const workflow = await this.runSemiManagedWorkflowToSearchPlan(taskId, input, context);
 
-    return { task, steps, searchQueries: context.searchQueries };
+    return { context, workflow };
+  }
+
+  private async markPlanningWorkflowFailed(taskId: string, error: unknown) {
+    const message = searchErrorMessage(error);
+    await Promise.all([
+      this.markStepFailed(taskId, "plan_search_queries", message),
+      this.prisma.leadTask.update({
+        where: { id: taskId },
+        data: { status: "failed" }
+      })
+    ]);
+  }
+
+  private async runSemiManagedWorkflowToSearchPlan(
+    taskId: string,
+    input: CreateTaskInput,
+    context: TaskExecutionContext
+  ) {
+    const handlers: LeadHuntWorkflowHandlers = {
+      load_task: () =>
+        this.completeWorkflowStep(taskId, "load_task", {
+          prompt: input.prompt,
+          targetCount: input.targetCount ?? 50,
+          hasProductProfile: Boolean(context.productProfile),
+          hasCustomerProfile: Boolean(context.customerProfile)
+        }),
+      analyze_product_profile: () =>
+        this.completeWorkflowStep(taskId, "analyze_product_profile", context.productProfileAnalysis),
+      analyze_customer_profile: () =>
+        this.completeWorkflowStep(taskId, "analyze_customer_profile", context.customerProfileAnalysis),
+      expand_keywords: () =>
+        this.completeWorkflowStep(taskId, "expand_keywords", {
+          keywordGroups: context.keywordGroups,
+          profileSignals: context.profileSignals
+        }),
+      plan_search_queries: () =>
+        this.completeWorkflowStep(taskId, "plan_search_queries", async () => {
+          const existingCount = await this.prisma.searchQuery.count({ where: { taskId } });
+          if (existingCount === 0) {
+            await this.prisma.searchQuery.createMany({
+              data: context.searchQueries.map((query) => ({
+                taskId,
+                provider: query.provider,
+                operatorSource: query.operatorSource,
+                executionStatus: "pending",
+                operatorName: query.operatorName,
+                strategyTemplate: query.strategyTemplate,
+                query: query.query,
+                keywordGroups: query.keywordGroups,
+                country: query.country,
+                effectivenessScore: query.effectivenessScore
+              }))
+            });
+          }
+
+          return {
+            queryCount: existingCount || context.searchQueries.length,
+            createdCount: existingCount === 0 ? context.searchQueries.length : 0
+          };
+        })
+    };
+    const workflow = (await createLeadHuntWorkflowGraph({
+      handlers,
+      stopAfter: "plan_search_queries"
+    }).invoke(
+      createInitialWorkflowState(taskId) as Record<string, unknown>
+    )) as LeadHuntWorkflowState;
+
+    await this.updateTaskStatusFromWorkflow(taskId, workflow);
+
+    return workflow;
+  }
+
+  private async runApprovalWorkflowToEmailConfirmation(
+    taskId: string,
+    selected: Array<{
+      id: string;
+      companyName: string;
+      website: string | null;
+      country: string | null;
+      contacts: Array<{ type: string; value: string }>;
+      icpScore: { score: number; grade: string } | null;
+    }>,
+    approvedLeadIds: string[]
+  ) {
+    let draftCount = 0;
+    const handlers: LeadHuntWorkflowHandlers = {
+      generate_email: () =>
+        this.completeWorkflowStep(taskId, "generate_email", async () => {
+          const existingDrafts = await this.prisma.outreachDraft.findMany({
+            where: {
+              leadId: { in: approvedLeadIds }
+            },
+            select: { leadId: true }
+          });
+          const existingDraftLeadIds = new Set(existingDrafts.map((draft) => draft.leadId));
+          const drafts = selected
+            .filter((candidate) => !existingDraftLeadIds.has(candidate.id))
+            .map((candidate) => buildOutreachDraft(candidate));
+
+          if (drafts.length) {
+            await this.prisma.outreachDraft.createMany({
+              data: drafts
+            });
+          }
+
+          draftCount = drafts.length;
+
+          return {
+            draftCount,
+            approvedLeadIds
+          };
+        }),
+      wait_email_confirmation: () => this.pauseWorkflowAt(taskId, "wait_email_confirmation")
+    };
+    const workflow = (await createLeadHuntWorkflowGraph({
+      startAt: "generate_email",
+      handlers
+    }).invoke(createInitialWorkflowState(taskId) as Record<string, unknown>)) as LeadHuntWorkflowState;
+
+    await this.updateTaskStatusFromWorkflow(taskId, workflow);
+
+    return { workflow, draftCount };
   }
 
   async listTasksForUser(userId: string, options: { search?: string; limit?: number } = {}) {
     const limit = Math.min(Math.max(options.limit ?? 30, 1), 100);
     const search = options.search?.trim();
+    const searchClause = search
+      ? Prisma.sql`AND COALESCE(lead_tasks.input_payload->>'prompt', '') ILIKE ${`%${escapeLikePattern(search)}%`} ESCAPE ${"\\"}`
+      : Prisma.empty;
 
-    const tasks = await this.prisma.leadTask.findMany({
-      where: {
-        userId,
-        ...(search
-          ? {
-              inputPayload: {
-                path: ["prompt"],
-                string_contains: search
-              }
-            }
-          : {})
-      },
-      orderBy: { createdAt: "desc" },
-      take: limit,
-      select: {
-        id: true,
-        status: true,
-        createdAt: true,
-        updatedAt: true,
-        inputPayload: true,
-        _count: {
-          select: {
-            leadCandidates: true,
-            searchQueries: true
-          }
-        }
-      }
-    });
+    const tasks = await this.prisma.$queryRaw<LeadTaskListRow[]>(Prisma.sql`
+      SELECT
+        lead_tasks.id,
+        lead_tasks.status,
+        lead_tasks.created_at,
+        lead_tasks.updated_at,
+        lead_tasks.input_payload->>'prompt' AS prompt,
+        COALESCE(lead_counts.lead_count, 0)::int AS lead_count,
+        COALESCE(query_counts.query_count, 0)::int AS query_count
+      FROM lead_tasks
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS lead_count
+        FROM lead_candidates
+        WHERE lead_candidates.task_id = lead_tasks.id
+      ) lead_counts ON true
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS query_count
+        FROM search_queries
+        WHERE search_queries.task_id = lead_tasks.id
+      ) query_counts ON true
+      WHERE lead_tasks.user_id = ${userId}
+      ${searchClause}
+      ORDER BY lead_tasks.created_at DESC
+      LIMIT ${limit}
+    `);
 
     return {
       tasks: tasks.map((task) => {
-        const payload = task.inputPayload as { prompt?: unknown } | null;
-        const prompt = typeof payload?.prompt === "string" ? payload.prompt : "";
+        const prompt = task.prompt ?? "";
         return {
           id: task.id,
           status: task.status,
-          createdAt: task.createdAt,
-          updatedAt: task.updatedAt,
+          createdAt: task.created_at,
+          updatedAt: task.updated_at,
           prompt,
           title: prompt ? prompt.slice(0, 36) : "未命名任务",
-          leadCount: task._count.leadCandidates,
-          queryCount: task._count.searchQueries
+          leadCount: toNumberCount(task.lead_count),
+          queryCount: toNumberCount(task.query_count)
         };
       })
     };
@@ -209,6 +422,55 @@ export class AgentWorkflowService {
   }
 
   async executeBraveSearchForTask(userId: string, taskId: string, input: { limit?: number } = {}) {
+    let searchResult: SearchExecutionResult | null = null;
+    const handlers: LeadHuntWorkflowHandlers = {
+      brave_search: async () => {
+        searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, input);
+
+        if (!searchResult.ok) {
+          return this.workflowFailedState(
+            "brave_search",
+            searchResult.errors?.[0]?.message ?? "Brave search failed"
+          );
+        }
+
+        return this.workflowStepState("brave_search", "completed", { ...searchResult });
+      },
+      normalize_leads: () =>
+        this.completeOrReflectSearchStep(taskId, "normalize_leads", searchResult, {
+          createdCandidates: searchResult?.createdCandidates ?? 0,
+          skippedCandidates: searchResult?.skippedCandidates ?? 0
+        }),
+      extract_contacts: () =>
+        this.completeOrReflectSearchStep(taskId, "extract_contacts", searchResult, {
+          createdCandidates: searchResult?.createdCandidates ?? 0
+        }),
+      score_icp: () =>
+        this.completeOrReflectSearchStep(taskId, "score_icp", searchResult, {
+          createdCandidates: searchResult?.createdCandidates ?? 0
+        }),
+      human_approval: () => this.pauseWorkflowAt(taskId, "human_approval")
+    };
+    const workflow = (await createLeadHuntWorkflowGraph({
+      startAt: "brave_search",
+      handlers
+    }).invoke(createInitialWorkflowState(taskId) as Record<string, unknown>)) as LeadHuntWorkflowState;
+
+    await this.updateTaskStatusFromWorkflow(taskId, workflow);
+
+    return searchResult ?? {
+      ok: false,
+      executedQueries: 0,
+      resultCount: 0,
+      createdCandidates: 0,
+      skippedCandidates: 0,
+      errors: [{ queryId: taskId, message: workflow.error ?? "Search workflow did not run" }],
+      hasMore: false,
+      remainingQueries: 0
+    };
+  }
+
+  private async executeBraveSearchBatchForTask(userId: string, taskId: string, input: { limit?: number } = {}) {
     if (!this.braveSearchService || !this.leadQualificationService) {
       throw new BadRequestException("Search services are not configured");
     }
@@ -230,6 +492,15 @@ export class AgentWorkflowService {
     }
 
     if (!task.searchQueries.length) {
+      await this.markStepCompleted(taskId, "brave_search", {
+        executedQueries: 0,
+        resultCount: 0,
+        createdCandidates: 0,
+        skippedCandidates: 0,
+        hasMore: false,
+        remainingQueries: 0
+      });
+
       return {
         ok: true,
         executedQueries: 0,
@@ -503,40 +774,19 @@ export class AgentWorkflowService {
       data: { status: "approved" }
     });
 
-    const existingDrafts = await this.prisma.outreachDraft.findMany({
-      where: {
-        leadId: { in: approvedLeadIds }
-      },
-      select: { leadId: true }
-    });
-    const existingDraftLeadIds = new Set(existingDrafts.map((draft) => draft.leadId));
-    const drafts = selected
-      .filter((candidate) => !existingDraftLeadIds.has(candidate.id))
-      .map((candidate) => buildOutreachDraft(candidate));
-
-    if (drafts.length) {
-      await this.prisma.outreachDraft.createMany({
-        data: drafts
-      });
-    }
-
     await this.markStepCompleted(taskId, "human_approval", {
       approved: true,
       approvedBy: userId,
       approvedLeadIds,
       approvedCount: approvedLeadIds.length
     });
-    await this.markStepCompleted(taskId, "generate_email", {
-      draftCount: drafts.length,
-      approvedLeadIds
-    });
-    await this.pauseAtHumanApproval(taskId, "wait_email_confirmation");
+    const { draftCount } = await this.runApprovalWorkflowToEmailConfirmation(taskId, selected, approvedLeadIds);
 
     return {
       ok: true,
       approvedLeadIds,
       approvedCount: approvedLeadIds.length,
-      draftCount: drafts.length
+      draftCount
     };
   }
 
@@ -590,6 +840,105 @@ export class AgentWorkflowService {
       startedAt: new Date(),
       endedAt: null,
       error: null
+    });
+  }
+
+  private async completeWorkflowStep(
+    taskId: string,
+    nodeName: LeadHuntWorkflowNode,
+    output: Record<string, unknown> | (() => Record<string, unknown> | Promise<Record<string, unknown>>)
+  ): Promise<Partial<LeadHuntWorkflowState>> {
+    await this.markStepRunning(taskId, nodeName);
+
+    try {
+      const resolvedOutput = typeof output === "function" ? await output() : output;
+      await this.markStepCompleted(taskId, nodeName, resolvedOutput);
+      return this.workflowStepState(nodeName, "completed", resolvedOutput);
+    } catch (error) {
+      const message = searchErrorMessage(error);
+      await this.markStepFailed(taskId, nodeName, message);
+      return this.workflowFailedState(nodeName, message);
+    }
+  }
+
+  private async completeOrReflectSearchStep(
+    taskId: string,
+    nodeName: Extract<LeadHuntWorkflowNode, "normalize_leads" | "extract_contacts" | "score_icp">,
+    searchResult: SearchExecutionResult | null,
+    output: Record<string, unknown>
+  ) {
+    if (searchResult) {
+      return this.workflowStepState(nodeName, "completed", output);
+    }
+
+    return this.completeWorkflowStep(taskId, nodeName, {
+      skipped: true,
+      reason: "Search did not run"
+    });
+  }
+
+  private async pauseWorkflowAt(
+    taskId: string,
+    nodeName: Extract<LeadHuntWorkflowNode, "human_approval" | "wait_email_confirmation">
+  ) {
+    await this.pauseAtHumanApproval(taskId, nodeName);
+
+    return {
+      status: "paused" as const,
+      currentNode: nodeName,
+      pausedAt: nodeName,
+      steps: [this.workflowStep(nodeName, "waiting", { waitingForHuman: true })]
+    };
+  }
+
+  private workflowStepState(
+    nodeName: LeadHuntWorkflowNode,
+    status: WorkflowStepStatus,
+    output: Record<string, unknown> = {}
+  ): Partial<LeadHuntWorkflowState> {
+    return {
+      currentNode: nodeName,
+      steps: [this.workflowStep(nodeName, status, output)]
+    };
+  }
+
+  private workflowFailedState(nodeName: LeadHuntWorkflowNode, error: string): Partial<LeadHuntWorkflowState> {
+    return {
+      status: "failed",
+      currentNode: nodeName,
+      error,
+      steps: [
+        {
+          nodeName,
+          order: workflowNodeOrder(nodeName),
+          status: "failed",
+          error
+        }
+      ]
+    };
+  }
+
+  private workflowStep(
+    nodeName: LeadHuntWorkflowNode,
+    status: WorkflowStepStatus,
+    output?: Record<string, unknown>
+  ): WorkflowStep {
+    return {
+      nodeName,
+      order: workflowNodeOrder(nodeName),
+      status,
+      ...(output ? { output } : {})
+    };
+  }
+
+  private async updateTaskStatusFromWorkflow(taskId: string, workflow: LeadHuntWorkflowState) {
+    if (workflow.status !== "paused" && workflow.status !== "failed" && workflow.status !== "completed") {
+      return;
+    }
+
+    await this.prisma.leadTask.update({
+      where: { id: taskId },
+      data: { status: workflow.status }
     });
   }
 
@@ -1125,6 +1474,26 @@ function normalizeFallbackMarket(country: string | null): FallbackMarket {
   }
 
   return "UAE";
+}
+
+function escapeLikePattern(value: string) {
+  return value.replace(/[\\%_]/g, "\\$&");
+}
+
+function toNumberCount(value: number | bigint | null) {
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  return value ?? 0;
+}
+
+function workflowNodeOrder(nodeName: LeadHuntWorkflowNode) {
+  return leadHuntWorkflowNodes.indexOf(nodeName) + 1;
+}
+
+function shouldPlanTaskInline() {
+  return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 }
 
 type FallbackMarket = "UAE" | "SAUDI";

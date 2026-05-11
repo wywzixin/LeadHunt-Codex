@@ -500,8 +500,19 @@ export function AiWorkerClient() {
         method: "POST",
         body: JSON.stringify({ prompt: nextPrompt, targetCount: 50 })
       });
-      const task = normalizeCreatedTask(payload);
+      let task = normalizeCreatedTask(payload);
       setCurrentTask(task);
+      if (!(task.searchQueries?.length ?? 0)) {
+        setStatus("任务已创建，正在后台读取画像并生成搜索指令...");
+        task = await waitForSearchPlan(task.id);
+      }
+
+      const queryCount = task.searchQueries?.length ?? 0;
+      if (!queryCount) {
+        setStatus("任务已创建，搜索指令仍在生成中，稍后可继续执行搜索。");
+        return;
+      }
+
       setStatus(`任务已创建，已生成 ${task.searchQueries?.length ?? 0} 条搜索指令，开始执行首轮搜索。`);
       void loadTaskHistory(taskSearch);
       await runTaskSearch(task.id, { minimumRawResults: 20 });
@@ -597,6 +608,24 @@ export function AiWorkerClient() {
     const refreshed = await apiRequest<LeadTask>(`/api/lead-tasks/${taskId}`);
     setCurrentTask(refreshed);
     return refreshed;
+  }
+
+  async function waitForSearchPlan(taskId: string) {
+    let latest = await refreshTask(taskId);
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const planStep = latest.agentSteps?.find((step) => step.nodeName === "plan_search_queries");
+      if (latest.searchQueries?.length) {
+        return latest;
+      }
+      if (planStep?.status === "failed") {
+        throw new Error(planStep.error ?? "Search plan failed");
+      }
+
+      await wait(1500);
+      latest = await refreshTask(taskId);
+    }
+
+    return latest;
   }
 
   async function approveSelectedLead() {
@@ -1815,6 +1844,10 @@ function resolveApiUrl(url: string) {
   }
 
   return url;
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function readJson(response: Response) {
