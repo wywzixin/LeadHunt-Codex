@@ -1,4 +1,11 @@
-import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import {
+  Annotation,
+  END,
+  START,
+  StateGraph,
+  isGraphInterrupt,
+  type BaseCheckpointSaver
+} from "@langchain/langgraph";
 
 export const leadHuntWorkflowNodes = [
   "load_task",
@@ -57,6 +64,7 @@ export type LeadHuntWorkflowGraphOptions = {
   handlers?: LeadHuntWorkflowHandlers;
   startAt?: LeadHuntWorkflowNode;
   stopAfter?: LeadHuntWorkflowNode;
+  checkpointer?: BaseCheckpointSaver | false;
 };
 
 const LeadHuntState = Annotation.Root({
@@ -143,7 +151,9 @@ export function createLeadHuntWorkflowGraph(options: LeadHuntWorkflowGraphOption
   }
   graph.addEdge("task_summary", END);
 
-  return graph.compile();
+  return graph.compile({
+    checkpointer: options.checkpointer
+  });
 }
 
 export async function runEmptyLeadHuntWorkflow(taskId: string) {
@@ -219,6 +229,10 @@ function createWorkflowNode(nodeName: LeadHuntWorkflowNode, handler?: LeadHuntWo
     try {
       return await handler(state);
     } catch (error) {
+      if (isGraphInterrupt(error)) {
+        throw error;
+      }
+
       return markWorkflowNodeFailed(state, nodeName, errorMessage(error));
     }
   };

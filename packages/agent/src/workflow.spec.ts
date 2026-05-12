@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  Command,
+  INTERRUPT,
+  MemorySaver,
   createLeadHuntWorkflowGraph,
   createInitialWorkflowSteps,
   createInitialWorkflowState,
+  interrupt,
   leadHuntWorkflowNodes,
   markWorkflowNodeFailed,
   resumeWorkflow,
@@ -105,5 +109,39 @@ describe("LeadHunt LangGraph workflow", () => {
     expect(state.steps.find((step: { nodeName: string }) => step.nodeName === "wait_email_confirmation")?.status).toBe(
       "waiting"
     );
+  });
+
+  it("lets native LangGraph interrupts pause and resume with a checkpointer", async () => {
+    const graph = createLeadHuntWorkflowGraph({
+      startAt: "human_approval",
+      checkpointer: new MemorySaver(),
+      handlers: {
+        human_approval: () => {
+          const decision = interrupt({ type: "lead_review", taskId: "task-1" }) as { approved: boolean };
+
+          return {
+            currentNode: "human_approval",
+            steps: [
+              {
+                nodeName: "human_approval",
+                order: 10,
+                status: "completed",
+                output: decision
+              }
+            ]
+          };
+        }
+      },
+      stopAfter: "human_approval"
+    });
+    const config = { configurable: { thread_id: "task-1" } };
+
+    const interrupted = (await graph.invoke(createInitialWorkflowState("task-1") as Record<string, unknown>, config)) as any;
+    expect(interrupted[INTERRUPT][0].value).toEqual({ type: "lead_review", taskId: "task-1" });
+
+    const resumed = (await graph.invoke(new Command({ resume: { approved: true } }), config)) as any;
+    expect(resumed.steps.find((step: { nodeName: string }) => step.nodeName === "human_approval")?.output).toEqual({
+      approved: true
+    });
   });
 });

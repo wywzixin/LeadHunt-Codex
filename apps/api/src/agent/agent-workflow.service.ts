@@ -1,5 +1,8 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import {
+  Command,
+  INTERRUPT,
+  MemorySaver,
   createKeywordGroups,
   createInitialWorkflowState,
   generateSearchQueries,
@@ -12,7 +15,8 @@ import {
   type WorkflowStepStatus,
   type WorkflowStep,
   createLeadHuntWorkflowGraph,
-  createInitialWorkflowSteps
+  createInitialWorkflowSteps,
+  interrupt
 } from "@leadhunt/agent";
 import { Prisma } from "@prisma/client";
 import { LeadQualificationService, type IcpScoringCriteria } from "../leads/lead-qualification.service.js";
@@ -79,12 +83,37 @@ type SearchExecutionResult = {
   remainingQueries?: number;
 };
 
+type CandidateApprovalResult = {
+  selected: Array<{
+    id: string;
+    companyName: string;
+    website: string | null;
+    country: string | null;
+    contacts: Array<{ type: string; value: string }>;
+    icpScore: { score: number; grade: string } | null;
+  }>;
+  approvedLeadIds: string[];
+  approvedCount: number;
+};
+
+type LeadReviewResume = {
+  leadIds?: string[];
+  approvedBy?: string;
+};
+
+type EmailReviewResume = {
+  approved?: boolean;
+  action?: "send" | "save_draft" | "cancel";
+};
+
 const DEFAULT_SYNC_SEARCH_QUERY_LIMIT = 15;
 const MAX_SYNC_SEARCH_QUERY_LIMIT = 15;
 const MAX_CANDIDATE_RESULTS_PER_QUERY = 20;
 
 @Injectable()
 export class AgentWorkflowService {
+  private readonly graphCheckpointer = new MemorySaver();
+
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Optional()
@@ -224,12 +253,15 @@ export class AgentWorkflowService {
     };
     const workflow = (await createLeadHuntWorkflowGraph({
       handlers,
-      stopAfter: "plan_search_queries"
+      stopAfter: "plan_search_queries",
+      checkpointer: this.graphCheckpointer
     }).invoke(
-      createInitialWorkflowState(taskId) as Record<string, unknown>
+      createInitialWorkflowState(taskId) as Record<string, unknown>,
+      this.workflowConfig(taskId, "planning")
     )) as LeadHuntWorkflowState;
 
     await this.updateTaskStatusFromWorkflow(taskId, workflow);
+    await this.persistWorkflowSnapshot(taskId, workflow, "planning");
 
     return workflow;
   }
@@ -273,15 +305,34 @@ export class AgentWorkflowService {
             draftCount,
             approvedLeadIds
           };
-        }),
-      wait_email_confirmation: () => this.pauseWorkflowAt(taskId, "wait_email_confirmation")
+      }),
+      wait_email_confirmation: async () => {
+        const resume = await this.interruptWorkflowAt<EmailReviewResume>(taskId, "wait_email_confirmation", {
+          type: "email_confirmation",
+          taskId,
+          draftCount,
+          message: "Confirm the outreach email before sending or saving it."
+        });
+        const output = {
+          approved: resume.approved ?? resume.action !== "cancel",
+          action: resume.action ?? "save_draft"
+        };
+        await this.markStepCompleted(taskId, "wait_email_confirmation", output);
+
+        return this.workflowStepState("wait_email_confirmation", "completed", output);
+      }
     };
     const workflow = (await createLeadHuntWorkflowGraph({
       startAt: "generate_email",
-      handlers
-    }).invoke(createInitialWorkflowState(taskId) as Record<string, unknown>)) as LeadHuntWorkflowState;
+      handlers,
+      checkpointer: this.graphCheckpointer
+    }).invoke(
+      createInitialWorkflowState(taskId) as Record<string, unknown>,
+      this.workflowConfig(taskId, "approval-to-email")
+    )) as LeadHuntWorkflowState;
 
     await this.updateTaskStatusFromWorkflow(taskId, workflow);
+    await this.persistWorkflowSnapshot(taskId, workflow, "approval-to-email");
 
     return { workflow, draftCount };
   }
@@ -421,8 +472,14 @@ export class AgentWorkflowService {
     });
   }
 
-  async executeBraveSearchForTask(userId: string, taskId: string, input: { limit?: number } = {}) {
+  private createSearchToEmailGraphHandlers(
+    userId: string,
+    taskId: string,
+    input: { limit?: number } = {}
+  ) {
     let searchResult: SearchExecutionResult | null = null;
+    let approvalResult: CandidateApprovalResult | null = null;
+    let draftCount = 0;
     const handlers: LeadHuntWorkflowHandlers = {
       brave_search: async () => {
         searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, input);
@@ -449,14 +506,94 @@ export class AgentWorkflowService {
         this.completeOrReflectSearchStep(taskId, "score_icp", searchResult, {
           createdCandidates: searchResult?.createdCandidates ?? 0
         }),
-      human_approval: () => this.pauseWorkflowAt(taskId, "human_approval")
+      human_approval: async () => {
+        const resume = await this.interruptWorkflowAt<LeadReviewResume>(taskId, "human_approval", {
+          type: "lead_review",
+          taskId,
+          message: "Select approved leads before generating outreach drafts."
+        });
+        approvalResult = await this.applyCandidateApproval(userId, taskId, {
+          leadIds: resume.leadIds
+        });
+        const output = {
+          approved: true,
+          approvedBy: resume.approvedBy ?? userId,
+          approvedLeadIds: approvalResult.approvedLeadIds,
+          approvedCount: approvalResult.approvedCount
+        };
+        await this.markStepCompleted(taskId, "human_approval", output);
+
+        return this.workflowStepState("human_approval", "completed", output);
+      },
+      generate_email: () =>
+        this.completeWorkflowStep(taskId, "generate_email", async () => {
+          if (!approvalResult) {
+            approvalResult = await this.applyCandidateApproval(userId, taskId, {});
+          }
+
+          const existingDrafts = await this.prisma.outreachDraft.findMany({
+            where: {
+              leadId: { in: approvalResult.approvedLeadIds }
+            },
+            select: { leadId: true }
+          });
+          const existingDraftLeadIds = new Set(existingDrafts.map((draft) => draft.leadId));
+          const drafts = approvalResult.selected
+            .filter((candidate) => !existingDraftLeadIds.has(candidate.id))
+            .map((candidate) => buildOutreachDraft(candidate));
+
+          if (drafts.length) {
+            await this.prisma.outreachDraft.createMany({
+              data: drafts
+            });
+          }
+
+          draftCount = drafts.length;
+
+          return {
+            draftCount,
+            approvedLeadIds: approvalResult.approvedLeadIds
+          };
+        }),
+      wait_email_confirmation: async () => {
+        const resume = await this.interruptWorkflowAt<EmailReviewResume>(taskId, "wait_email_confirmation", {
+          type: "email_confirmation",
+          taskId,
+          draftCount,
+          message: "Confirm the outreach email before sending or saving it."
+        });
+        const output = {
+          approved: resume.approved ?? resume.action !== "cancel",
+          action: resume.action ?? "save_draft"
+        };
+        await this.markStepCompleted(taskId, "wait_email_confirmation", output);
+
+        return this.workflowStepState("wait_email_confirmation", "completed", output);
+      }
     };
+
+    return {
+      handlers,
+      getSearchResult: () => searchResult,
+      getApprovalResult: () => approvalResult,
+      getDraftCount: () => draftCount
+    };
+  }
+
+  async executeBraveSearchForTask(userId: string, taskId: string, input: { limit?: number } = {}) {
+    const graphRun = this.createSearchToEmailGraphHandlers(userId, taskId, input);
     const workflow = (await createLeadHuntWorkflowGraph({
       startAt: "brave_search",
-      handlers
-    }).invoke(createInitialWorkflowState(taskId) as Record<string, unknown>)) as LeadHuntWorkflowState;
+      handlers: graphRun.handlers,
+      checkpointer: this.graphCheckpointer
+    }).invoke(
+      createInitialWorkflowState(taskId) as Record<string, unknown>,
+      this.workflowConfig(taskId, "search-to-email")
+    )) as LeadHuntWorkflowState;
 
     await this.updateTaskStatusFromWorkflow(taskId, workflow);
+    await this.persistWorkflowSnapshot(taskId, workflow, "search-to-email");
+    const searchResult = graphRun.getSearchResult();
 
     return searchResult ?? {
       ok: false,
@@ -735,6 +872,63 @@ export class AgentWorkflowService {
   }
 
   async approveCandidatesForUser(userId: string, taskId: string, input: { leadIds?: string[] } = {}) {
+    const graphRun = this.createSearchToEmailGraphHandlers(userId, taskId);
+
+    try {
+      const workflow = (await createLeadHuntWorkflowGraph({
+        startAt: "brave_search",
+        handlers: graphRun.handlers,
+        checkpointer: this.graphCheckpointer
+      }).invoke(
+        new Command({ resume: { leadIds: input.leadIds, approvedBy: userId } }),
+        this.workflowConfig(taskId, "search-to-email")
+      )) as LeadHuntWorkflowState;
+
+      await this.updateTaskStatusFromWorkflow(taskId, workflow);
+      await this.persistWorkflowSnapshot(taskId, workflow, "search-to-email");
+      const approvalResult = graphRun.getApprovalResult();
+      if (!approvalResult) {
+        throw new Error(workflow.error ?? "Lead approval graph did not resume from a pending review");
+      }
+
+      return {
+        ok: true,
+        approvedLeadIds: approvalResult.approvedLeadIds,
+        approvedCount: approvalResult.approvedCount,
+        draftCount: graphRun.getDraftCount()
+      };
+    } catch {
+      return this.approveCandidatesWithLegacyGraph(userId, taskId, input);
+    }
+  }
+
+  private async approveCandidatesWithLegacyGraph(userId: string, taskId: string, input: { leadIds?: string[] } = {}) {
+    const approval = await this.applyCandidateApproval(userId, taskId, input);
+    await this.markStepCompleted(taskId, "human_approval", {
+      approved: true,
+      approvedBy: userId,
+      approvedLeadIds: approval.approvedLeadIds,
+      approvedCount: approval.approvedCount
+    });
+    const { draftCount } = await this.runApprovalWorkflowToEmailConfirmation(
+      taskId,
+      approval.selected,
+      approval.approvedLeadIds
+    );
+
+    return {
+      ok: true,
+      approvedLeadIds: approval.approvedLeadIds,
+      approvedCount: approval.approvedCount,
+      draftCount
+    };
+  }
+
+  private async applyCandidateApproval(
+    userId: string,
+    taskId: string,
+    input: { leadIds?: string[] } = {}
+  ): Promise<CandidateApprovalResult> {
     const task = await this.prisma.leadTask.findFirst({
       where: { id: taskId, userId },
       include: {
@@ -774,19 +968,10 @@ export class AgentWorkflowService {
       data: { status: "approved" }
     });
 
-    await this.markStepCompleted(taskId, "human_approval", {
-      approved: true,
-      approvedBy: userId,
+    return {
+      selected,
       approvedLeadIds,
       approvedCount: approvedLeadIds.length
-    });
-    const { draftCount } = await this.runApprovalWorkflowToEmailConfirmation(taskId, selected, approvedLeadIds);
-
-    return {
-      ok: true,
-      approvedLeadIds,
-      approvedCount: approvedLeadIds.length,
-      draftCount
     };
   }
 
@@ -877,6 +1062,26 @@ export class AgentWorkflowService {
     });
   }
 
+  private async interruptWorkflowAt<TResume>(
+    taskId: string,
+    nodeName: Extract<LeadHuntWorkflowNode, "human_approval" | "wait_email_confirmation">,
+    payload: Record<string, unknown>
+  ): Promise<TResume> {
+    await this.pauseAtHumanApproval(taskId, nodeName);
+    await this.prisma.leadTask.update({
+      where: { id: taskId },
+      data: { status: "paused" }
+    });
+
+    const resume = interrupt(payload) as TResume;
+    await this.markStepCompleted(taskId, nodeName, {
+      resumed: true,
+      resume: resume as unknown as Record<string, unknown>
+    });
+
+    return resume;
+  }
+
   private async pauseWorkflowAt(
     taskId: string,
     nodeName: Extract<LeadHuntWorkflowNode, "human_approval" | "wait_email_confirmation">
@@ -953,6 +1158,43 @@ export class AgentWorkflowService {
       data: {
         status,
         ...data
+      }
+    });
+  }
+
+  private workflowConfig(taskId: string, checkpointNamespace: string) {
+    return {
+      configurable: {
+        thread_id: taskId,
+        checkpoint_ns: checkpointNamespace
+      }
+    };
+  }
+
+  private async persistWorkflowSnapshot(taskId: string, workflow: LeadHuntWorkflowState, phase: string) {
+    const task = await this.prisma.leadTask.findFirst({
+      where: { id: taskId },
+      select: { inputPayload: true }
+    });
+    const inputPayload = toPlainObject(task?.inputPayload);
+    const interrupts = toJsonValue(getWorkflowInterrupts(workflow));
+    const pausedAt = interrupts.length ? interruptNodeName(interrupts) : workflow.pausedAt;
+
+    await this.prisma.leadTask.update({
+      where: { id: taskId },
+      data: {
+        inputPayload: {
+          ...inputPayload,
+          graphWorkflow: {
+            phase,
+            status: interrupts.length ? "paused" : workflow.status,
+            currentNode: workflow.currentNode,
+            pausedAt,
+            error: workflow.error,
+            interrupts,
+            updatedAt: new Date().toISOString()
+          }
+        } as Prisma.InputJsonValue
       }
     });
   }
@@ -1113,6 +1355,31 @@ function buildExecutionPlan(hasProductProfile: boolean, hasCustomerProfile: bool
       detail: "说明找到了什么、准备触达什么客户以及后续跟进动作"
     }
   ];
+}
+
+function toPlainObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+}
+
+function getWorkflowInterrupts(workflow: LeadHuntWorkflowState): unknown[] {
+  const value = (workflow as unknown as Record<string, unknown>)[INTERRUPT];
+  return Array.isArray(value) ? value : [];
+}
+
+function toJsonValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function interruptNodeName(interrupts: unknown[]): LeadHuntWorkflowNode | null {
+  const first = interrupts[0] as { value?: { type?: string } } | undefined;
+  if (first?.value?.type === "lead_review") {
+    return "human_approval";
+  }
+  if (first?.value?.type === "email_confirmation") {
+    return "wait_email_confirmation";
+  }
+
+  return null;
 }
 
 function asStringArray(value: unknown): string[] {

@@ -490,6 +490,47 @@ describe("AgentWorkflowService", () => {
     });
   });
 
+  it("resumes the LangGraph search thread from lead approval to email confirmation", async () => {
+    const prisma = createPrismaMock();
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+    const result = await service.approveCandidatesForUser("user-1", "task-1", {
+      leadIds: ["11111111-1111-4111-8111-111111111111"]
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      approvedLeadIds: ["11111111-1111-4111-8111-111111111111"],
+      approvedCount: 1,
+      draftCount: 1
+    });
+    expect(prisma.leadCandidate.updateMany).toHaveBeenCalledWith({
+      where: {
+        taskId: "task-1",
+        id: { in: ["11111111-1111-4111-8111-111111111111"] }
+      },
+      data: { status: "approved" }
+    });
+    expect(prisma.outreachDraft.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          leadId: "11111111-1111-4111-8111-111111111111",
+          status: "draft"
+        })
+      ]
+    });
+    expect(prisma.agentStep.updateMany).toHaveBeenCalledWith({
+      where: { taskId: "task-1", nodeName: "wait_email_confirmation" },
+      data: expect.objectContaining({
+        status: "waiting",
+        output: { waitingForHuman: true }
+      })
+    });
+  });
+
   it("executes pending Brave searches, saves candidates, and completes search steps", async () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
