@@ -1,5 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { countryToSite, inferCountryFromText, normalizeCountryName } from "@leadhunt/agent";
+import { Prisma } from "@prisma/client";
 import type { BraveSearchResult } from "../search/brave-search.client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
@@ -37,6 +38,29 @@ export type IcpScoreDraft = {
   status: "qualified" | "review" | "rejected";
 };
 
+export type CandidateBuyerEvaluation = {
+  companyName: string;
+  websiteUrl: string;
+  resultType:
+    | "target_buyer"
+    | "possible_buyer"
+    | "supplier_or_competitor"
+    | "directory"
+    | "content_article"
+    | "job_page"
+    | "market_report"
+    | "irrelevant"
+    | "unknown";
+  buyerType: string;
+  fitScore: number;
+  confidence: number;
+  decision: "qualified" | "review" | "reject";
+  matchedSignals: string[];
+  risks: string[];
+};
+
+export type CandidateAiEvaluator = (candidate: NormalizedLeadCandidate) => Promise<CandidateBuyerEvaluation | null>;
+
 type ExistingLead = {
   id: string;
   companyName: string;
@@ -51,8 +75,10 @@ type PageQualityAssessment = {
   risks: string[];
 };
 
-const contactProbeTimeoutMs = 6000;
-const contactProbePageLimit = 12;
+const contactProbeTimeoutMs = 3500;
+const contactProbePageLimit = 6;
+const contactLinkedProbePageLimit = 4;
+const maxAiCandidateEvaluationsPerBatch = 5;
 
 @Injectable()
 export class LeadQualificationService {
@@ -85,7 +111,8 @@ export class LeadQualificationService {
     const hasSpecificProductSignal =
       hasAny(text, specificTelecomProductTerms) || hasAny(text, criteria.productKeywords.filter(isSpecificProductTerm));
     const hasTargetCustomerType = hasAny(text, criteria.customerTypeKeywords);
-    const hasBuyerRoleSignal = hasAny(text, buyerRoleTerms) || hasTargetCustomerType;
+    const hasUseCaseCustomerSignal = hasAny(text, buyerUseCaseTerms);
+    const hasBuyerRoleSignal = hasAny(text, buyerRoleTerms) || hasUseCaseCustomerSignal || hasTargetCustomerType;
 
     score += pageQuality.scoreAdjustment;
     reasons.push(...pageQuality.reasons);
@@ -107,6 +134,11 @@ export class LeadQualificationService {
     if (hasTargetCustomerType) {
       score += 20;
       reasons.push("Matches target customer type");
+    }
+
+    if (hasUseCaseCustomerSignal) {
+      score += 12;
+      reasons.push("Matches maintenance, operator, tower, power, ISP, or field-service buyer scenario");
     }
 
     if (candidate.country && matchesTargetRegion(candidate.country, criteria.targetRegions)) {
@@ -165,7 +197,7 @@ export class LeadQualificationService {
     }
 
     if (riskyDiscoveryPage) {
-      const evidenceCap = hasDirectContact && hasSpecificProductSignal && hasBuyerRoleSignal ? 64 : 49;
+      const evidenceCap = hasDirectContact && hasSpecificProductSignal && hasUseCaseCustomerSignal ? 58 : 44;
       score = Math.min(score, evidenceCap);
       risks.push("Third-party, directory, or content page is kept as evidence but needs manual validation");
       if (!hasDirectContact) {
@@ -195,7 +227,8 @@ export class LeadQualificationService {
     taskId: string,
     results: BraveSearchResult[],
     criteria: IcpScoringCriteria,
-    defaultCountry?: string
+    defaultCountry?: string,
+    aiEvaluator?: CandidateAiEvaluator
   ) {
     const allCandidates = results.map((result) => normalizeResult(result, { taskId, defaultCountry }));
     const normalized = dedupeCandidates(allCandidates);
@@ -207,6 +240,7 @@ export class LeadQualificationService {
     const existingKeys = new Set(existingLeadByKey.keys());
     const created = [];
     let skipped = allCandidates.length - normalized.length;
+    let aiEvaluationsUsed = 0;
 
     for (const candidate of normalized) {
       const key = candidateKey(candidate);
@@ -270,7 +304,16 @@ export class LeadQualificationService {
         continue;
       }
 
-      const icp = this.scoreCandidate(enrichedCandidate, criteria);
+      const ruleIcp = this.scoreCandidate(enrichedCandidate, criteria);
+      const shouldUseAi =
+        Boolean(aiEvaluator) &&
+        aiEvaluationsUsed < maxAiCandidateEvaluationsPerBatch &&
+        shouldEvaluateCandidateWithAi(ruleIcp, enrichedCandidate, criteria);
+      const aiEvaluation = shouldUseAi ? await safelyEvaluateCandidate(aiEvaluator!, enrichedCandidate) : null;
+      if (shouldUseAi) {
+        aiEvaluationsUsed += 1;
+      }
+      const icp = aiEvaluation ? mergeAiEvaluationWithRuleScore(ruleIcp, aiEvaluation) : ruleIcp;
 
       const record = await this.prisma.leadCandidate.create({
         data: {
@@ -291,11 +334,13 @@ export class LeadQualificationService {
             create: {
               score: icp.score,
               grade: icp.grade,
-              reasons: {
+              reasons: toJsonInput({
                 reasons: icp.reasons,
                 risks: icp.risks,
-                summary: enrichedCandidate.summary
-              }
+                summary: enrichedCandidate.summary,
+                aiEvaluation,
+                ruleScore: ruleIcp.score
+              })
             }
           }
         },
@@ -320,6 +365,91 @@ export class LeadQualificationService {
       candidates: created
     };
   }
+}
+
+function shouldEvaluateCandidateWithAi(
+  ruleIcp: IcpScoreDraft,
+  candidate: NormalizedLeadCandidate,
+  criteria: IcpScoringCriteria
+) {
+  if (ruleIcp.score >= 50) {
+    return true;
+  }
+
+  if (ruleIcp.score < 35 || isRiskyDiscoveryPage(candidate)) {
+    return false;
+  }
+
+  const text = [
+    candidate.companyName,
+    candidate.website,
+    candidate.country,
+    candidate.sourceUrl,
+    candidate.summary,
+    candidate.contacts.map((contact) => contact.value).join(" ")
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const hasDirectContact = candidate.contacts.some((contact) => contact.type === "email" || contact.type === "phone");
+  const hasBuyerOrProductSignal =
+    hasTelecomContext(text) &&
+    (hasAny(text, buyerRoleTerms) ||
+      hasAny(text, buyerUseCaseTerms) ||
+      hasAny(text, criteria.customerTypeKeywords) ||
+      hasAny(text, specificTelecomProductTerms) ||
+      hasAny(text, criteria.productKeywords.filter(isSpecificProductTerm)));
+
+  return hasDirectContact || hasBuyerOrProductSignal;
+}
+
+async function safelyEvaluateCandidate(aiEvaluator: CandidateAiEvaluator, candidate: NormalizedLeadCandidate) {
+  try {
+    return await aiEvaluator(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function mergeAiEvaluationWithRuleScore(ruleIcp: IcpScoreDraft, ai: CandidateBuyerEvaluation): IcpScoreDraft {
+  const weightedScore = Math.round(clamp(ai.fitScore, 0, 100) * 0.6 + ruleIcp.score * 0.4);
+  let score = weightedScore;
+  const rejectTypes = new Set(["directory", "content_article", "job_page", "market_report", "irrelevant"]);
+
+  if (rejectTypes.has(ai.resultType)) {
+    score = Math.min(score, 44);
+  } else if (ai.resultType === "supplier_or_competitor") {
+    score = Math.min(score, 64);
+  } else if (ai.decision === "reject") {
+    score = Math.min(score, 49);
+  } else if (ai.resultType === "target_buyer" && ai.decision === "qualified" && ai.confidence >= 0.72) {
+    score = Math.max(score, 75);
+  }
+
+  const finalScore = clamp(score, 0, 100);
+  const status = finalScore >= 75 ? "qualified" : finalScore >= 50 ? "review" : "rejected";
+  const grade = finalScore >= 75 ? "high" : finalScore >= 50 ? "medium" : "low";
+  const reasons = uniqueStrings([
+    ...ruleIcp.reasons,
+    `GPT buyer judgment: ${ai.resultType}${ai.buyerType ? ` / ${ai.buyerType}` : ""}`,
+    ...ai.matchedSignals.map((signal) => `AI matched signal: ${signal}`)
+  ]);
+  const risks = uniqueStrings([
+    ...ruleIcp.risks,
+    ...ai.risks,
+    ...(ai.confidence < 0.55 ? ["AI buyer judgment confidence is low"] : []),
+    ...(ai.resultType === "supplier_or_competitor"
+      ? ["AI marked this result as supplier or competitor; keep for review only"]
+      : [])
+  ]);
+
+  return {
+    score: finalScore,
+    grade,
+    reasons,
+    risks,
+    status
+  };
 }
 
 function normalizeResult(
@@ -593,7 +723,9 @@ async function enrichCandidateContacts(candidate: NormalizedLeadCandidate): Prom
     linkedUrls.push(...extractContactLinks(html, url));
   }
 
-  const linkedPages = await fetchProbePages(linkedUrls.filter((url) => !urls.includes(url)));
+  const linkedPages = await fetchProbePages(
+    linkedUrls.filter((url) => !urls.includes(url)).slice(0, contactLinkedProbePageLimit)
+  );
   for (const { url, html } of linkedPages) {
     if (!html) {
       continue;
@@ -1031,7 +1163,31 @@ function contactCompletenessScore(contacts: NormalizedLeadCandidate["contacts"])
 }
 
 function clamp(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
   return Math.max(min, Math.min(max, value));
+}
+
+function toJsonInput(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(
+    JSON.stringify(value, (_key, item) => {
+      if (item === undefined) {
+        return null;
+      }
+
+      if (typeof item === "number" && !Number.isFinite(item)) {
+        return null;
+      }
+
+      if (typeof item === "string") {
+        return item.replace(/\u0000/g, "");
+      }
+
+      return item;
+    })
+  ) as Prisma.InputJsonValue;
 }
 
 const telecomIndustryTerms = [
@@ -1090,6 +1246,31 @@ const specificTelecomProductTerms = [
 ];
 
 const buyerRoleTerms = [
+  "base station maintenance company",
+  "base station maintenance",
+  "ran maintenance",
+  "radio access network maintenance",
+  "cell site maintenance",
+  "cell site services",
+  "telecom field services",
+  "field maintenance",
+  "operations and maintenance",
+  "o&m",
+  "tower maintenance company",
+  "tower maintenance",
+  "tower company",
+  "towerco",
+  "cell tower services",
+  "wireless infrastructure contractor",
+  "telecom power maintenance",
+  "cell site power",
+  "rectifier replacement",
+  "mobile network operator",
+  "network operator",
+  "isp network operations",
+  "wisp",
+  "ftth operator",
+  "fiber network operator",
   "telecom equipment distributor",
   "distributor",
   "stockist",
@@ -1114,6 +1295,37 @@ const buyerRoleTerms = [
   "vendor registration",
   "partner registration",
   "project supply"
+];
+
+const buyerUseCaseTerms = [
+  "base station maintenance",
+  "ran maintenance",
+  "radio access network maintenance",
+  "cell site maintenance",
+  "cell site services",
+  "telecom field services",
+  "field maintenance",
+  "operations and maintenance",
+  "o&m",
+  "tower maintenance",
+  "tower company",
+  "towerco",
+  "cell tower services",
+  "wireless infrastructure contractor",
+  "telecom power maintenance",
+  "cell site power",
+  "rectifier replacement",
+  "mobile network operator",
+  "telecom operator",
+  "network operator",
+  "isp network operations",
+  "wisp",
+  "ftth operator",
+  "fiber network operator",
+  "equipment repair",
+  "repair service",
+  "reverse logistics",
+  "spare parts management"
 ];
 
 const genericItServiceTerms = [
@@ -1145,7 +1357,20 @@ const consumerElectronicsTerms = [
   "retail electronics"
 ];
 
-const defaultRiskTerms = ["job", "career", "training", "course", "news", "forum"];
+const defaultRiskTerms = [
+  "job",
+  "career",
+  "training",
+  "course",
+  "news",
+  "forum",
+  "marketplace",
+  "supplier directory",
+  "company directory",
+  "trade directory",
+  "yellow pages",
+  "b2b marketplace"
+];
 
 const blockedContentDomains = [
   "linkedin.com",
@@ -1197,7 +1422,10 @@ const blockedContentDomains = [
   "eximpedia.app",
   "alibaba.com",
   "amazon.com",
-  "aliexpress.com"
+  "aliexpress.com",
+  "yellowpages.com",
+  "yellowpages.ae",
+  "yello.ae"
 ];
 
 const blockedMarketplaceDomains = [
@@ -1229,7 +1457,10 @@ const blockedMarketplaceDomains = [
   "europages.com",
   "yellowpages.ae",
   "yellowpages.com",
+  "yellowpages.co.za",
+  "yellowpages.com.ng",
   "yello.ae",
+  "yellosa.co.za",
   "uaeplusplus.com"
 ];
 
@@ -1311,6 +1542,10 @@ const contentNoiseTerms = [
   "supplier directory",
   "yellow pages",
   "company directory",
+  "trade directory",
+  "b2b marketplace",
+  "manufacturers and suppliers",
+  "wholesale suppliers",
   "category",
   "catalog",
   "technology indicator",

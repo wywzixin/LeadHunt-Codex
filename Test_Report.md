@@ -4,6 +4,67 @@
 创建日期：2026-04-29  
 用途：记录每个功能开发完成后的测试结果。开发顺序必须遵守“一个功能开发完，测试通过并记录，再进入下一个功能”。
 
+## 2026-05-15 首轮搜索自动后台执行测试
+
+测试功能：创建 AI 外贸员任务后，后端自动完成首轮获客链路，前端只轮询任务详情，不再等待 45 秒后接力调用搜索接口。
+
+测试命令：
+
+- `pnpm --filter @leadhunt/api typecheck`
+- `pnpm --filter @leadhunt/web typecheck`
+- `pnpm --filter @leadhunt/api test -- agent-workflow.service.spec.ts lead-qualification.service.spec.ts`
+
+结果：
+
+- API 类型检查通过。
+- Web 类型检查通过。
+- `agent-workflow.service.spec.ts`、`lead-qualification.service.spec.ts` 共 42 条测试通过。
+- Chrome DevTools `http://localhost:3000/` 新建任务 `e24d74ee-11a5-4f2f-a508-3c35a4942a02`。
+- 页面创建任务后立即显示任务 ID，后端自动生成 29 条 query。
+- 未由前端调用 `/api/lead-tasks/:taskId/search`，后端自动进入 `brave_search`。
+- 本轮 29 条 query 已全部执行完成，Brave 原始命中 114 条，入库候选 76 家。
+- 评分结果：`qualified` 3 家、`review` 6 家、`rejected` 67 家；前端主表按规则只展示 9 家可复核客户，其中 3 家 ICP 75+。
+- 补恢复逻辑后，开发服务热更新 / 重启可恢复最近 24 小时内仍为 `running` 的任务；已有 query 的任务跳过 GPT 规划并继续执行未完成 query。
+- Chrome DevTools 复核历史任务恢复：页面显示“本轮搜索已完成：执行 29 条 query，命中 114 条结果，新增 76 家候选客户，等待人工审核”，不再显示“搜索指令待生成 / 待启动 / 等待首轮搜索结果”这类误导状态。
+
+发现问题：
+
+- 开发模式热更新会中断正在执行的内存后台任务；当前已补最近 running 任务恢复，但生产/正式联调仍建议继续升级为独立 worker / 队列 / 任务锁。
+- 候选 GPT 逐条评分较慢；当前已补规则预筛和每批最多 5 个 GPT 候选判断，后续仍可继续做批量评分和并发上限。
+
+## 2026-05-15 GPT 主导获客链路改造测试
+
+测试功能：GPT-5.5 接入 AI 外贸员主链路、产品目录抓取放宽、GPT 搜索策略 fallback、候选客户评分融合、画像页读取已保存配置。
+
+测试命令：
+
+- `pnpm --filter @leadhunt/api typecheck`
+- `pnpm --filter @leadhunt/web typecheck`
+- `pnpm --filter @leadhunt/agent typecheck`
+- `pnpm --filter @leadhunt/api test -- src/ai/leadhunt-ai.service.spec.ts src/agent/website-content.service.spec.ts src/agent/agent-workflow.service.spec.ts src/leads/lead-qualification.service.spec.ts`
+- `pnpm --filter @leadhunt/agent test`
+- `pnpm --filter @leadhunt/api build`
+- `pnpm --filter @leadhunt/agent build`
+
+结果：
+
+- API / Web / Agent 类型检查通过。
+- API 相关单测 4 个测试文件 / 55 条通过。
+- Agent 包 3 个测试文件 / 23 条通过。
+- API 和 Agent 构建通过。
+- `http://localhost:4000/health` 返回 200。
+- `http://localhost:3000/` 页面可打开并保持登录状态。
+- 产品画像页能读取已保存的 `https://telecorenet.com/` 和 `https://telecorenet.com/products`。
+- 客户画像页能读取已保存的 `https://spectrummea.com/`、`https://highcloud.ae/` 和补充说明。
+- 新建任务 `591215bb-8b7e-40a9-bc3c-96c0762cef48` 后，网站证据读取 4/4，生成 55 条搜索指令，目标国家从 prompt 中的 Nigeria / Saudi Arabia 生效，并扩展到 Lagos / Riyadh / Jeddah。
+- 首批搜索执行 15 条 query，其中 11 条完成、4 条失败，候选主表过滤了低分 / rejected 结果。
+
+发现问题：
+
+- 本次真实运行时 GPT-5.5 兼容接口返回 HTTP 503：`Service temporarily unavailable`。
+- 因此任务 `aiPlanning.querySource=deterministic_fallback`，`gptSearchQueryCount=0`，候选 `aiEvaluation=null`。
+- 结论是代码已接入 GPT 主链路，但外部 GPT 服务不可用时会按设计 fallback；后续需要在 GPT-5.5 服务恢复后复测 GPT-led query 和 GPT 候选买家判断。
+
 ## 0. 测试总原则
 
 - [ ] 每个功能必须先完成测试，再进入下一个功能。

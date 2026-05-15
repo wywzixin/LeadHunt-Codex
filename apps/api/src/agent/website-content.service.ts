@@ -43,8 +43,8 @@ export type ProfileSiteEvidence = {
 
 type FetchLike = typeof fetch;
 
-const productCatalogPageLimit = 8;
-const productCatalogProductLimit = 160;
+const productCatalogPageLimit = 50;
+const productCatalogProductLimit = 1000;
 const profileFetchTimeoutMs = 6000;
 
 @Injectable()

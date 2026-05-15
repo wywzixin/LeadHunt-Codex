@@ -12,7 +12,7 @@ describe("keyword expansion", () => {
     expect(keywords.excludeTerms).toEqual(
       expect.arrayContaining(["job", "news", "training", "consumer phone", "course", "forum"])
     );
-    expect(keywords.excludeTerms).not.toEqual(expect.arrayContaining(["directory", "yellowpages"]));
+    expect(keywords.excludeTerms).toEqual(expect.arrayContaining(["directory", "yellow pages"]));
     expect(keywords.excludeTerms).not.toContain("phone");
   });
 
@@ -52,8 +52,8 @@ describe("keyword expansion", () => {
     expect(queries).toHaveLength(15);
     expect(queries[0]?.keywordGroups.marketTerms).toEqual(expect.arrayContaining(["UAE"]));
     expect(queries[0]?.query).toContain("UAE");
-    expect(queries[0]?.query).not.toContain("-job");
-    expect(queries[0]?.query).not.toContain("-marketplace");
+    expect(queries[0]?.query).toContain("-job");
+    expect(queries[0]?.query).toContain("-marketplace");
   });
 
   it("normalizes Chinese saved target regions into English search markets", () => {

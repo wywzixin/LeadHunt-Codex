@@ -24,12 +24,13 @@ export type ExpandedKeywords = {
 
 type ProfileHints = Partial<ExpandedKeywords>;
 
-const defaultMainProducts = ["telecom equipment"];
+const defaultMainProducts = ["telecom equipment", "telecom spare parts"];
 
 const defaultRelatedProducts = [
   "5G telecom equipment",
   "5G base station equipment",
   "radio access network equipment",
+  "base station spare parts",
   "RRU",
   "BBU",
   "AAU",
@@ -42,6 +43,7 @@ const defaultRelatedProducts = [
 ];
 
 const defaultLongTailProducts = [
+  "base station spare parts replacement",
   "Huawei ZTE spare parts",
   "Huawei RRU spare parts",
   "ZTE BBU boards",
@@ -61,21 +63,36 @@ const defaultUpstreamDownstreamTerms = [
 ];
 
 const defaultCustomerIntentTerms = [
-  "telecom equipment distributor",
-  "distributor",
-  "stockist",
-  "system integrator",
-  "telecom system integrator",
+  "network maintenance company",
+  "base station maintenance company",
+  "RAN maintenance",
+  "cell site maintenance",
+  "telecom field services",
+  "tower maintenance company",
+  "tower company",
+  "wireless infrastructure contractor",
+  "telecom power maintenance",
   "telecom contractor",
-  "turnkey contractor",
-  "tower contractor",
-  "telecom importer",
-  "project supply",
+  "telecom system integrator",
+  "system integrator",
+  "mobile network operator",
+  "telecom operator procurement",
+  "vendor registration",
+  "ISP network operations",
+  "WISP",
+  "FTTH operator",
+  "equipment repair service",
+  "spare parts management",
   "project procurement",
   "purchasing",
   "procurement",
-  "network maintenance company",
-  "telecom operator procurement"
+  "telecom equipment distributor",
+  "stockist",
+  "distributor",
+  "turnkey contractor",
+  "tower contractor",
+  "telecom importer",
+  "project supply"
 ];
 
 const defaultScenarioTerms = [
@@ -84,6 +101,13 @@ const defaultScenarioTerms = [
   "network rollout",
   "site maintenance",
   "base station maintenance",
+  "RAN maintenance",
+  "cell site maintenance",
+  "tower maintenance",
+  "telecom power maintenance",
+  "rectifier replacement",
+  "spare parts replacement",
+  "FTTH network maintenance",
   "tower power",
   "IBS service",
   "equipment replacement"
@@ -94,17 +118,23 @@ const defaultMarketTerms = [
   "Saudi Arabia",
   "Qatar",
   "Oman",
-  "Iran",
-  "Israel",
-  "Ukraine",
-  "Russia",
-  "United States",
-  "Germany",
-  "United Kingdom",
   "Brazil",
-  "Chile",
+  "Mexico",
+  "Colombia",
+  "Indonesia",
+  "Philippines",
   "Nigeria",
-  "South Africa"
+  "South Africa",
+  "Kenya",
+  "Egypt",
+  "Morocco",
+  "Ghana",
+  "Tanzania",
+  "Vietnam",
+  "Thailand",
+  "Malaysia",
+  "Chile",
+  "Peru"
 ];
 
 const defaultExcludeTerms = [
@@ -117,12 +147,18 @@ const defaultExcludeTerms = [
   "consumer",
   "course",
   "forum",
+  "directory",
+  "yellow pages",
+  "supplier directory",
+  "company directory",
+  "trade directory",
   "blog",
   "youtube",
   "facebook",
   "linkedin",
   "wiki",
   "marketplace",
+  "B2B marketplace",
   "Alibaba",
   "Accio",
   "TradeWheel",
@@ -299,7 +335,7 @@ function detectMainProducts(sourceText: string) {
 
 function detectRelatedProducts(sourceText: string) {
   const terms: string[] = [];
-  if (/spare|\u5907\u4ef6|\u677f\u5361|board/i.test(sourceText)) {
+  if (/spare|\u914d\u4ef6|\u5907\u4ef6|\u677f\u5361|board/i.test(sourceText)) {
     terms.push("spare parts", "board");
   }
   if (/\u5149\u6a21\u5757|optical/i.test(sourceText)) {
@@ -318,6 +354,21 @@ function detectCustomerIntentTerms(sourceText: string) {
   }
   if (/operator|carrier|service provider/i.test(sourceText)) {
     terms.push("telecom operator procurement", "mobile network operator");
+  }
+  if (/\u7ef4\u62a4|maintenance|o&m|operations/i.test(sourceText)) {
+    terms.push("network maintenance company", "base station maintenance company", "telecom field services");
+  }
+  if (/base station|bts|enodeb|gnodeb|\u57fa\u7ad9|ran/i.test(sourceText)) {
+    terms.push("RAN maintenance", "cell site maintenance");
+  }
+  if (/tower|towerco|\u94c1\u5854/i.test(sourceText)) {
+    terms.push("tower maintenance company", "tower company");
+  }
+  if (/power|rectifier|\u7535\u6e90/i.test(sourceText)) {
+    terms.push("telecom power maintenance");
+  }
+  if (/isp|wisp|ftth|fiber operator|fiber network/i.test(sourceText)) {
+    terms.push("ISP network operations", "WISP", "FTTH operator");
   }
   if (/\u7ecf\u9500|distributor/i.test(sourceText)) {
     terms.push("distributor", "telecom equipment distributor");
@@ -434,17 +485,23 @@ function expandMarketMacro(market: string): string[] {
       "Saudi Arabia",
       "Qatar",
       "Oman",
-      "Iran",
-      "Israel",
-      "Ukraine",
-      "Russia",
-      "United States",
-      "Germany",
-      "United Kingdom",
       "Brazil",
-      "Chile",
+      "Mexico",
+      "Colombia",
+      "Indonesia",
+      "Philippines",
       "Nigeria",
       "South Africa",
+      "Kenya",
+      "Egypt",
+      "Morocco",
+      "Ghana",
+      "Tanzania",
+      "Vietnam",
+      "Thailand",
+      "Malaysia",
+      "Chile",
+      "Peru",
       "Kuwait",
       "Bahrain",
       "Iraq",
@@ -455,13 +512,9 @@ function expandMarketMacro(market: string): string[] {
       "Italy",
       "Spain",
       "Poland",
-      "Mexico",
-      "Colombia",
-      "Peru",
       "Argentina",
-      "Kenya",
-      "Morocco",
-      "Ghana"
+      "Ecuador",
+      "Costa Rica"
     ],
     Asia: [
       "UAE",
@@ -499,15 +552,13 @@ function expandMarketMacro(market: string): string[] {
       "Oman",
       "Kuwait",
       "Bahrain",
-      "Iran",
-      "Israel",
       "Jordan",
       "Iraq",
       "Turkey",
       "Egypt"
     ],
     GCC: ["UAE", "Saudi Arabia", "Qatar", "Kuwait", "Oman", "Bahrain"],
-    Europe: ["Germany", "United Kingdom", "France", "Italy", "Spain", "Poland", "Netherlands", "Romania", "Ukraine", "Russia"],
+    Europe: ["Germany", "United Kingdom", "France", "Italy", "Spain", "Poland", "Netherlands", "Romania", "Ukraine"],
     Africa: ["Nigeria", "Kenya", "South Africa", "Egypt", "Morocco", "Ghana", "Ethiopia", "Tanzania", "Uganda", "Algeria"],
     "North America": ["United States", "Canada", "Mexico"],
     "Latin America": ["Brazil", "Mexico", "Chile", "Colombia", "Peru", "Argentina", "Ecuador", "Costa Rica"],
@@ -524,13 +575,22 @@ function detectScenarioTerms(sourceText: string) {
     terms.push("5G network rollout", "base station maintenance");
   }
   if (/\u7ef4\u62a4|maintenance/i.test(sourceText)) {
-    terms.push("site maintenance", "network maintenance");
+    terms.push("site maintenance", "network maintenance", "RAN maintenance", "spare parts replacement");
+  }
+  if (/base station|bts|enodeb|gnodeb|\u57fa\u7ad9|ran/i.test(sourceText)) {
+    terms.push("base station maintenance", "cell site maintenance");
   }
   if (/rollout|\u5efa\u8bbe|\u90e8\u7f72/i.test(sourceText)) {
     terms.push("network rollout");
   }
   if (/tower|\u94c1\u5854/i.test(sourceText)) {
-    terms.push("tower power");
+    terms.push("tower power", "tower maintenance");
+  }
+  if (/power|rectifier|\u7535\u6e90/i.test(sourceText)) {
+    terms.push("telecom power maintenance", "rectifier replacement");
+  }
+  if (/isp|wisp|ftth|fiber/i.test(sourceText)) {
+    terms.push("FTTH network maintenance");
   }
   if (/ibs|\u5ba4\u5206/i.test(sourceText)) {
     terms.push("IBS service", "IBS solution");

@@ -185,6 +185,40 @@ describe("LeadQualificationService", () => {
     );
   });
 
+  it("sanitizes AI scoring evidence before writing JSON fields", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Null Byte Telecom Stockist UAE",
+          url: "https://nullbyte-telecom.ae/contact",
+          snippet: "UAE telecom equipment distributor with RRU stock.\u0000 sales@nullbyte-telecom.ae",
+          source: "web"
+        }
+      ],
+      criteria,
+      "UAE",
+      async () => ({
+        companyName: "Null Byte Telecom Stockist UAE",
+        websiteUrl: "https://nullbyte-telecom.ae/contact",
+        resultType: "possible_buyer",
+        buyerType: "telecom equipment stockist\u0000",
+        fitScore: 70,
+        confidence: 0.8,
+        decision: "review",
+        matchedSignals: ["RRU spare parts\u0000"],
+        risks: ["Needs manual review\u0000"]
+      })
+    );
+
+    const reasons = prisma.leadCandidate.create.mock.calls[0]?.[0].data.icpScore.create.reasons;
+    expect(JSON.stringify(reasons)).not.toContain("\\u0000");
+    expect(JSON.stringify(reasons)).not.toContain("\u0000");
+  });
+
   it("keeps noisy article and social results in the candidate pool with ICP risk scoring", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);

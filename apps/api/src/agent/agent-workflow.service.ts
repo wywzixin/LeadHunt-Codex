@@ -1,4 +1,13 @@
-import { BadRequestException, Inject, Injectable, NotFoundException, Optional } from "@nestjs/common";
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+  Optional,
+  type OnModuleDestroy,
+  type OnModuleInit
+} from "@nestjs/common";
+import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {
   Command,
   INTERRUPT,
@@ -6,6 +15,7 @@ import {
   createKeywordGroups,
   createInitialWorkflowState,
   generateSearchQueries,
+  getSearchStrategyLibrary,
   countryToSearchApiCode,
   leadHuntWorkflowNodes,
   type KeywordGroups,
@@ -14,11 +24,21 @@ import {
   type LeadHuntWorkflowState,
   type WorkflowStepStatus,
   type WorkflowStep,
+  type GeneratedSearchQuery,
+  type OperatorSource,
   createLeadHuntWorkflowGraph,
   createInitialWorkflowSteps,
   interrupt
 } from "@leadhunt/agent";
 import { Prisma } from "@prisma/client";
+import { LeadHuntAiService } from "../ai/leadhunt-ai.service.js";
+import type {
+  CandidateBuyerEvaluationResult,
+  CustomerProfileAnalysis,
+  KeywordExpansionResult,
+  ProductProfileAnalysis,
+  SearchStrategyPlan
+} from "../ai/leadhunt-ai.schemas.js";
 import { LeadQualificationService, type IcpScoringCriteria } from "../leads/lead-qualification.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { BraveSearchService } from "../search/brave-search.service.js";
@@ -106,13 +126,61 @@ type EmailReviewResume = {
   action?: "send" | "save_draft" | "cancel";
 };
 
-const DEFAULT_SYNC_SEARCH_QUERY_LIMIT = 15;
-const MAX_SYNC_SEARCH_QUERY_LIMIT = 15;
+const MAX_SYNC_SEARCH_QUERY_LIMIT = 500;
 const MAX_CANDIDATE_RESULTS_PER_QUERY = 20;
+const RUNNING_TASK_RECOVERY_LIMIT = 5;
+const RUNNING_TASK_RECOVERY_WINDOW_HOURS = 24;
+const LANGGRAPH_CHECKPOINT_STORE_VALUES = ["memory", "postgres"] as const;
+
+type LangGraphCheckpointStore = (typeof LANGGRAPH_CHECKPOINT_STORE_VALUES)[number];
+type LangGraphCheckpointer = MemorySaver | PostgresSaver;
+
+function resolveLangGraphCheckpointStore(): LangGraphCheckpointStore {
+  const configured = process.env.LANGGRAPH_CHECKPOINT_STORE?.trim().toLowerCase();
+  if (configured) {
+    if (LANGGRAPH_CHECKPOINT_STORE_VALUES.includes(configured as LangGraphCheckpointStore)) {
+      return configured as LangGraphCheckpointStore;
+    }
+
+    throw new Error(
+      `LANGGRAPH_CHECKPOINT_STORE must be one of: ${LANGGRAPH_CHECKPOINT_STORE_VALUES.join(", ")}`
+    );
+  }
+
+  return process.env.NODE_ENV === "test" ? "memory" : "postgres";
+}
+
+function createLangGraphCheckpointer(store: LangGraphCheckpointStore): LangGraphCheckpointer {
+  if (store === "memory") {
+    return new MemorySaver();
+  }
+
+  const { connectionString, schema } = resolvePostgresCheckpointSettings();
+  return PostgresSaver.fromConnString(connectionString, { schema });
+}
+
+function resolvePostgresCheckpointSettings() {
+  const rawConnectionString = process.env.LANGGRAPH_CHECKPOINT_DATABASE_URL ?? process.env.DATABASE_URL;
+  if (!rawConnectionString) {
+    throw new Error("DATABASE_URL is required when LANGGRAPH_CHECKPOINT_STORE=postgres");
+  }
+
+  const url = new URL(rawConnectionString);
+  const schema = process.env.LANGGRAPH_CHECKPOINT_SCHEMA ?? url.searchParams.get("schema") ?? "public";
+  url.searchParams.delete("schema");
+
+  return {
+    connectionString: url.toString(),
+    schema
+  };
+}
 
 @Injectable()
-export class AgentWorkflowService {
-  private readonly graphCheckpointer = new MemorySaver();
+export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
+  private readonly graphCheckpointStore = resolveLangGraphCheckpointStore();
+  private readonly graphCheckpointer = createLangGraphCheckpointer(this.graphCheckpointStore);
+  private graphCheckpointerSetup?: Promise<void>;
+  private readonly autonomousTaskIds = new Set<string>();
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
@@ -121,8 +189,51 @@ export class AgentWorkflowService {
     @Optional()
     @Inject(LeadQualificationService) private readonly leadQualificationService?: LeadQualificationService,
     @Optional()
-    @Inject(WebsiteContentService) private readonly websiteContentService?: WebsiteContentService
+    @Inject(WebsiteContentService) private readonly websiteContentService?: WebsiteContentService,
+    @Optional()
+    @Inject(LeadHuntAiService) private readonly leadHuntAiService?: LeadHuntAiService
   ) {}
+
+  async onModuleInit() {
+    await this.ensureGraphCheckpointerReady();
+    if (!shouldPlanTaskInline()) {
+      void this.recoverRunningLeadDiscoveryTasks().catch((error) => {
+        console.warn("LeadHunt running task recovery failed", searchErrorMessage(error));
+      });
+    }
+  }
+
+  async onModuleDestroy() {
+    await this.closeGraphCheckpointer();
+  }
+
+  private async getGraphCheckpointer() {
+    await this.ensureGraphCheckpointerReady();
+
+    return this.graphCheckpointer;
+  }
+
+  private async ensureGraphCheckpointerReady() {
+    if (this.graphCheckpointStore === "memory") {
+      return;
+    }
+
+    const checkpointer = this.graphCheckpointer as PostgresSaver;
+    this.graphCheckpointerSetup ??= checkpointer
+      .setup()
+      .catch((error) => {
+        this.graphCheckpointerSetup = undefined;
+        throw error;
+      });
+
+    await this.graphCheckpointerSetup;
+  }
+
+  private async closeGraphCheckpointer() {
+    if ("end" in this.graphCheckpointer && typeof this.graphCheckpointer.end === "function") {
+      await this.graphCheckpointer.end();
+    }
+  }
 
   async createTaskWithTimeline(userId: string, input: CreateTaskInput) {
     if (shouldPlanTaskInline()) {
@@ -132,10 +243,10 @@ export class AgentWorkflowService {
           userId,
           status: "running",
           targetCount: input.targetCount ?? 50,
-          inputPayload: {
+          inputPayload: toJsonValue({
             ...input,
             ...context
-          }
+          }) as Prisma.InputJsonValue
         }
       });
       const steps = await this.createTimeline(task.id);
@@ -155,9 +266,7 @@ export class AgentWorkflowService {
     const steps = await this.createTimeline(task.id);
 
     if (!shouldPlanTaskInline()) {
-      void this.planTaskSearchQueries(userId, task.id, input).catch((error) =>
-        this.markPlanningWorkflowFailed(task.id, error)
-      );
+      this.startAutonomousLeadDiscovery(userId, task.id, input);
 
       return {
         task,
@@ -176,15 +285,16 @@ export class AgentWorkflowService {
   }
 
   private async planTaskSearchQueries(userId: string, taskId: string, input: CreateTaskInput) {
-    const context = await this.buildTaskContext(userId, input);
+    await this.markStepRunning(taskId, "load_task");
+    const context = await this.buildTaskContext(userId, input, taskId);
     await this.prisma.leadTask.update({
       where: { id: taskId },
       data: {
         status: "running",
-        inputPayload: {
+        inputPayload: toJsonValue({
           ...input,
           ...context
-        }
+        }) as Prisma.InputJsonValue
       }
     });
     const workflow = await this.runSemiManagedWorkflowToSearchPlan(taskId, input, context);
@@ -192,10 +302,142 @@ export class AgentWorkflowService {
     return { context, workflow };
   }
 
+  private startAutonomousLeadDiscovery(
+    userId: string,
+    taskId: string,
+    input: CreateTaskInput,
+    options: { skipPlanning?: boolean } = {}
+  ) {
+    if (this.autonomousTaskIds.has(taskId)) {
+      return;
+    }
+
+    this.autonomousTaskIds.add(taskId);
+    void this.runAutonomousLeadDiscovery(userId, taskId, input, options)
+      .catch((error) => this.markAutonomousDiscoveryFailed(taskId, error, "brave_search"))
+      .finally(() => {
+        this.autonomousTaskIds.delete(taskId);
+      });
+  }
+
+  private async recoverRunningLeadDiscoveryTasks() {
+    if (!this.braveSearchService || !this.leadQualificationService) {
+      return;
+    }
+
+    const updatedAfter = new Date(Date.now() - RUNNING_TASK_RECOVERY_WINDOW_HOURS * 60 * 60 * 1000);
+    const tasks = await this.prisma.leadTask.findMany({
+      where: {
+        status: "running",
+        updatedAt: { gte: updatedAfter }
+      },
+      select: {
+        id: true,
+        userId: true,
+        targetCount: true,
+        inputPayload: true,
+        _count: {
+          select: {
+            searchQueries: true
+          }
+        }
+      },
+      orderBy: { updatedAt: "desc" },
+      take: RUNNING_TASK_RECOVERY_LIMIT
+    });
+
+    for (const task of tasks) {
+      const input = createTaskInputFromPayload(task.inputPayload, task.targetCount ?? undefined);
+      if (!input) {
+        await this.markAutonomousDiscoveryFailed(task.id, "Cannot recover task without prompt", "plan_search_queries");
+        continue;
+      }
+
+      this.startAutonomousLeadDiscovery(task.userId, task.id, input, {
+        skipPlanning: task._count.searchQueries > 0
+      });
+    }
+  }
+
+  private async runAutonomousLeadDiscovery(
+    userId: string,
+    taskId: string,
+    input: CreateTaskInput,
+    options: { skipPlanning?: boolean } = {}
+  ) {
+    let hasSearchPlan = Boolean(options.skipPlanning);
+
+    try {
+      if (options.skipPlanning) {
+        const queryCount = await this.prisma.searchQuery.count({ where: { taskId } });
+        await this.markStepCompleted(taskId, "plan_search_queries", {
+          recovered: true,
+          queryCount
+        });
+      } else {
+        const { workflow } = await this.planTaskSearchQueries(userId, taskId, input);
+        if (workflow.status === "failed") {
+          return;
+        }
+        hasSearchPlan = true;
+      }
+
+      await this.resetStaleRunningSearchQueries(taskId);
+      const searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, {});
+      if (!searchResult.ok) {
+        await this.prisma.leadTask.update({
+          where: { id: taskId },
+          data: { status: "failed" }
+        });
+        return;
+      }
+
+      await this.pauseAtHumanApproval(taskId, "human_approval");
+      await this.prisma.leadTask.update({
+        where: { id: taskId },
+        data: { status: "paused" }
+      });
+    } catch (error) {
+      if (!hasSearchPlan) {
+        await this.markPlanningWorkflowFailed(taskId, error);
+        return;
+      }
+
+      await this.markAutonomousDiscoveryFailed(taskId, error, "brave_search");
+    }
+  }
+
+  private resetStaleRunningSearchQueries(taskId: string) {
+    return this.prisma.searchQuery.updateMany({
+      where: {
+        taskId,
+        executionStatus: "running"
+      },
+      data: {
+        executionStatus: "pending"
+      }
+    });
+  }
+
   private async markPlanningWorkflowFailed(taskId: string, error: unknown) {
     const message = searchErrorMessage(error);
     await Promise.all([
       this.markStepFailed(taskId, "plan_search_queries", message),
+      this.prisma.leadTask.update({
+        where: { id: taskId },
+        data: { status: "failed" }
+      })
+    ]);
+  }
+
+  private async markAutonomousDiscoveryFailed(
+    taskId: string,
+    error: unknown,
+    nodeName: Extract<LeadHuntWorkflowNode, "plan_search_queries" | "brave_search">
+  ) {
+    const message = searchErrorMessage(error);
+    await Promise.all([
+      this.markStepFailed(taskId, nodeName, message),
       this.prisma.leadTask.update({
         where: { id: taskId },
         data: { status: "failed" }
@@ -254,7 +496,7 @@ export class AgentWorkflowService {
     const workflow = (await createLeadHuntWorkflowGraph({
       handlers,
       stopAfter: "plan_search_queries",
-      checkpointer: this.graphCheckpointer
+      checkpointer: await this.getGraphCheckpointer()
     }).invoke(
       createInitialWorkflowState(taskId) as Record<string, unknown>,
       this.workflowConfig(taskId, "planning")
@@ -325,7 +567,7 @@ export class AgentWorkflowService {
     const workflow = (await createLeadHuntWorkflowGraph({
       startAt: "generate_email",
       handlers,
-      checkpointer: this.graphCheckpointer
+      checkpointer: await this.getGraphCheckpointer()
     }).invoke(
       createInitialWorkflowState(taskId) as Record<string, unknown>,
       this.workflowConfig(taskId, "approval-to-email")
@@ -585,7 +827,7 @@ export class AgentWorkflowService {
     const workflow = (await createLeadHuntWorkflowGraph({
       startAt: "brave_search",
       handlers: graphRun.handlers,
-      checkpointer: this.graphCheckpointer
+      checkpointer: await this.getGraphCheckpointer()
     }).invoke(
       createInitialWorkflowState(taskId) as Record<string, unknown>,
       this.workflowConfig(taskId, "search-to-email")
@@ -619,7 +861,7 @@ export class AgentWorkflowService {
         searchQueries: {
           where: { executionStatus: "pending" },
           orderBy: { createdAt: "asc" },
-          take: queryLimit
+          ...(queryLimit ? { take: queryLimit } : {})
         }
       }
     });
@@ -650,8 +892,10 @@ export class AgentWorkflowService {
     }
 
     await this.markStepRunning(taskId, "brave_search");
+    await this.touchRunningTask(taskId);
     const payload = parseTaskPayload(task.inputPayload);
     const criteria = buildIcpCriteria(payload);
+    const candidateAiEvaluator = this.createCandidateAiEvaluator(payload);
     let resultCount = 0;
     let createdCandidates = 0;
     let skippedCandidates = 0;
@@ -668,14 +912,36 @@ export class AgentWorkflowService {
         count: 20
       };
       try {
+        await this.prisma.searchQuery.update({
+          where: { id: query.id },
+          data: {
+            executionStatus: "running",
+            resultCount: 0,
+            qualifiedCount: 0
+          }
+        });
         const search = await this.runSearchWithDevelopmentFallback(query.id, searchParams, query.country);
+        await this.prisma.searchQuery.update({
+          where: { id: query.id },
+          data: {
+            resultCount: search.count
+          }
+        });
         const candidateResults = search.results.slice(0, MAX_CANDIDATE_RESULTS_PER_QUERY);
-        const saved = await this.leadQualificationService.saveCandidates(
-          taskId,
-          candidateResults,
-          criteria,
-          query.country ?? undefined
-        );
+        const saved = candidateAiEvaluator
+          ? await this.leadQualificationService.saveCandidates(
+              taskId,
+              candidateResults,
+              criteria,
+              query.country ?? undefined,
+              candidateAiEvaluator
+            )
+          : await this.leadQualificationService.saveCandidates(
+              taskId,
+              candidateResults,
+              criteria,
+              query.country ?? undefined
+            );
         usedDevelopmentFallback ||= search.fallback;
         resultCount += search.count;
         createdCandidates += saved.createdCount;
@@ -688,6 +954,7 @@ export class AgentWorkflowService {
             qualifiedCount: saved.createdCount
           }
         });
+        await this.touchRunningTask(taskId);
       } catch (error) {
         failedQueries += 1;
         searchErrors.push({ queryId: query.id, message: searchErrorMessage(error) });
@@ -699,6 +966,7 @@ export class AgentWorkflowService {
             qualifiedCount: 0
           }
         });
+        await this.touchRunningTask(taskId);
         continue;
       }
     }
@@ -724,14 +992,23 @@ export class AgentWorkflowService {
       };
     }
 
-    await this.markStepCompleted(taskId, "brave_search", {
+    const queryStats = await this.aggregateSearchQueryStats(taskId, {
       executedQueries: task.searchQueries.length,
       successfulQueries: task.searchQueries.length - failedQueries,
       failedQueries,
       resultCount,
-      fallback: usedDevelopmentFallback,
       hasMore,
       remainingQueries
+    });
+
+    await this.markStepCompleted(taskId, "brave_search", {
+      executedQueries: queryStats.executedQueries,
+      successfulQueries: queryStats.successfulQueries,
+      failedQueries: queryStats.failedQueries,
+      resultCount: queryStats.resultCount,
+      fallback: usedDevelopmentFallback,
+      hasMore: queryStats.hasMore,
+      remainingQueries: queryStats.remainingQueries
     });
     await this.markStepCompleted(taskId, "normalize_leads", {
       createdCandidates,
@@ -746,16 +1023,58 @@ export class AgentWorkflowService {
 
     return {
       ok: true,
-      executedQueries: task.searchQueries.length,
-      successfulQueries: task.searchQueries.length - failedQueries,
-      failedQueries,
-      resultCount,
+      executedQueries: queryStats.executedQueries,
+      successfulQueries: queryStats.successfulQueries,
+      failedQueries: queryStats.failedQueries,
+      resultCount: queryStats.resultCount,
       createdCandidates,
       skippedCandidates,
       fallback: usedDevelopmentFallback,
       errors: searchErrors,
-      hasMore,
-      remainingQueries
+      hasMore: queryStats.hasMore,
+      remainingQueries: queryStats.remainingQueries
+    };
+  }
+
+  private async aggregateSearchQueryStats(
+    taskId: string,
+    fallback: {
+      executedQueries: number;
+      successfulQueries: number;
+      failedQueries: number;
+      resultCount: number;
+      hasMore: boolean;
+      remainingQueries: number;
+    }
+  ) {
+    const queries = await this.prisma.searchQuery.findMany({
+      where: { taskId },
+      select: {
+        executionStatus: true,
+        resultCount: true
+      }
+    });
+
+    if (!queries.length) {
+      return fallback;
+    }
+
+    const completedQueries = queries.filter((query) => query.executionStatus === "completed");
+    const failedQueries = queries.filter((query) => query.executionStatus === "failed");
+    const remainingQueries = queries.filter(
+      (query) => query.executionStatus === "pending" || query.executionStatus === "running"
+    );
+
+    return {
+      executedQueries: completedQueries.length + failedQueries.length,
+      successfulQueries: completedQueries.length,
+      failedQueries: failedQueries.length,
+      resultCount: Math.max(
+        queries.reduce((sum, query) => sum + (query.resultCount ?? 0), 0),
+        fallback.resultCount
+      ),
+      hasMore: remainingQueries.length > 0,
+      remainingQueries: remainingQueries.length
     };
   }
 
@@ -765,6 +1084,13 @@ export class AgentWorkflowService {
         taskId,
         executionStatus: "pending"
       }
+    });
+  }
+
+  private async touchRunningTask(taskId: string) {
+    await this.prisma.leadTask.update({
+      where: { id: taskId },
+      data: { status: "running" }
     });
   }
 
@@ -878,7 +1204,7 @@ export class AgentWorkflowService {
       const workflow = (await createLeadHuntWorkflowGraph({
         startAt: "brave_search",
         handlers: graphRun.handlers,
-        checkpointer: this.graphCheckpointer
+        checkpointer: await this.getGraphCheckpointer()
       }).invoke(
         new Command({ resume: { leadIds: input.leadIds, approvedBy: userId } }),
         this.workflowConfig(taskId, "search-to-email")
@@ -1212,7 +1538,7 @@ export class AgentWorkflowService {
     return task;
   }
 
-  private async buildTaskContext(userId: string, input: CreateTaskInput) {
+  private async buildTaskContext(userId: string, input: CreateTaskInput, taskId?: string) {
     const [productProfile, customerProfile] = await Promise.all([
       this.prisma.productProfile.findUnique({ where: { userId } }),
       this.prisma.customerProfile.findUnique({ where: { userId } })
@@ -1258,8 +1584,9 @@ export class AgentWorkflowService {
         referenceCustomerUrls
       })) ?? emptyProfileSiteEvidence();
     const siteKeywordHints = collectSiteKeywordHints(siteEvidence);
-    const productProfileAnalysis = buildProductProfileAnalysis(product, siteEvidence.productSites);
-    const customerProfileAnalysis = buildCustomerProfileAnalysis(customer, siteEvidence.referenceCustomerSites);
+    const ruleProductProfileAnalysis = buildProductProfileAnalysis(product, siteEvidence.productSites);
+    const ruleCustomerProfileAnalysis = buildCustomerProfileAnalysis(customer, siteEvidence.referenceCustomerSites);
+    const targetMarkets = resolveTargetMarkets(input.prompt, customer?.targetRegions);
     const profileKeywordInput = {
       taskText: input.prompt,
       productProfileUrls,
@@ -1275,18 +1602,35 @@ export class AgentWorkflowService {
         ]).join(" ")
       ),
       customerProfileNotes: buildEvidenceNotes(customer?.notes, siteEvidence.referenceCustomerSites),
-      targetMarkets: resolveTargetMarkets(input.prompt, customer?.targetRegions),
+      targetMarkets,
       productTerms: siteKeywordHints.productTerms,
       customerIntentTerms: siteKeywordHints.customerIntentTerms,
       scenarioTerms: siteKeywordHints.scenarioTerms
     };
-    const keywordGroups = createKeywordGroups({
+    const ruleKeywordGroups = createKeywordGroups({
       ...profileKeywordInput
     });
-    const searchQueries = generateSearchQueries({
+    const ruleSearchQueries = generateSearchQueries({
       ...profileKeywordInput,
       minQueryCount: 15
     });
+    const aiPlanning = await this.buildAiPlanningContext({
+      taskId,
+      input,
+      product,
+      customer,
+      siteEvidence,
+      profileKeywordInput,
+      ruleProductProfileAnalysis,
+      ruleCustomerProfileAnalysis,
+      ruleKeywordGroups,
+      ruleSearchQueries,
+      targetMarkets
+    });
+    const productProfileAnalysis = aiPlanning.productProfileAnalysis;
+    const customerProfileAnalysis = aiPlanning.customerProfileAnalysis;
+    const keywordGroups = aiPlanning.keywordGroups;
+    const searchQueries = aiPlanning.searchQueries;
 
     return {
       productProfile: product,
@@ -1302,24 +1646,441 @@ export class AgentWorkflowService {
           .filter((site) => site.status === "read")
           .map((site) => site.finalUrl),
         failedUrlCount: siteEvidence.summary.failed,
-        crmSampleCount: crmSamples.length
+        crmSampleCount: crmSamples.length,
+        aiPlanning: aiPlanning.profileSignals
       },
       executionPlan: buildExecutionPlan(Boolean(product), Boolean(customer)),
       keywordGroups,
-      searchQueries: searchQueries.map((query) => ({
-        provider: query.provider,
-        operatorSource: query.operatorSource,
-        executionStatus: query.executionStatus,
-        operatorName: query.operatorName,
-        strategyTemplate: query.strategyTemplate,
-        query: query.query,
-        keywordGroups: query.keywordGroups,
-        country: query.country,
-        effectivenessScore: query.effectivenessScore,
-        templateId: query.templateId
-      }))
+      searchQueries
     };
   }
+
+  private async buildAiPlanningContext(input: {
+    taskId?: string;
+    input: CreateTaskInput;
+    product: { websiteUrl?: string | null; productPageUrl?: string | null; documentUrls?: string[]; notes?: string | null } | null;
+    customer: { targetRegions?: string[]; referenceCustomerUrls?: string[]; crmSampleIds?: string[]; notes?: string | null } | null;
+    siteEvidence: ProfileSiteEvidence;
+    profileKeywordInput: {
+      taskText: string;
+      productProfileUrls: string[];
+      productProfileNotes?: string;
+      referenceCustomerUrls: string[];
+      crmSampleNames: string[];
+      customerProfileNotes?: string;
+      targetMarkets?: string[];
+      productTerms: string[];
+      customerIntentTerms: string[];
+      scenarioTerms: string[];
+    };
+    ruleProductProfileAnalysis: Record<string, unknown>;
+    ruleCustomerProfileAnalysis: Record<string, unknown>;
+    ruleKeywordGroups: KeywordGroups;
+    ruleSearchQueries: GeneratedSearchQuery[];
+    targetMarkets?: string[];
+  }) {
+    const fallbackReasons: string[] = [];
+    let productProfileAnalysis = input.ruleProductProfileAnalysis;
+    let customerProfileAnalysis = input.ruleCustomerProfileAnalysis;
+    let keywordGroups = input.ruleKeywordGroups;
+    let searchQueries = mapGeneratedSearchQueries(input.ruleSearchQueries);
+    let aiKeywordExpansion: KeywordExpansionResult | null = null;
+    let aiQueryCount = 0;
+
+    if (!this.leadHuntAiService) {
+      return {
+        productProfileAnalysis,
+        customerProfileAnalysis,
+        keywordGroups,
+        searchQueries,
+        profileSignals: {
+          enabled: false,
+          querySource: "deterministic_fallback",
+          fallbackReasons: ["LeadHuntAiService is not available in AgentModule"]
+        }
+      };
+    }
+
+    const productEvidenceNotes = buildEvidenceNotes(input.product?.notes, input.siteEvidence.productSites);
+    const customerEvidenceNotes = buildEvidenceNotes(input.customer?.notes, input.siteEvidence.referenceCustomerSites);
+
+    try {
+      await this.markOptionalPlanningStepRunning(input.taskId, "analyze_product_profile");
+      if (input.product?.websiteUrl) {
+        productProfileAnalysis = await this.leadHuntAiService.analyzeProductProfile({
+          websiteUrl: input.product.websiteUrl,
+          productPageUrl: input.product.productPageUrl,
+          documentUrls: input.product.documentUrls ?? [],
+          notes: productEvidenceNotes
+        });
+      } else {
+        fallbackReasons.push("No product website URL was saved; product analysis used deterministic evidence.");
+      }
+    } catch (error) {
+      fallbackReasons.push(`GPT product analysis failed: ${searchErrorMessage(error)}`);
+    } finally {
+      await this.markOptionalPlanningStepCompleted(
+        input.taskId,
+        "analyze_product_profile",
+        productProfileAnalysis as Record<string, unknown>
+      );
+    }
+
+    try {
+      await this.markOptionalPlanningStepRunning(input.taskId, "analyze_customer_profile");
+      if (input.customer?.targetRegions?.length || input.customer?.referenceCustomerUrls?.length || input.customer?.notes) {
+        customerProfileAnalysis = await this.leadHuntAiService.analyzeCustomerProfile({
+          targetRegions: input.targetMarkets?.length ? input.targetMarkets : input.customer?.targetRegions ?? ["Global"],
+          referenceCustomerUrls: input.customer?.referenceCustomerUrls ?? [],
+          crmSampleIds: input.customer?.crmSampleIds ?? [],
+          notes: customerEvidenceNotes
+        });
+      } else {
+        fallbackReasons.push("No customer profile was saved; customer analysis used deterministic defaults.");
+      }
+    } catch (error) {
+      fallbackReasons.push(`GPT customer analysis failed: ${searchErrorMessage(error)}`);
+    } finally {
+      await this.markOptionalPlanningStepCompleted(
+        input.taskId,
+        "analyze_customer_profile",
+        customerProfileAnalysis as Record<string, unknown>
+      );
+    }
+
+    try {
+      await this.markOptionalPlanningStepRunning(input.taskId, "expand_keywords");
+      aiKeywordExpansion = await this.leadHuntAiService.expandKeywords({
+        userTask: input.input.prompt,
+        productProfile: productProfileAnalysis as ProductProfileAnalysis,
+        customerProfile: customerProfileAnalysis as CustomerProfileAnalysis
+      });
+      keywordGroups = mergeKeywordGroups(
+        keywordGroupsFromAiExpansion(aiKeywordExpansion, input.targetMarkets),
+        input.ruleKeywordGroups
+      );
+    } catch (error) {
+      fallbackReasons.push(`GPT keyword expansion failed: ${searchErrorMessage(error)}`);
+    } finally {
+      await this.markOptionalPlanningStepCompleted(input.taskId, "expand_keywords", {
+        keywordGroups
+      });
+    }
+
+    try {
+      await this.markOptionalPlanningStepRunning(input.taskId, "plan_search_queries");
+      const searchPlan = await this.leadHuntAiService.generateSearchStrategy({
+        keywordGroups: aiKeywordExpansion ?? keywordExpansionFromKeywordGroups(keywordGroups),
+        targetMarkets: keywordGroups.marketTerms.length ? keywordGroups.marketTerms : input.targetMarkets ?? [],
+        operatorLibrary: compactOperatorLibrary(),
+        minQueryCount: 15
+      });
+      const aiQueries = normalizeAiSearchPlan(searchPlan, keywordGroups, input.ruleSearchQueries, 15);
+      aiQueryCount = aiQueries.filter((query) => query.templateId === "gpt55_search_strategy").length;
+      searchQueries = aiQueries;
+    } catch (error) {
+      fallbackReasons.push(`GPT search strategy failed: ${searchErrorMessage(error)}`);
+      searchQueries = mapGeneratedSearchQueries(input.ruleSearchQueries);
+    }
+
+    return {
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      keywordGroups,
+      searchQueries,
+      profileSignals: {
+        enabled: true,
+        querySource: aiQueryCount ? "gpt55_with_deterministic_fallback" : "deterministic_fallback",
+        gptSearchQueryCount: aiQueryCount,
+        fallbackQueryCount: searchQueries.length - aiQueryCount,
+        fallbackReasons
+      }
+    };
+  }
+
+  private async markOptionalPlanningStepRunning(taskId: string | undefined, nodeName: LeadHuntWorkflowNode) {
+    if (!taskId) {
+      return;
+    }
+
+    await this.markStepRunning(taskId, nodeName);
+  }
+
+  private async markOptionalPlanningStepCompleted(
+    taskId: string | undefined,
+    nodeName: LeadHuntWorkflowNode,
+    output: Record<string, unknown>
+  ) {
+    if (!taskId) {
+      return;
+    }
+
+    await this.markStepCompleted(taskId, nodeName, output);
+  }
+
+  private createCandidateAiEvaluator(payload: ReturnType<typeof parseTaskPayload>) {
+    if (!this.leadHuntAiService) {
+      return undefined;
+    }
+
+    return async (candidate: {
+      companyName: string;
+      website: string | null;
+      country: string | null;
+      sourceUrl: string;
+      summary: string | null;
+      contacts: Array<{ type: string; value: string }>;
+    }): Promise<CandidateBuyerEvaluationResult | null> => {
+      try {
+        return await this.leadHuntAiService!.evaluateCandidateBuyer({
+          candidate: {
+            companyName: candidate.companyName,
+            websiteUrl: candidate.website ?? candidate.sourceUrl,
+            country: candidate.country,
+            snippet: candidate.summary,
+            sourceUrl: candidate.sourceUrl,
+            contacts: {
+              emails: candidate.contacts.filter((contact) => contact.type === "email").map((contact) => contact.value),
+              phones: candidate.contacts.filter((contact) => contact.type === "phone").map((contact) => contact.value),
+              socialProfiles: candidate.contacts.filter((contact) => contact.type === "social").map((contact) => contact.value)
+            }
+          },
+          productProfile: payload.productProfileAnalysis ?? payload.productProfile ?? {},
+          customerProfile: payload.customerProfileAnalysis ?? payload.customerProfile ?? {},
+          targetRegions: buildIcpCriteria(payload).targetRegions,
+          taskContext: typeof payload.prompt === "string" ? payload.prompt : undefined
+        });
+      } catch {
+        return null;
+      }
+    };
+  }
+}
+
+function mapGeneratedSearchQueries(queries: GeneratedSearchQuery[]): PlannedSearchQuery[] {
+  return queries.map((query) => ({
+    provider: query.provider,
+    operatorSource: query.operatorSource,
+    executionStatus: query.executionStatus,
+    operatorName: query.operatorName,
+    strategyTemplate: query.strategyTemplate,
+    query: query.query,
+    keywordGroups: query.keywordGroups,
+    country: query.country,
+    effectivenessScore: query.effectivenessScore,
+    templateId: query.templateId
+  }));
+}
+
+function keywordGroupsFromAiExpansion(input: KeywordExpansionResult, targetMarkets: string[] | undefined): KeywordGroups {
+  const brandTerms = extractKnownBrandTerms([
+    ...input.primaryProducts,
+    ...input.relatedProducts,
+    ...input.longTailProducts
+  ]);
+
+  return {
+    brandTerms,
+    productTerms: uniqueStrings([...input.primaryProducts, ...input.relatedProducts]),
+    longTailProductTerms: uniqueStrings(input.longTailProducts),
+    customerIntentTerms: uniqueStrings([...input.purchaseIntentTerms, ...input.upstreamDownstreamTerms]),
+    marketTerms: uniqueStrings([...(targetMarkets ?? []), ...input.targetMarketTerms]),
+    scenarioTerms: uniqueStrings(input.industryScenarioTerms),
+    excludeTerms: uniqueStrings(input.exclusionTerms)
+  };
+}
+
+function keywordExpansionFromKeywordGroups(keywordGroups: KeywordGroups): KeywordExpansionResult {
+  return {
+    primaryProducts: keywordGroups.productTerms.slice(0, 8),
+    relatedProducts: keywordGroups.productTerms.slice(8, 24).length
+      ? keywordGroups.productTerms.slice(8, 24)
+      : keywordGroups.productTerms.slice(0, 8),
+    longTailProducts: keywordGroups.longTailProductTerms.slice(0, 20),
+    upstreamDownstreamTerms: keywordGroups.scenarioTerms.slice(0, 12),
+    purchaseIntentTerms: keywordGroups.customerIntentTerms.slice(0, 20),
+    targetMarketTerms: keywordGroups.marketTerms.slice(0, 20),
+    industryScenarioTerms: keywordGroups.scenarioTerms.slice(0, 20),
+    exclusionTerms: keywordGroups.excludeTerms.slice(0, 20)
+  };
+}
+
+function mergeKeywordGroups(primary: KeywordGroups, fallback: KeywordGroups): KeywordGroups {
+  return {
+    brandTerms: uniqueStrings([...primary.brandTerms, ...fallback.brandTerms]),
+    productTerms: uniqueStrings([...primary.productTerms, ...fallback.productTerms]),
+    longTailProductTerms: uniqueStrings([...primary.longTailProductTerms, ...fallback.longTailProductTerms]),
+    customerIntentTerms: uniqueStrings([...primary.customerIntentTerms, ...fallback.customerIntentTerms]),
+    marketTerms: primary.marketTerms.length ? uniqueStrings(primary.marketTerms) : fallback.marketTerms,
+    scenarioTerms: uniqueStrings([...primary.scenarioTerms, ...fallback.scenarioTerms]),
+    excludeTerms: uniqueStrings([...primary.excludeTerms, ...fallback.excludeTerms])
+  };
+}
+
+function compactOperatorLibrary() {
+  const library = getSearchStrategyLibrary();
+  return {
+    version: library.version,
+    operators: library.operators.map(compactStrategyTemplate),
+    templates: library.templates
+      .filter((template) => template.executionStatus === "supported" || template.executionStatus === "experimental")
+      .map(compactStrategyTemplate)
+  };
+}
+
+function compactStrategyTemplate(template: {
+  id: string;
+  operatorSource: string;
+  executionStatus: string;
+  operatorName: string;
+  strategyTemplate: string;
+  effectivenessScore: number;
+}) {
+  return {
+    id: template.id,
+    operatorSource: template.operatorSource,
+    executionStatus: template.executionStatus,
+    operatorName: template.operatorName,
+    strategyTemplate: template.strategyTemplate,
+    effectivenessScore: template.effectivenessScore
+  };
+}
+
+function normalizeAiSearchPlan(
+  plan: SearchStrategyPlan,
+  keywordGroups: KeywordGroups,
+  fallbackQueries: GeneratedSearchQuery[],
+  minQueryCount: number
+): PlannedSearchQuery[] {
+  const countryPool = keywordGroups.marketTerms.length ? keywordGroups.marketTerms : ["UAE"];
+  const supportedStatuses = new Set(["supported", "experimental"]);
+  const seen = new Set<string>();
+  const output: PlannedSearchQuery[] = [];
+
+  for (const query of [...plan.queries].sort((left, right) => left.priority - right.priority)) {
+    if (!supportedStatuses.has(query.executionStatus)) {
+      continue;
+    }
+
+    const country = resolveAiQueryCountry(query.country, countryPool, output.length);
+    const queryText = normalizeAiQueryText(query.query, country, keywordGroups);
+    if (!queryText || seen.has(queryText.toLowerCase())) {
+      continue;
+    }
+
+    if (!hasEnoughQuerySignals(queryText, keywordGroups, country)) {
+      continue;
+    }
+
+    seen.add(queryText.toLowerCase());
+    output.push({
+      provider: "brave",
+      operatorSource: query.operatorSource as OperatorSource,
+      executionStatus: query.executionStatus as "supported" | "experimental",
+      operatorName: "GPT-5.5 buyer-led search",
+      strategyTemplate: query.rationale,
+      query: queryText,
+      keywordGroups,
+      country,
+      effectivenessScore: Math.max(0.2, 1 - (query.priority - 1) * 0.12),
+      templateId: "gpt55_search_strategy"
+    });
+  }
+
+  for (const fallback of mapGeneratedSearchQueries(fallbackQueries)) {
+    if (output.length >= minQueryCount) {
+      break;
+    }
+    const key = fallback.query.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(fallback);
+  }
+
+  return output;
+}
+
+function resolveAiQueryCountry(rawCountry: string, countryPool: string[], index: number) {
+  const normalized = normalizeCountryAlias(rawCountry);
+  const direct = countryPool.find((country) => country.toLowerCase() === normalized.toLowerCase());
+  if (direct) {
+    return direct;
+  }
+
+  return countryPool[index % countryPool.length] ?? countryPool[0] ?? "UAE";
+}
+
+function normalizeCountryAlias(value: string) {
+  const normalized = value.trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    ae: "UAE",
+    uae: "UAE",
+    "united arab emirates": "UAE",
+    sa: "Saudi Arabia",
+    ksa: "Saudi Arabia",
+    "saudi arabia": "Saudi Arabia",
+    qa: "Qatar",
+    om: "Oman",
+    us: "United States",
+    usa: "United States",
+    uk: "United Kingdom"
+  };
+
+  return aliases[normalized] ?? value.trim();
+}
+
+function normalizeAiQueryText(query: string, country: string, keywordGroups: KeywordGroups) {
+  const cleaned = query
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) {
+    return "";
+  }
+
+  const withCountry = queryMentionsCountry(cleaned, country) ? cleaned : `${cleaned} "${country}"`;
+  return appendSafeNegativeTerms(withCountry, keywordGroups.excludeTerms)
+    .slice(0, 480)
+    .replace(/\s+$/, "");
+}
+
+function queryMentionsCountry(query: string, country: string) {
+  const lower = query.toLowerCase();
+  return lower.includes(country.toLowerCase()) || lower.includes(normalizeCountryAlias(country).toLowerCase());
+}
+
+function appendSafeNegativeTerms(query: string, excludeTerms: string[]) {
+  const safeTerms = ["job", "jobs", "career", "careers", "hiring", "salary", "training", "course", "wikipedia"];
+  const configuredSafeTerms = excludeTerms.filter((term) => safeTerms.includes(term.toLowerCase()));
+  const terms = uniqueStrings([...safeTerms.slice(0, 5), ...configuredSafeTerms]).slice(0, 8);
+  const missingTerms = terms
+    .filter((term) => !new RegExp(`-${quoteRegExp(term)}\\b`, "i").test(query))
+    .map((term) => `-${term}`);
+
+  return [query, ...missingTerms].join(" ").replace(/\s+/g, " ").trim();
+}
+
+function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, country: string) {
+  const lower = query.toLowerCase();
+  const hasCountry = queryMentionsCountry(query, country);
+  const hasProduct = keywordGroups.productTerms.some((term) => lower.includes(term.toLowerCase()));
+  const hasCustomer = keywordGroups.customerIntentTerms.some((term) => lower.includes(term.toLowerCase()));
+  const hasScenario = keywordGroups.scenarioTerms.some((term) => lower.includes(term.toLowerCase()));
+
+  return hasCountry && (hasProduct || hasCustomer || hasScenario);
+}
+
+function extractKnownBrandTerms(values: string[]) {
+  const brands = ["Huawei", "ZTE", "Ericsson", "Nokia", "Eltek", "Alcatel-Lucent", "Delta", "Vertiv"];
+  const text = values.join(" ").toLowerCase();
+  return brands.filter((brand) => text.includes(brand.toLowerCase()));
+}
+
+function quoteRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function buildExecutionPlan(hasProductProfile: boolean, hasCustomerProfile: boolean) {
@@ -1388,7 +2149,16 @@ function asStringArray(value: unknown): string[] {
 
 function resolveTargetMarkets(taskText: string, profileRegions: string[] | undefined): string[] | undefined {
   const taskMarkets = detectTaskMarkets(taskText);
-  return taskMarkets.length ? taskMarkets : profileRegions;
+  return normalizeTargetMarkets(taskMarkets.length ? taskMarkets : profileRegions);
+}
+
+function normalizeTargetMarkets(markets: string[] | undefined) {
+  const uniqueMarkets = uniqueStrings(markets ?? []);
+  if (uniqueMarkets.length > 1) {
+    return uniqueMarkets.filter((market) => market.toLowerCase() !== "global");
+  }
+
+  return uniqueMarkets.length ? uniqueMarkets : undefined;
 }
 
 function detectTaskMarkets(text: string): string[] {
@@ -1563,11 +2333,27 @@ function uniqueStrings(values: string[]) {
 }
 
 function parseTaskPayload(value: Prisma.JsonValue | null): {
+  prompt?: string | null;
   productProfile?: { notes?: string | null } | null;
+  productProfileAnalysis?: Record<string, unknown> | null;
   customerProfile?: { targetRegions?: string[]; notes?: string | null } | null;
+  customerProfileAnalysis?: Record<string, unknown> | null;
   keywordGroups?: Partial<KeywordGroups>;
 } {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as ReturnType<typeof parseTaskPayload>) : {};
+}
+
+function createTaskInputFromPayload(value: Prisma.JsonValue | null, targetCount?: number): CreateTaskInput | null {
+  const payload = parseTaskPayload(value);
+  const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
+  if (!prompt) {
+    return null;
+  }
+
+  return {
+    prompt,
+    ...(targetCount ? { targetCount } : {})
+  };
 }
 
 function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScoringCriteria {
@@ -1603,7 +2389,11 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
 }
 
 function resolveSearchBatchLimit(limit: number | undefined) {
-  const requested = typeof limit === "number" && Number.isFinite(limit) ? limit : DEFAULT_SYNC_SEARCH_QUERY_LIMIT;
+  if (typeof limit !== "number" || !Number.isFinite(limit)) {
+    return undefined;
+  }
+
+  const requested = limit;
   return Math.min(Math.max(Math.trunc(requested), 1), MAX_SYNC_SEARCH_QUERY_LIMIT);
 }
 

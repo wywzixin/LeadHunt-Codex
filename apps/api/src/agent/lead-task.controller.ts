@@ -20,7 +20,7 @@ const approveLeadTaskSchema = z.object({
 });
 
 const executeSearchSchema = z.object({
-  limit: z.number().int().min(1).max(15).optional()
+  limit: z.number().int().min(1).max(500).optional()
 });
 
 @Controller("api/lead-tasks")

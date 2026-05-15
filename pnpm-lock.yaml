@@ -38,6 +38,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@langchain/langgraph-checkpoint-postgres':
+        specifier: 1.0.1
+        version: 1.0.1(@langchain/core@1.1.42)(@langchain/langgraph-checkpoint@1.0.1(@langchain/core@1.1.42))
       '@leadhunt/agent':
         specifier: workspace:*
         version: link:../../packages/agent
@@ -552,6 +555,13 @@ packages:
   '@langchain/core@1.1.42':
     resolution: {integrity: sha512-d0tN96BrwPMryYyWR9VfyAntSivn7EQrZCe5Kpxum93tcjTXbKKmKvItFec8AluQt88iTcmAJrahUZUNfzGwTA==}
     engines: {node: '>=20'}
+
+  '@langchain/langgraph-checkpoint-postgres@1.0.1':
+    resolution: {integrity: sha512-cRXOLYZc0egMjyAQfBblWXdoBS+WKwEbCEuE+/f88XHJ1bq5jVz7aycbpjF/7F5EykG7xmybQOz5eUdg3neRzg==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@langchain/core': ^1.0.1
+      '@langchain/langgraph-checkpoint': ^1.0.0
 
   '@langchain/langgraph-checkpoint@1.0.1':
     resolution: {integrity: sha512-HM0cJLRpIsSlWBQ/xuDC67l52SqZ62Bh2Y61DX+Xorqwoh5e1KxYvfCD7GnSTbWWhjBOutvnR0vPhu4orFkZfw==}
@@ -2857,6 +2867,14 @@ snapshots:
       - '@opentelemetry/sdk-trace-base'
       - openai
       - ws
+
+  '@langchain/langgraph-checkpoint-postgres@1.0.1(@langchain/core@1.1.42)(@langchain/langgraph-checkpoint@1.0.1(@langchain/core@1.1.42))':
+    dependencies:
+      '@langchain/core': 1.1.42
+      '@langchain/langgraph-checkpoint': 1.0.1(@langchain/core@1.1.42)
+      pg: 8.20.0
+    transitivePeerDependencies:
+      - pg-native
 
   '@langchain/langgraph-checkpoint@1.0.1(@langchain/core@1.1.42)':
     dependencies:

@@ -54,9 +54,11 @@ export const defaultKeywordGroups: KeywordGroups = {
   brandTerms: ["Huawei", "ZTE", "Ericsson", "Nokia", "Eltek", "Delta", "Vertiv"],
   productTerms: [
     "telecom equipment",
+    "telecom spare parts",
     "5G telecom equipment",
     "5G base station equipment",
     "radio access network equipment",
+    "base station spare parts",
     "RRU",
     "BBU",
     "AAU",
@@ -66,6 +68,7 @@ export const defaultKeywordGroups: KeywordGroups = {
     "spare parts"
   ],
   longTailProductTerms: [
+    "base station spare parts replacement",
     "Huawei RRU spare parts",
     "ZTE BBU boards",
     "telecom power rectifier module",
@@ -74,37 +77,58 @@ export const defaultKeywordGroups: KeywordGroups = {
     "refurbished telecom equipment"
   ],
   customerIntentTerms: [
-    "telecom equipment distributor",
-    "distributor",
-    "stockist",
-    "system integrator",
-    "telecom system integrator",
+    "network maintenance company",
+    "base station maintenance company",
+    "RAN maintenance",
+    "cell site maintenance",
+    "telecom field services",
+    "tower maintenance company",
+    "tower company",
+    "wireless infrastructure contractor",
+    "telecom power maintenance",
     "telecom contractor",
-    "turnkey contractor",
-    "importer",
-    "project supply",
+    "telecom system integrator",
+    "system integrator",
+    "mobile network operator",
+    "telecom operator procurement",
+    "vendor registration",
+    "ISP network operations",
+    "WISP",
+    "FTTH operator",
+    "equipment repair service",
+    "spare parts management",
     "project procurement",
     "purchasing",
     "procurement",
-    "network maintenance company",
-    "telecom operator procurement"
+    "telecom equipment distributor",
+    "stockist",
+    "distributor",
+    "turnkey contractor",
+    "importer",
+    "project supply"
   ],
   marketTerms: [
     "UAE",
     "Saudi Arabia",
     "Qatar",
     "Oman",
-    "Iran",
-    "Israel",
-    "Ukraine",
-    "Russia",
-    "United States",
-    "Germany",
-    "United Kingdom",
     "Brazil",
-    "Chile",
+    "Mexico",
+    "Colombia",
+    "Indonesia",
+    "Philippines",
     "Nigeria",
-    "South Africa"
+    "South Africa",
+    "Kenya",
+    "Egypt",
+    "Morocco",
+    "Ghana",
+    "Tanzania",
+    "Vietnam",
+    "Thailand",
+    "Malaysia",
+    "Chile",
+    "Peru"
   ],
   scenarioTerms: [
     "telecom infrastructure",
@@ -112,6 +136,13 @@ export const defaultKeywordGroups: KeywordGroups = {
     "network rollout",
     "site maintenance",
     "base station maintenance",
+    "RAN maintenance",
+    "cell site maintenance",
+    "tower maintenance",
+    "telecom power maintenance",
+    "rectifier replacement",
+    "spare parts replacement",
+    "FTTH network maintenance",
     "tower power",
     "IBS solution",
     "equipment replacement"
@@ -125,12 +156,21 @@ export const defaultKeywordGroups: KeywordGroups = {
     "news",
     "blog",
     "forum",
+    "directory",
+    "yellow pages",
+    "supplier directory",
+    "company directory",
+    "trade directory",
     "youtube",
     "facebook",
     "linkedin",
     "wiki",
     "consumer",
+    "consumer phone",
+    "phone accessories",
+    "smartphone",
     "marketplace",
+    "B2B marketplace",
     "Alibaba",
     "Accio",
     "TradeWheel",
@@ -168,165 +208,192 @@ const operatorCatalog: SearchStrategyTemplate[] = [
 
 const executableTemplates: SearchStrategyTemplate[] = [
   template(
-    "direct_distributor_country",
+    "maintenance_company_contact",
     "brave_official",
     "experimental",
-    "direct_company buyer_profile",
-    "(\"telecom equipment distributor\" OR \"telecom spare parts stockist\" OR \"telecom equipment stockist\") {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
+    "maintenance_company contact",
+    "(\"base station maintenance\" OR \"RAN maintenance\" OR \"cell site maintenance\" OR \"network maintenance company\") (telecom OR \"mobile network\" OR 5G) {country} (\"contact\" OR \"about us\" OR services) {exclude}",
+    ["scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.98
+  ),
+  template(
+    "ran_field_service",
+    "brave_official",
+    "experimental",
+    "ran_field_service buyer_profile",
+    "(\"telecom field services\" OR \"RAN services\" OR \"radio access network maintenance\") (\"base station\" OR RRU OR BBU OR AAU) {country} {exclude}",
+    ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.97
+  ),
+  template(
+    "tower_company_maintenance",
+    "brave_official",
+    "experimental",
+    "towerco_maintenance buyer_profile",
+    "(\"tower maintenance\" OR \"cell tower services\" OR \"tower company\" OR towerco) (telecom OR \"mobile network\" OR \"base station\") {country} {exclude}",
+    ["scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.96
+  ),
+  template(
+    "telecom_power_maintenance",
+    "brave_official",
+    "experimental",
+    "power_maintenance buyer_profile",
+    "(\"telecom power maintenance\" OR \"cell site power\" OR \"rectifier replacement\" OR \"48V power system\") (rectifier OR \"power module\" OR Eltek OR Huawei) {country} {exclude}",
+    ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.95
+  ),
+  template(
+    "wireless_infrastructure_contractor",
+    "brave_official",
+    "experimental",
+    "contractor buyer_profile",
+    "(\"wireless infrastructure contractor\" OR \"telecom infrastructure contractor\" OR \"network rollout contractor\") (\"base station\" OR RAN OR 5G) {country} {exclude}",
+    ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.94
+  ),
+  template(
+    "ftth_isp_operations",
+    "brave_official",
+    "experimental",
+    "isp_operations buyer_profile",
+    "(ISP OR WISP OR \"FTTH operator\" OR \"fiber network operator\") (\"network operations\" OR maintenance OR procurement) (OLT OR SFP OR \"optical module\" OR telecom) {country} {exclude}",
+    ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.93
+  ),
+  template(
+    "operator_vendor_registration",
+    "brave_official",
+    "experimental",
+    "operator_procurement buyer_signal",
+    "(\"mobile network operator\" OR \"telecom operator\" OR carrier) (\"vendor registration\" OR \"supplier registration\" OR procurement OR purchasing) (\"telecom equipment\" OR \"base station\" OR 5G) {country} {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.92
   ),
   template(
     "direct_integrator_contact",
     "brave_official",
     "experimental",
     "direct_company contact",
-    "(\"telecom system integrator\" OR \"telecom contractor\" OR \"network rollout contractor\") {country} (\"contact\" OR \"about\" OR \"services\" OR \"projects\")",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
-    0.94
-  ),
-  template(
-    "radio_parts_stockist",
-    "brave_official",
-    "experimental",
-    "radio_parts buyer_profile",
-    "(\"RRU\" OR \"BBU\" OR \"AAU\") (\"distributor\" OR \"stockist\" OR \"spare parts\" OR \"repair\") {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
-    0.93
-  ),
-  template(
-    "specific_model_stockist",
-    "brave_official",
-    "experimental",
-    "catalog_model buyer_profile",
-    "({specific_product_or}) (\"telecom spare parts\" OR stockist OR distributor OR supplier) {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
-    0.92
-  ),
-  template(
-    "brand_equipment_supplier",
-    "brave_official",
-    "experimental",
-    "brand_parts buyer_profile",
-    "({brand_or}) (\"telecom equipment\" OR \"RRU\" OR \"BBU\" OR \"AAU\") (\"supplier\" OR \"stockist\" OR \"distributor\") {country}",
-    ["brandTerms", "productTerms", "customerIntentTerms", "marketTerms"],
+    "(\"telecom system integrator\" OR \"telecom contractor\" OR \"network rollout contractor\") {country} (\"contact\" OR \"about\" OR \"services\" OR \"projects\") {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.91
-  ),
-  template(
-    "network_maintenance_company",
-    "brave_official",
-    "experimental",
-    "maintenance buyer_profile",
-    "(\"network maintenance company\" OR \"site maintenance\" OR \"base station maintenance\") (\"telecom\" OR \"5G\" OR \"mobile network\") {country}",
-    ["scenarioTerms", "customerIntentTerms", "marketTerms"],
-    0.9
-  ),
-  template(
-    "microwave_power_service",
-    "brave_official",
-    "experimental",
-    "specialized_service buyer_profile",
-    "(\"microwave backhaul\" OR \"telecom power\" OR \"rectifier module\") (\"system integrator\" OR \"maintenance\" OR \"supplier\") {country}",
-    ["productTerms", "scenarioTerms", "marketTerms"],
-    0.88
   ),
   template(
     "company_contact_broad",
     "brave_official",
     "experimental",
     "contact_page buyer_profile",
-    "(\"telecom equipment\" OR \"telecom spare parts\" OR \"base station equipment\") (\"contact\" OR \"about us\" OR \"products\" OR \"services\") {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
+    "(\"telecom infrastructure\" OR \"base station equipment\" OR \"radio access network\") (\"contact\" OR \"about us\" OR \"services\" OR \"projects\") {country} {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.9
+  ),
+  template(
+    "radio_parts_service_repair",
+    "brave_official",
+    "experimental",
+    "radio_parts service_profile",
+    "(\"RRU\" OR \"BBU\" OR \"AAU\") (maintenance OR repair OR replacement OR \"spare parts management\") (telecom OR \"base station\") {country} {exclude}",
+    ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.89
+  ),
+  template(
+    "specific_model_stockist",
+    "brave_official",
+    "experimental",
+    "catalog_model service_profile",
+    "({specific_product_or}) (maintenance OR repair OR replacement OR \"spare parts\") (telecom OR \"base station\" OR RAN) {country} {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.88
+  ),
+  template(
+    "spare_parts_repair_inventory",
+    "brave_official",
+    "experimental",
+    "spare_parts_management buyer_profile",
+    "(\"telecom spare parts\" OR \"base station spare parts\" OR \"RAN spare parts\") (\"spare parts management\" OR repair OR maintenance OR replacement) {country} {exclude}",
+    ["longTailProductTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.87
-  ),
-  template(
-    "procurement_signal_broad",
-    "brave_official",
-    "experimental",
-    "procurement buyer_signal",
-    "(\"procurement\" OR \"purchasing\" OR RFQ OR tender) (\"telecom equipment\" OR \"base station\" OR \"5G\") {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
-    0.84
-  ),
-  template(
-    "marketplace_directory_discovery",
-    "brave_official",
-    "experimental",
-    "directory_discovery buyer_profile",
-    "(\"telecom equipment\" OR \"RRU\" OR \"BBU\") (\"supplier directory\" OR marketplace OR B2B OR importer) {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
-    0.8
   ),
   template(
     "regional_projects_signal",
     "brave_official",
     "experimental",
     "project_delivery buyer_profile",
-    "(\"telecom infrastructure\" OR \"5G network rollout\" OR \"base station\") (project OR implementation OR deployment OR contractor) {country}",
-    ["scenarioTerms", "customerIntentTerms", "marketTerms"],
-    0.82
+    "(\"telecom infrastructure\" OR \"5G network rollout\" OR \"base station\") (project OR implementation OR deployment OR contractor) {country} {exclude}",
+    ["scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.86
+  ),
+  template(
+    "das_small_cell_integrator",
+    "brave_official",
+    "experimental",
+    "das_private_5g buyer_profile",
+    "(DAS OR \"small cell\" OR \"private 5G\") (\"system integrator\" OR contractor OR maintenance) {country} {exclude}",
+    ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.84
   ),
   template(
     "pdf_company_brochure",
     "brave_official",
     "experimental",
     "filetype company_profile",
-    "filetype:pdf \"telecom equipment\" (\"company profile\" OR brochure OR contact OR projects) {country}",
-    ["productTerms", "scenarioTerms", "marketTerms"],
-    0.78
+    "filetype:pdf (\"telecom infrastructure\" OR \"network maintenance\" OR \"base station\") (\"company profile\" OR brochure OR contact OR projects) {country} {exclude}",
+    ["productTerms", "scenarioTerms", "marketTerms", "excludeTerms"],
+    0.8
   ),
   template(
-    "spare_parts_inventory",
+    "direct_distributor_country",
     "brave_official",
     "experimental",
-    "stock_inventory buyer_profile",
-    "(\"telecom spare parts\" OR \"telecom inventory\" OR \"Huawei ZTE spare parts\") (stock OR inventory OR supplier OR stockist) {country}",
-    ["longTailProductTerms", "customerIntentTerms", "marketTerms"],
-    0.79
+    "secondary_distributor buyer_profile",
+    "(\"telecom equipment distributor\" OR \"telecom spare parts stockist\" OR \"telecom equipment stockist\") {country} {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.74
   ),
   template(
     "intitle_integrator_country",
     "brave_official",
     "experimental",
     "intitle buyer_profile",
-    "intitle:\"telecom\" (distributor OR stockist OR \"system integrator\" OR contractor) {country}",
-    ["customerIntentTerms", "marketTerms"],
-    0.76
+    "intitle:\"telecom\" (\"system integrator\" OR contractor OR maintenance OR distributor OR stockist) {country} {exclude}",
+    ["customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.72
   ),
   template(
     "brand_repair_parts_services",
     "brave_official",
     "experimental",
     "brand_repair buyer_profile",
-    "({brand_or}) (repair OR refurbished OR \"spare parts\") (telecom OR RRU OR BBU) {country}",
-    ["brandTerms", "productTerms", "marketTerms"],
-    0.75
+    "({brand_or}) (repair OR refurbished OR maintenance OR \"spare parts\") (telecom OR RRU OR BBU OR \"base station\") {country} {exclude}",
+    ["brandTerms", "productTerms", "marketTerms", "excludeTerms"],
+    0.71
   ),
   template(
-    "operator_procurement_contact",
+    "procurement_signal_broad",
     "google_official",
     "experimental",
-    "operator_procurement buyer_signal",
-    "(\"mobile network operator\" OR \"telecom operator\" OR carrier) (\"procurement contact\" OR partners OR tender) (\"5G\" OR \"telecom equipment\") {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
-    0.64
+    "procurement buyer_signal",
+    "(\"procurement\" OR \"purchasing\" OR RFQ OR tender) (\"telecom equipment\" OR \"base station\" OR \"5G\") {country} {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.68
   ),
   template(
     "distributor_exact_scenario",
     "google_official",
     "experimental",
     "exact_phrase boolean_or",
-    "\"telecom equipment distributor\" ({scenario_or}) {country}",
-    ["customerIntentTerms", "scenarioTerms", "marketTerms"],
-    0.63
+    "\"telecom equipment distributor\" ({scenario_or}) {country} {exclude}",
+    ["customerIntentTerms", "scenarioTerms", "marketTerms", "excludeTerms"],
+    0.62
   ),
   template(
     "tower_power_ibs",
     "brave_official",
     "experimental",
     "exact_phrase buyer_profile",
-    "(\"tower power\" OR \"IBS service\" OR \"site maintenance\") (\"telecom\" OR \"mobile network\") {country}",
-    ["scenarioTerms", "marketTerms"],
+    "(\"tower power\" OR \"IBS service\" OR \"site maintenance\") (\"telecom\" OR \"mobile network\") {country} {exclude}",
+    ["scenarioTerms", "marketTerms", "excludeTerms"],
     0.62
   ),
   template(
@@ -334,8 +401,8 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "contractor boolean_or",
-    "(\"telecom contractor\" OR \"network rollout\" OR \"network maintenance\") {country}",
-    ["customerIntentTerms", "scenarioTerms", "marketTerms"],
+    "(\"telecom contractor\" OR \"network rollout\" OR \"network maintenance\") {country} {exclude}",
+    ["customerIntentTerms", "scenarioTerms", "marketTerms", "excludeTerms"],
     0.61
   ),
   template(
@@ -343,40 +410,49 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "required_term boolean_or",
-    "+telecom (\"RRU\" OR \"BBU\") (\"stockist\" OR \"distributor\") {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
-    0.69
+    "+telecom (\"RRU\" OR \"BBU\") (maintenance OR repair OR stockist OR distributor) {country} {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.6
   ),
   template(
     "site_country_company_contact",
     "brave_official",
     "experimental",
     "site company_contact",
-    "site:{country_site} (\"telecom equipment\" OR \"RRU\" OR \"BBU\") (\"distributor\" OR stockist OR \"system integrator\" OR contact) {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
-    0.68
+    "site:{country_site} (\"telecom infrastructure\" OR \"RRU\" OR \"BBU\") (maintenance OR contractor OR \"system integrator\" OR contact) {country} {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.59
   ),
   template(
     "brand_parts_country_site",
     "brave_official",
     "experimental",
     "site boolean_or",
-    "({brand_or}) (\"RRU\" OR \"BBU\" OR \"AAU\") (\"spare parts\" OR \"repair\" OR stock OR maintenance) site:{country_site} {country}",
-    ["brandTerms", "productTerms", "marketTerms"],
-    0.66
+    "({brand_or}) (\"RRU\" OR \"BBU\" OR \"AAU\") (\"spare parts\" OR \"repair\" OR replacement OR maintenance) site:{country_site} {country} {exclude}",
+    ["brandTerms", "productTerms", "marketTerms", "excludeTerms"],
+    0.58
   ),
   template(
     "operator_vendor_signal",
     "brave_official",
     "experimental",
     "operator_procurement buyer_signal",
-    "site:{country_site} (\"mobile network operator\" OR \"telecom operator\" OR carrier) (\"vendor registration\" OR \"supplier registration\" OR procurement) (\"5G\" OR telecom) {country}",
-    ["productTerms", "customerIntentTerms", "marketTerms"],
-    0.58
+    "site:{country_site} (\"mobile network operator\" OR \"telecom operator\" OR carrier) (\"vendor registration\" OR \"supplier registration\" OR procurement) (\"5G\" OR telecom) {country} {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.57
   )
 ];
 
 const nonExecutableTemplates: SearchStrategyTemplate[] = [
+  template(
+    "marketplace_directory_discovery",
+    "common_seo",
+    "manual_only",
+    "directory_discovery",
+    "(\"telecom equipment\" OR \"RRU\" OR \"BBU\") (\"supplier directory\" OR marketplace OR B2B OR importer) {country} {exclude}",
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.24
+  ),
   template(
     "manual_inurl_distributor",
     "common_seo",
@@ -527,13 +603,64 @@ function renderStrategyTemplate(
     .replaceAll("{country}", country)
     .replaceAll("{country_site}", countryToSite(country))
     .replaceAll("{loc}", countryToLoc(country))
-    .replaceAll("{exclude}", "")
+    .replaceAll("{exclude_terms}", excludeClause(keywordGroups.excludeTerms))
+    .replaceAll("{exclude}", excludeClause(keywordGroups.excludeTerms))
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function quoteOr(terms: string[]) {
   return terms.map((term) => `"${term}"`).join(" OR ");
+}
+
+function excludeClause(terms: string[]) {
+  return prioritizeExcludeTerms(terms)
+    .slice(0, 14)
+    .map(toNegativeSearchTerm)
+    .join(" ");
+}
+
+function prioritizeExcludeTerms(terms: string[]) {
+  const priority = [
+    "job",
+    "jobs",
+    "career",
+    "training",
+    "course",
+    "news",
+    "blog",
+    "forum",
+    "marketplace",
+    "directory",
+    "yellow pages",
+    "supplier directory",
+    "Alibaba",
+    "Accio",
+    "TradeWheel",
+    "Made-in-China",
+    "GlobalSources",
+    "IndiaMART"
+  ];
+  const normalizedPriority = new Map(priority.map((term, index) => [term.toLowerCase(), index]));
+
+  return [...terms].sort((left, right) => {
+    const leftPriority = normalizedPriority.get(left.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+    const rightPriority = normalizedPriority.get(right.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+    if (leftPriority !== rightPriority) {
+      return leftPriority - rightPriority;
+    }
+
+    return left.localeCompare(right);
+  });
+}
+
+function toNegativeSearchTerm(term: string) {
+  const cleaned = term.trim();
+  if (!cleaned) {
+    return "";
+  }
+
+  return /[^A-Za-z0-9-]/.test(cleaned) ? `-"${cleaned}"` : `-${cleaned}`;
 }
 
 function specificProductTerms(terms: string[]) {
@@ -550,7 +677,7 @@ function appendCatalogModelQueries(
 ) {
   const modelTemplate = templates.find((templateItem) => templateItem.id === "specific_model_stockist");
   const chunks = specificProductTermChunks(keywordGroups.productTerms);
-  if (!modelTemplate || chunks.length <= 1) {
+  if (!modelTemplate || chunks.length < 1) {
     return;
   }
 

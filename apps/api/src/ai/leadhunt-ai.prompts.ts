@@ -63,7 +63,7 @@ export const leadHuntPromptTemplates = {
   searchStrategyGeneration: {
     title: "Search strategy generation",
     instruction:
-      "Generate at least 15 Brave-compatible search queries from the provided keyword groups and operator strategy library. Use only supported or experimental operators for automated execution unless explicitly asked otherwise.",
+      "Generate at least 15 Brave-compatible B2B prospecting search queries from the provided seller products, buyer persona, target markets, feedback, and operator strategy library. Act as a telecom export salesperson: prefer real buyer scenarios such as maintenance contractors, tower companies, system integrators, ISP/network operations, operator procurement, stockists, and project contractors. Use only supported or experimental operators for automated execution, keep each query focused on one country/market, avoid broad marketplace or directory discovery unless explicitly requested, and include safe negative terms for jobs/training/consumer noise when useful.",
     outputShape: {
       queries: [
         {
@@ -76,6 +76,23 @@ export const leadHuntPromptTemplates = {
           priority: "integer 1-5"
         }
       ]
+    }
+  },
+  candidateBuyerEvaluation: {
+    title: "Candidate buyer evaluation",
+    instruction:
+      "Evaluate whether one search result is a real potential B2B buyer for the seller's telecom spare parts and infrastructure equipment. Distinguish target buyers from competitors/suppliers, directories, articles, market reports, job pages, and irrelevant pages. Do not invent evidence. If evidence is weak but the company may be relevant, choose review instead of qualified.",
+    outputShape: {
+      companyName: "string",
+      websiteUrl: "string",
+      resultType:
+        "target_buyer | possible_buyer | supplier_or_competitor | directory | content_article | job_page | market_report | irrelevant | unknown",
+      buyerType: "string such as telecom system integrator, tower maintenance company, operator procurement, stockist, unknown",
+      fitScore: "integer 0-100",
+      confidence: "number between 0 and 1",
+      decision: "qualified | review | reject",
+      matchedSignals: ["string"],
+      risks: ["string"]
     }
   },
   icpScoring: {

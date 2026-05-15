@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Check,
@@ -61,16 +61,53 @@ export function CustomerProfileForm() {
   const referenceCustomerUrls = useMemo(() => splitLines(form.referenceCustomerUrlsText), [form.referenceCustomerUrlsText]);
   const customerTypeTags = useMemo(() => extractCustomerTypes(form.notes), [form.notes]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSavedProfile() {
+      try {
+        const response = await fetch("/api/profiles/customer", { credentials: "include" });
+        if (!response.ok) {
+          return;
+        }
+        const profile = (await response.json()) as {
+          targetRegions?: string[] | null;
+          referenceCustomerUrls?: string[] | null;
+          notes?: string | null;
+        } | null;
+        if (!profile || cancelled) {
+          return;
+        }
+        const extractedIndustryKeywords = extractMergedNoteValues(profile.notes, "Customer industry keywords");
+        setForm({
+          targetRegions: normalizeTargetRegionSelection(profile.targetRegions?.length ? profile.targetRegions : INITIAL_TARGET_MARKETS),
+          industryKeywords: extractedIndustryKeywords.length ? extractedIndustryKeywords.join(", ") : initialState.industryKeywords,
+          referenceCustomerUrlsText: (profile.referenceCustomerUrls ?? []).join("\n") || initialState.referenceCustomerUrlsText,
+          notes: stripMergedNote(profile.notes, "Customer industry keywords") || initialState.notes
+        });
+      } catch {
+        // Keep local defaults if profile loading fails.
+      }
+    }
+
+    void loadSavedProfile();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function updateField(field: "industryKeywords" | "referenceCustomerUrlsText" | "notes", value: string) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
   function updateTargetRegions(targetRegions: string[]) {
-    setForm((current) => ({ ...current, targetRegions }));
+    setForm((current) => ({ ...current, targetRegions: normalizeTargetRegionSelection(targetRegions) }));
   }
 
   async function persistProfile() {
-    if (!targetRegions.length) {
+    const normalizedTargetRegions = normalizeTargetRegionSelection(targetRegions);
+    if (!normalizedTargetRegions.length) {
       return false;
     }
 
@@ -81,7 +118,7 @@ export function CustomerProfileForm() {
       },
       credentials: "include",
       body: JSON.stringify({
-        targetRegions,
+        targetRegions: normalizedTargetRegions,
         referenceCustomerUrls,
         crmSampleIds: [],
         notes: mergeProfileNotes(form.notes, "Customer industry keywords", industryTags)
@@ -448,6 +485,42 @@ function mergeProfileNotes(notes: string, label: string, values: string[]) {
   }
 
   return [cleanNotes, `${label}: ${cleanValues.join(", ")}`].filter(Boolean).join("\n");
+}
+
+function normalizeTargetRegionSelection(targetRegions: string[] = []) {
+  const uniqueRegions = Array.from(new Set(targetRegions.map((region) => region.trim()).filter(Boolean)));
+  if (uniqueRegions.length > 1) {
+    return uniqueRegions.filter((region) => region.toLowerCase() !== "global");
+  }
+
+  return uniqueRegions;
+}
+
+function extractMergedNoteValues(notes: string | null | undefined, label: string) {
+  const marker = `${label}:`;
+  const line = (notes ?? "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .find((item) => item.toLowerCase().startsWith(marker.toLowerCase()));
+
+  if (!line) {
+    return [];
+  }
+
+  return line
+    .slice(marker.length)
+    .split(/[,，、]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function stripMergedNote(notes: string | null | undefined, label: string) {
+  const marker = `${label}:`;
+  return (notes ?? "")
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().toLowerCase().startsWith(marker.toLowerCase()))
+    .join("\n")
+    .trim();
 }
 
 function extractCustomerTypes(value: string) {

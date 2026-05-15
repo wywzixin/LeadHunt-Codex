@@ -70,6 +70,28 @@ export const icpScoreSchema = z.object({
     .default({ emails: [], phones: [], socialProfiles: [] })
 });
 
+export const candidateBuyerEvaluationSchema = z.object({
+  companyName: z.string().min(1),
+  websiteUrl: z.string().min(1),
+  resultType: z.enum([
+    "target_buyer",
+    "possible_buyer",
+    "supplier_or_competitor",
+    "directory",
+    "content_article",
+    "job_page",
+    "market_report",
+    "irrelevant",
+    "unknown"
+  ]),
+  buyerType: z.string().default("unknown"),
+  fitScore: z.number().int().min(0).max(100),
+  confidence: z.number().min(0).max(1),
+  decision: z.enum(["qualified", "review", "reject"]),
+  matchedSignals: z.array(z.string().min(1)).default([]),
+  risks: z.array(z.string().min(1)).default([])
+});
+
 export const outreachEmailSchema = z.object({
   subject: z.string().min(1),
   body: z.string().min(1),
@@ -115,6 +137,7 @@ export type CustomerProfileAnalysis = z.infer<typeof customerProfileAnalysisSche
 export type KeywordExpansionResult = z.infer<typeof keywordExpansionSchema>;
 export type SearchStrategyPlan = z.infer<typeof searchStrategyPlanSchema>;
 export type IcpScoreResult = z.infer<typeof icpScoreSchema>;
+export type CandidateBuyerEvaluationResult = z.infer<typeof candidateBuyerEvaluationSchema>;
 export type OutreachEmailResult = z.infer<typeof outreachEmailSchema>;
 export type RewriteEmailResult = z.infer<typeof rewriteEmailSchema>;
 export type ReplyClassificationResult = z.infer<typeof replyClassificationSchema>;

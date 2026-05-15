@@ -28,7 +28,7 @@ import {
 } from "./mail-confirmation-modal";
 
 const defaultTaskPrompt =
-  "帮我找5G通信设备相关的买家客户，优先找经销商、现货商、系统集成商和项目采购方，先筛选目标客户再生成触达任务。";
+  "帮我找5G通信设备配件相关的买家客户，优先找基站维护、RAN维护、铁塔维护、通信电源维护、系统集成商、运营商和ISP/FTTH网络运维客户。";
 
 const landingShortcuts = [
   { label: "找客户", icon: Target },
@@ -43,9 +43,9 @@ const landingExamples = [
     icon: Target,
     title: "找通信设备买家客户",
     description:
-      "读取已保存的产品画像和客户画像，搜索同类型通信设备经销商、现货商和系统集成商，并筛选可做首轮触达的目标。",
+      "读取已保存的产品画像和客户画像，搜索基站维护、铁塔维护、通信电源维护、系统集成商和网络运维客户，并筛选可做首轮触达的目标。",
     prompt:
-      "帮我找通信设备买家客户，优先找经销商、现货商、系统集成商和项目采购方，并筛选可做首轮触达的目标。"
+      "帮我找通信设备配件买家客户，优先找维护公司、铁塔公司、通信电源维护、系统集成商、运营商和ISP网络运维客户。"
   },
   {
     icon: UsersRound,
@@ -73,11 +73,12 @@ const fallbackKeywordRows: KeywordRow[] = [
   {
     label: "客户类型词",
     values: [
-      "telecom equipment distributor",
-      "stockist",
-      "system integrator",
       "network maintenance company",
-      "tower power service"
+      "base station maintenance",
+      "RAN maintenance",
+      "tower maintenance company",
+      "telecom power maintenance",
+      "telecom system integrator"
     ]
   },
   {
@@ -95,11 +96,11 @@ const fallbackKeywordRows: KeywordRow[] = [
 ];
 
 const fallbackSearchQueries = [
-  '"telecom equipment" ("system integrator" OR stockist OR distributor) UAE',
-  '("RRU" OR "BBU") ("stockist" OR "distributor") Saudi Arabia',
-  '"microwave backhaul" "telecom power" ("maintenance" OR contractor) Middle East',
-  'filetype:pdf telecom spare parts UAE',
-  '"Huawei ZTE spare parts" ("procurement" OR "stockist") Brazil'
+  '("base station maintenance" OR "RAN maintenance") telecom UAE -job -news -marketplace -directory',
+  '("tower maintenance" OR towerco) ("mobile network" OR "base station") Saudi Arabia -yellowpages -Alibaba',
+  '("telecom power maintenance" OR "rectifier replacement") ("48V" OR Eltek OR Huawei) Nigeria -marketplace -directory',
+  '("wireless infrastructure contractor" OR "network rollout contractor") 5G Brazil -job -blog -forum',
+  '(ISP OR WISP OR "FTTH operator") (OLT OR SFP OR "optical module") Philippines -marketplace -directory'
 ];
 
 const fallbackMailLead: MailConfirmationLead = {
@@ -112,7 +113,8 @@ const fallbackMailLead: MailConfirmationLead = {
 
 const leadPageSize = 10;
 const crmPageSize = 3;
-const searchQueryBatchSize = 15;
+const taskPollIntervalMs = 2500;
+const maxTaskPollAttempts = 240;
 
 type ViewState = "landing" | "conversation";
 type StepState = "done" | "active" | "pending" | "failed";
@@ -283,6 +285,7 @@ type SearchRunResult = {
   executedQueries: number;
   successfulQueries?: number;
   failedQueries?: number;
+  runningQueries?: number;
   resultCount: number;
   createdCandidates: number;
   skippedCandidates: number;
@@ -426,6 +429,50 @@ export function AiWorkerClient() {
   }, [displayLeads]);
 
   useEffect(() => {
+    if (!currentTask?.id || !isBackendTaskActive(currentTask)) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function pollTaskProgress() {
+      for (let attempt = 0; attempt < maxTaskPollAttempts && !cancelled; attempt += 1) {
+        await wait(taskPollIntervalMs);
+        if (cancelled || !currentTask?.id) {
+          return;
+        }
+
+        try {
+          const refreshed = await refreshTask(currentTask.id);
+          applyTaskProgress(refreshed);
+          if (!isBackendTaskActive(refreshed)) {
+            void loadTaskHistory(taskSearch);
+            return;
+          }
+        } catch (requestError) {
+          if (!cancelled) {
+            setError(errorMessage(requestError));
+            setStatus("任务状态刷新失败，后端任务可能仍在执行。");
+          }
+          return;
+        }
+      }
+
+      if (!cancelled) {
+        setCreating(false);
+        setSearching(false);
+        setStatus("后台任务仍在执行，页面已停止自动轮询；可以刷新任务历史查看最新结果。");
+      }
+    }
+
+    void pollTaskProgress();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentTask?.id, currentTask?.status]);
+
+  useEffect(() => {
     if (!displayLeads.length) {
       setSelectedLeadId(null);
       return;
@@ -473,9 +520,8 @@ export function AiWorkerClient() {
       const payload = refreshed.inputPayload as { prompt?: string } | null;
       const restoredPrompt = typeof payload?.prompt === "string" ? payload.prompt : defaultTaskPrompt;
       setTaskPrompt(restoredPrompt);
-      const leadCount = refreshed.leadCandidates?.length ?? 0;
-      setStatus(`已恢复任务，候选客户 ${leadCount} 家。`);
-      if (leadCount > 0) {
+      applyTaskProgress(refreshed);
+      if ((refreshed.leadCandidates?.length ?? 0) > 0) {
         setSelectedLeadId(refreshed.leadCandidates?.[0]?.id ?? null);
       }
     } catch (requestError) {
@@ -494,113 +540,40 @@ export function AiWorkerClient() {
     setError("");
     setCreating(true);
     setStatus("正在创建 AI 任务，并读取产品画像 / 客户画像...");
+    let taskStarted = false;
 
     try {
       const payload = await apiRequest<CreateLeadTaskResponse>("/api/lead-tasks", {
         method: "POST",
         body: JSON.stringify({ prompt: nextPrompt, targetCount: 50 })
       });
-      let task = normalizeCreatedTask(payload);
+      const task = normalizeCreatedTask(payload);
+      taskStarted = true;
       setCurrentTask(task);
-      if (!(task.searchQueries?.length ?? 0)) {
-        setStatus("任务已创建，正在后台读取画像并生成搜索指令...");
-        task = await waitForSearchPlan(task.id);
-      }
-
-      const queryCount = task.searchQueries?.length ?? 0;
-      if (!queryCount) {
-        setStatus("任务已创建，搜索指令仍在生成中，稍后可继续执行搜索。");
-        return;
-      }
-
-      setStatus(`任务已创建，已生成 ${task.searchQueries?.length ?? 0} 条搜索指令，开始执行首轮搜索。`);
+      applyTaskProgress(task);
       void loadTaskHistory(taskSearch);
-      await runTaskSearch(task.id, { minimumRawResults: 20 });
     } catch (requestError) {
       setError(errorMessage(requestError));
       setStatus("任务创建失败，请检查登录状态或后端 API。");
     } finally {
-      setCreating(false);
+      if (!taskStarted) {
+        setCreating(false);
+      }
     }
   }
 
-  async function runTaskSearch(taskId = currentTask?.id, options: { minimumRawResults?: number } = {}) {
+  async function runTaskSearch(taskId = currentTask?.id) {
     if (!taskId) {
-      setStatus("请先创建任务，再执行搜索。");
+      setStatus("请先创建任务，后端会自动完成本轮搜索。");
       return;
     }
 
-    setSearching(true);
-    setError("");
-    setStatus("正在调用搜索接口，执行首批 AI 搜索指令...");
-
     try {
-      let accumulatedResultCount = 0;
-      let accumulatedCreatedCandidates = 0;
-      let accumulatedExecutedQueries = 0;
-      let lastResult: SearchRunResult | null = null;
-      let leadCount = currentTask?.leadCandidates?.length ?? 0;
-      let refreshedTask: LeadTask | null = null;
-
-      while (true) {
-        const result = await apiRequest<SearchRunResult>(`/api/lead-tasks/${taskId}/search`, {
-          method: "POST",
-          body: JSON.stringify({ limit: searchQueryBatchSize })
-        });
-        lastResult = result;
-        setSearchResult(result);
-        accumulatedResultCount += result.resultCount;
-        accumulatedCreatedCandidates += result.createdCandidates;
-        accumulatedExecutedQueries += result.executedQueries;
-        const refreshed = await refreshTask(taskId);
-        refreshedTask = refreshed;
-        leadCount = refreshed.leadCandidates?.length ?? 0;
-        if (leadCount > 0) {
-          setSelectedLeadId(refreshed.leadCandidates?.[0]?.id ?? null);
-        }
-
-        const minimumRawResults = options.minimumRawResults ?? 0;
-        const shouldContinue = Boolean(
-          minimumRawResults > 0 && result.hasMore && accumulatedResultCount < minimumRawResults
-        );
-        if (!shouldContinue) {
-          break;
-        }
-
-        setStatus(`已累计命中 ${accumulatedResultCount} 条原始结果，继续补足到 ${minimumRawResults} 条...`);
-      }
-
-      if (!lastResult) {
-        setStatus("当前任务没有更多待执行搜索指令。");
-        return;
-      }
-
-      if (refreshedTask) {
-        setSearchResult(summarizeSearchResultFromTask(refreshedTask));
-      }
-
-      setStatus(
-        accumulatedExecutedQueries === 0
-          ? "当前任务没有更多待执行搜索指令。"
-          : options.minimumRawResults && accumulatedResultCount >= options.minimumRawResults
-            ? `首轮搜索完成：执行 ${accumulatedExecutedQueries} 条 query，返回 ${accumulatedResultCount} 条结果，新增 ${accumulatedCreatedCandidates} 家候选客户。`
-            : `首轮搜索完成：执行 ${accumulatedExecutedQueries} 条 query，返回 ${accumulatedResultCount} 条结果，新增 ${accumulatedCreatedCandidates} 家候选客户。`
-      );
+      const refreshedTask = await refreshTask(taskId);
+      applyTaskProgress(refreshedTask);
     } catch (requestError) {
-      const refreshed = await refreshTask(taskId).catch(() => null);
-      if (refreshed) {
-        const recoveredSearchResult = summarizeSearchResultFromTask(refreshed);
-        setSearchResult(recoveredSearchResult);
-        setError("");
-        setStatus(
-          `搜索接口超时，但后台已继续执行到 ${recoveredSearchResult.executedQueries} 条 query，当前已命中 ${recoveredSearchResult.resultCount} 条原始结果，页面已刷新。`
-        );
-      } else {
-        setError(errorMessage(requestError));
-        setStatus("搜索接口执行失败；任务和搜索指令已保留，可以修复配置后再次搜索。");
-      }
-    } finally {
-      setSearching(false);
+      setError(errorMessage(requestError));
+      setStatus("任务状态刷新失败；后端会自动执行搜索，稍后可从任务历史打开查看。");
     }
   }
 
@@ -610,22 +583,25 @@ export function AiWorkerClient() {
     return refreshed;
   }
 
-  async function waitForSearchPlan(taskId: string) {
-    let latest = await refreshTask(taskId);
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      const planStep = latest.agentSteps?.find((step) => step.nodeName === "plan_search_queries");
-      if (latest.searchQueries?.length) {
-        return latest;
-      }
-      if (planStep?.status === "failed") {
-        throw new Error(planStep.error ?? "Search plan failed");
-      }
+  function applyTaskProgress(task: LeadTask) {
+    const result = summarizeSearchResultFromTask(task);
+    const hasSearchData = Boolean((task.searchQueries?.length ?? 0) || (task.leadCandidates?.length ?? 0));
+    const failedMessage = firstFailedStepError(task);
 
-      await wait(1500);
-      latest = await refreshTask(taskId);
+    setCreating(isTaskPlanning(task));
+    setSearching(isTaskSearching(task));
+    setSearchResult(hasSearchData ? result : null);
+    if (failedMessage || task.status === "failed") {
+      setError(failedMessage || "任务执行失败。");
+    } else {
+      setError("");
     }
+    setStatus(formatTaskProgressStatus(task, result));
 
-    return latest;
+    const leadCount = task.leadCandidates?.length ?? 0;
+    if (leadCount > 0) {
+      setSelectedLeadId((current) => current ?? task.leadCandidates?.[0]?.id ?? null);
+    }
   }
 
   async function approveSelectedLead() {
@@ -684,7 +660,7 @@ export function AiWorkerClient() {
   function backToLanding() {
     setView("landing");
     setCommand("");
-    setStatus(currentTask ? "任务已保留，可继续搜索或确认客户" : "等待分配任务");
+    setStatus(currentTask ? "任务已保留，可确认客户或重新执行搜索" : "等待分配任务");
   }
 
   function openCrmPreview() {
@@ -710,7 +686,7 @@ export function AiWorkerClient() {
     if (!text) return;
     setCommand("");
 
-    if (/搜索|下一批|继续|search/i.test(text)) {
+    if (/搜索|重新执行|search/i.test(text)) {
       void runTaskSearch();
       return;
     }
@@ -772,7 +748,6 @@ export function AiWorkerClient() {
               onSelectLead={setSelectedLeadId}
               onCommandChange={setCommand}
               onSendCommand={sendCommand}
-              onRunSearch={() => void runTaskSearch()}
               onOpenMail={() => void approveSelectedLead()}
               onOpenCrm={openCrmPreview}
               onBack={backToLanding}
@@ -832,7 +807,7 @@ export function AiWorkerClient() {
                     {crmPageRows.length ? (
                       crmPageRows.map((row) => (
                         <tr key={row.id}>
-                          <td>{row.companyName}</td>
+                          <td className="leadCompanyCell" title={row.companyName}>{row.companyName}</td>
                           <td>{row.country}</td>
                           <td>{row.industry}</td>
                           <td>{row.phone}</td>
@@ -1164,7 +1139,6 @@ type ConversationProps = {
   onSelectLead: (leadId: string) => void;
   onCommandChange: (value: string) => void;
   onSendCommand: () => void;
-  onRunSearch: () => void;
   onOpenMail: () => void;
   onOpenCrm: () => void;
   onBack: () => void;
@@ -1192,7 +1166,6 @@ function AiWorkerConversation({
   onSelectLead,
   onCommandChange,
   onSendCommand,
-  onRunSearch,
   onOpenMail,
   onOpenCrm,
   onBack
@@ -1330,11 +1303,8 @@ function AiWorkerConversation({
           ))}
           <div className="keywordActions">
             <span className="keywordMeta">
-              搜索指令不再拼接排除词；风险词仅用于 ICP 评分提示，不影响搜索结果入库
+              搜索指令会一次性执行完本轮全部 query；目录站、B2B 平台和内容页会降权，主候选表优先展示可触达客户
             </span>
-            <button className="smallGhostButton" type="button" onClick={onRunSearch} disabled={running || !currentTask}>
-              {searching ? "搜索中..." : "再次搜索"}
-            </button>
           </div>
         </section>
 
@@ -1378,8 +1348,8 @@ function AiWorkerConversation({
             <span className="rawResultBadge">
               {searchResult
                 ? searchResult.hasMore
-                  ? `还可继续 ${searchResult.remainingQueries ?? 0} 条指令`
-                  : "已执行完当前搜索批次"
+                  ? `剩余 ${searchResult.remainingQueries ?? 0} 条未执行`
+                  : "已执行完本轮搜索指令"
                 : "实时"}
             </span>
           </div>
@@ -1449,7 +1419,7 @@ function AiWorkerConversation({
                           onClick={() => onSelectLead(lead.id)}
                         />
                       </td>
-                      <td>{lead.companyName}</td>
+                      <td className="leadCompanyCell" title={lead.companyName}>{lead.companyName}</td>
                       <td>
                         <span className="stars">{scoreStars(lead.score)}</span>
                       </td>
@@ -1468,7 +1438,7 @@ function AiWorkerConversation({
                 ) : (
                   <tr>
                     <td className="leadEmptyCell" colSpan={11}>
-                      {searching ? "正在搜索并清洗候选客户..." : "暂无候选客户。创建任务后会自动执行首轮搜索，也可以点击“再次搜索”。"}
+                      {searching ? "正在搜索并清洗候选客户..." : "暂无候选客户。创建任务后会自动执行本轮全部搜索指令。"}
                     </td>
                   </tr>
                 )}
@@ -1567,7 +1537,7 @@ function AiWorkerConversation({
           {sentCount
             ? `已完成 ${sentCount} 封 Gmail 发送，${crmSyncedCount} 家客户已同步 CRM，${pendingFollowupCount} 个 3 天后跟进提醒已创建。`
             : leads.length
-            ? `我已为您找到 ${leads.length} 家候选公司，其中 ${qualifiedCount} 家达到 ICP 75 分以上。下一步可以选择客户进入邮件触达，或继续执行剩余搜索指令扩充名单。`
+            ? `我已为您找到 ${leads.length} 家候选公司，其中 ${qualifiedCount} 家达到 ICP 75 分以上。下一步可以选择客户进入邮件触达。`
             : "任务创建后，系统会先生成搜索策略，再调用搜索接口清洗候选客户。当前页面已经接入真实任务链路，等待首批候选客户返回。"}
         </p>
 
@@ -1624,7 +1594,7 @@ function AiWorkerConversation({
           aria-label="继续输入任务"
           id="project-command"
           name="command"
-          placeholder="请输入内容... 例如：继续搜索下一批客户 / 打开邮件确认弹窗"
+          placeholder="请输入内容... 例如：重新执行搜索 / 打开邮件确认弹窗"
           value={command}
           onChange={(event) => onCommandChange(event.target.value)}
         />
@@ -1710,20 +1680,20 @@ function AgentSearchActivity({
   const subline = active
     ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令，候选客户会在清洗后写入下方表格。`
     : resultCount
-      ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令，可继续执行下一批搜索扩充名单。`
+      ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令。`
     : leadCount
-      ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；接口失败时会保留已返回候选，可再次搜索补齐。`
+      ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；接口失败时会保留已返回候选，可重新执行搜索补齐。`
     : hasError
-      ? `已保留 ${queryCount || "-"} 条搜索指令，修复配置或网络后可再次搜索。`
+      ? `已保留 ${queryCount || "-"} 条搜索指令，修复配置或网络后可重新执行搜索。`
     : queryCount
-      ? `已生成 ${queryCount} 条搜索指令，可继续执行下一批搜索。`
+      ? `已生成 ${queryCount} 条搜索指令，将一次性执行本轮全部 query。`
       : "创建任务后会自动生成搜索指令并开始执行。";
   const workText = active
     ? headline
     : resultCount || leadCount
-      ? "搜索记录已生成，可继续下一批"
+      ? "搜索记录已生成"
       : hasError
-        ? "搜索失败，可再次搜索"
+        ? "搜索失败，可重新执行"
       : "等待分配搜索任务";
 
   return (
@@ -1878,6 +1848,103 @@ function extractApiMessage(payload: unknown) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "未知错误";
+}
+
+const planningStepNames = ["load_task", "analyze_product_profile", "analyze_customer_profile", "expand_keywords", "plan_search_queries"];
+const searchStepNames = ["brave_search", "normalize_leads", "extract_contacts", "score_icp"];
+
+function isBackendTaskActive(task: LeadTask) {
+  if (task.status === "running" || task.status === "pending") {
+    return true;
+  }
+
+  return Boolean(task.agentSteps?.some((step) => step.status === "running"));
+}
+
+function isTaskPlanning(task: LeadTask) {
+  if (!isBackendTaskActive(task)) {
+    return false;
+  }
+
+  const planStep = findStep(task, "plan_search_queries");
+  if (planStep?.status === "completed" || planStep?.status === "failed") {
+    return false;
+  }
+
+  return true;
+}
+
+function isTaskSearching(task: LeadTask) {
+  if (!isBackendTaskActive(task) || isTaskPlanning(task)) {
+    return false;
+  }
+
+  const scoreStep = findStep(task, "score_icp");
+  const pendingQueries = task.searchQueries?.filter((query) => query.executionStatus === "pending").length ?? 0;
+  const runningQueries = task.searchQueries?.filter((query) => query.executionStatus === "running").length ?? 0;
+
+  return pendingQueries > 0 || runningQueries > 0 || scoreStep?.status === "running" || scoreStep?.status === "pending";
+}
+
+function firstFailedStepError(task: LeadTask) {
+  return task.agentSteps?.find((step) => step.status === "failed")?.error ?? null;
+}
+
+function findStep(task: LeadTask, nodeName: string) {
+  return task.agentSteps?.find((step) => step.nodeName === nodeName);
+}
+
+function stepLabel(nodeName: string) {
+  const labels: Record<string, string> = {
+    load_task: "读取产品画像 / 客户画像",
+    analyze_product_profile: "分析产品画像",
+    analyze_customer_profile: "分析客户画像",
+    expand_keywords: "扩展关键词",
+    plan_search_queries: "生成搜索指令",
+    brave_search: "执行 Brave 搜索",
+    normalize_leads: "清洗候选客户",
+    extract_contacts: "提取联系方式",
+    score_icp: "ICP 评分"
+  };
+
+  return labels[nodeName] ?? nodeName;
+}
+
+function activeStepLabel(task: LeadTask, names: string[]) {
+  const running = task.agentSteps?.find((step) => names.includes(step.nodeName) && step.status === "running");
+  if (running) {
+    return stepLabel(running.nodeName);
+  }
+
+  const pending = task.agentSteps?.find((step) => names.includes(step.nodeName) && step.status === "pending");
+  return pending ? stepLabel(pending.nodeName) : null;
+}
+
+function formatTaskProgressStatus(task: LeadTask, result: SearchRunResult) {
+  const failedMessage = firstFailedStepError(task);
+  if (failedMessage || task.status === "failed") {
+    return `任务执行失败：${failedMessage ?? "请检查后端日志"}`;
+  }
+
+  if (isTaskPlanning(task)) {
+    return `后端正在${activeStepLabel(task, planningStepNames) ?? "生成搜索指令"}，完成后会自动执行全部 query。`;
+  }
+
+  if (isTaskSearching(task)) {
+    const queryCount = task.searchQueries?.length ?? 0;
+    const runningText = result.runningQueries ? `，${result.runningQueries} 条正在处理` : "";
+    return `后端正在${activeStepLabel(task, searchStepNames) ?? "执行搜索"}：已完成 ${result.executedQueries}/${queryCount || "-"} 条 query${runningText}，已命中 ${result.resultCount} 条原始结果，候选 ${result.createdCandidates} 家。`;
+  }
+
+  if (task.status === "paused") {
+    return `本轮搜索已完成：执行 ${result.executedQueries} 条 query，命中 ${result.resultCount} 条结果，新增 ${result.createdCandidates} 家候选客户，等待人工审核。`;
+  }
+
+  if (task.status === "completed") {
+    return `任务已完成：执行 ${result.executedQueries} 条 query，新增 ${result.createdCandidates} 家候选客户。`;
+  }
+
+  return "任务已创建，后端会自动生成搜索指令并执行本轮全部搜索。";
 }
 
 function isMissingLeadTaskError(message: string) {
@@ -2044,7 +2111,7 @@ function buildActivitySteps({
           : executedCount
             ? `已执行 ${executedCount} 条，候选已回写`
             : hasError
-              ? "接口失败，可再次搜索"
+              ? "接口失败，可重新执行"
           : "等待搜索",
       state: searching ? "active" : searchResult || executedCount ? "done" : hasError ? "failed" : "pending"
     },
@@ -2204,7 +2271,8 @@ function summarizeSearchResultFromTask(task: LeadTask): SearchRunResult {
   const completedQueries = task.searchQueries?.filter((query) => query.executionStatus === "completed") ?? [];
   const failedQueries = task.searchQueries?.filter((query) => query.executionStatus === "failed") ?? [];
   const pendingQueries = task.searchQueries?.filter((query) => query.executionStatus === "pending") ?? [];
-  const resultCount = completedQueries.reduce((sum, query) => sum + (query.resultCount ?? 0), 0);
+  const runningQueries = task.searchQueries?.filter((query) => query.executionStatus === "running") ?? [];
+  const resultCount = (task.searchQueries ?? []).reduce((sum, query) => sum + (query.resultCount ?? 0), 0);
   const createdCandidates = task.leadCandidates?.length ?? 0;
   const skippedCandidates = completedQueries.reduce(
     (sum, query) => sum + Math.max((query.resultCount ?? 0) - (query.qualifiedCount ?? 0), 0),
@@ -2216,11 +2284,12 @@ function summarizeSearchResultFromTask(task: LeadTask): SearchRunResult {
     executedQueries: completedQueries.length + failedQueries.length,
     successfulQueries: completedQueries.length,
     failedQueries: failedQueries.length,
+    runningQueries: runningQueries.length,
     resultCount,
     createdCandidates,
     skippedCandidates,
-    hasMore: pendingQueries.length > 0,
-    remainingQueries: pendingQueries.length
+    hasMore: pendingQueries.length + runningQueries.length > 0,
+    remainingQueries: pendingQueries.length + runningQueries.length
   };
 }
 
@@ -2261,6 +2330,10 @@ function searchResultKey(result: SearchResult) {
 function buildDisplayLeads(task: LeadTask | null): DisplayLead[] {
   const targetMarkets = taskTargetMarkets(task);
   return (task?.leadCandidates ?? [])
+    .filter((lead) => {
+      const score = lead.icpScore?.score ?? 0;
+      return lead.status !== "rejected" && score >= 50;
+    })
     .map((lead) => ({ displayLead: buildDisplayLead(lead), priority: displayLeadPriority(lead, targetMarkets) }))
     .sort((left, right) => {
       const adjustedDelta =
@@ -2406,6 +2479,22 @@ function isDiscoveryDomain(domain: string) {
 }
 
 const displayBuyerTerms = [
+  "base station maintenance",
+  "ran maintenance",
+  "radio access network maintenance",
+  "cell site maintenance",
+  "telecom field services",
+  "tower maintenance",
+  "tower company",
+  "towerco",
+  "wireless infrastructure contractor",
+  "telecom power maintenance",
+  "mobile network operator",
+  "network operator",
+  "isp network operations",
+  "wisp",
+  "ftth operator",
+  "fiber network operator",
   "distributor",
   "stockist",
   "system integrator",
@@ -2429,8 +2518,14 @@ const displaySpecificProductTerms = [
   "microwave backhaul",
   "telecom power",
   "rectifier",
+  "olt",
+  "sfp",
+  "optical module",
   "huawei",
-  "zte"
+  "zte",
+  "ericsson",
+  "nokia",
+  "eltek"
 ];
 
 const displayDiscoveryTerms = [
@@ -2443,6 +2538,9 @@ const displayDiscoveryTerms = [
   "industry report",
   "supplier directory",
   "company directory",
+  "trade directory",
+  "b2b marketplace",
+  "yellow pages",
   "deployment challenges",
   "discussion board",
   "forum",

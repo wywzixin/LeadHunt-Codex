@@ -1,8 +1,8 @@
 # LeadHunt AI Codex 接手文档
 
-更新时间：2026-05-02 14:55 +08:00
+更新时间：2026-05-15 +08:00
 
-用途：给下一个 Codex / AI 编程 Agent 快速接手本项目。本文是当前状态总览，详细逐项记录看 `done01.md`、`done02.md`、`done03.md`。
+用途：给下一个 Codex / AI 编程 Agent 快速接手本项目。本文是当前状态总览，详细逐项记录看 `done01.md`、`done02.md`、`done03.md`、`done04.md`。
 
 重要原则：不要在回复、文档、日志里输出 `.env`、API Key、OAuth secret、refresh token、access token、cookie、账号密码、Google 验证码、Gmail provider message id。
 
@@ -13,7 +13,7 @@
 - API：`http://localhost:4000`
 - 浏览器验证方式：Chrome DevTools Protocol `127.0.0.1:9222`
 - 当前端口状态：`3000` 和 `4000` 已监听。
-- 当前不是 git 仓库：`git status` 会返回 `not a git repository`。
+- 当前是 git 仓库，工作分支：`codex/leadhunt-runtime-fixes`。
 - 数据库 / Redis：本地代码连接远程 PostgreSQL / Redis，真实连接信息在 `.env`，不要输出。
 - 当前测试登录态：本机浏览器里已有 LeadHunt 测试账号会话。
 - Gmail OAuth：当前测试账号已授权 `wangyawei223@gmail.com`，可用于本机验证 Gmail 发送 / 收件箱读取。不要记录或输出 token。
@@ -25,18 +25,19 @@
 1. `done01.md`
 2. `done02.md`
 3. `done03.md`
-4. `Task.md`
-5. `Test_Report.md`
-6. `pro.md`
-7. `LeadHunt_AI_Requirements_Document.md`
-8. `LeadHunt_AI_Product_Design_Document.md`
-9. `LeadHunt_AI_Technical_Architecture.md`
-10. `design/LeadHunt_AI_Design_Guidelines.md`
-11. `search/advanced-search-strategy-library.md`
-12. `API调用说明.md`
-13. `google search.md`
+4. `done04.md`
+5. `Task.md`
+6. `Test_Report.md`
+7. `pro.md`
+8. `LeadHunt_AI_Requirements_Document.md`
+9. `LeadHunt_AI_Product_Design_Document.md`
+10. `LeadHunt_AI_Technical_Architecture.md`
+11. `design/LeadHunt_AI_Design_Guidelines.md`
+12. `search/advanced-search-strategy-library.md`
+13. `API调用说明.md`
+14. `google search.md`
 
-`done01/02/03` 是已完成工作，不要重复做。接手时以本文和三个 done 文档作为当前事实基线。
+`done01/02/03/04` 是已完成工作，不要重复做。接手时以本文和四个 done 文档作为当前事实基线。
 
 ## 3. 当前最新验证结果
 
@@ -50,6 +51,34 @@
 - `pnpm --filter @leadhunt/agent typecheck`：通过
 - `pnpm --filter @leadhunt/agent test`：3 个测试文件 / 12 条测试通过
 
+最近一次 LangGraph checkpoint 改造后补充验证：
+
+- `pnpm --filter @leadhunt/api typecheck`：通过
+- `pnpm --filter @leadhunt/api test -- agent-workflow.service.spec.ts`：18 条测试通过
+- `pnpm --filter @leadhunt/agent test -- workflow.spec.ts`：23 条测试通过
+- `pnpm --filter @leadhunt/api build`：通过
+- `pnpm --filter @leadhunt/agent build`：通过
+- 真实数据库已创建 LangGraph checkpoint 表：`checkpoint_migrations`、`checkpoints`、`checkpoint_blobs`、`checkpoint_writes`。
+
+最近一次 GPT 主链路改造后补充验证：
+
+- `pnpm --filter @leadhunt/api typecheck`：通过
+- `pnpm --filter @leadhunt/web typecheck`：通过
+- `pnpm --filter @leadhunt/agent typecheck`：通过
+- `pnpm --filter @leadhunt/api test -- src/ai/leadhunt-ai.service.spec.ts src/agent/website-content.service.spec.ts src/agent/agent-workflow.service.spec.ts src/leads/lead-qualification.service.spec.ts`：4 个测试文件 / 55 条测试通过
+- `pnpm --filter @leadhunt/agent test`：3 个测试文件 / 23 条测试通过
+- `pnpm --filter @leadhunt/api build`：通过
+- `pnpm --filter @leadhunt/agent build`：通过
+
+最近一次首轮搜索自动后台执行改造后补充验证：
+
+- `pnpm --filter @leadhunt/api typecheck`：通过
+- `pnpm --filter @leadhunt/web typecheck`：通过
+- `pnpm --filter @leadhunt/api test -- agent-workflow.service.spec.ts lead-qualification.service.spec.ts`：42 条测试通过
+- Chrome DevTools `http://localhost:3000/` 验证：新建任务 `e24d74ee-11a5-4f2f-a508-3c35a4942a02` 后，前端立即拿到 task id；后端自动进入 GPT 规划并生成 29 条 query；无需前端调用 `/api/lead-tasks/:taskId/search`，后台进入 `brave_search`，最终 29 条 query 全部完成、Brave 原始命中 114 条、入库候选 76 家、`qualified` 3 家、`review` 6 家、`rejected` 67 家。注意：验证过程中开发服务器热更新会中断正在执行的内存后台任务，生产环境需用独立 worker / 队列增强重启续跑。
+- 后续继续补了恢复和限流：后端启动会恢复最近 24 小时仍为 `running` 的首轮获客任务；已有 query 的任务跳过 GPT 规划并继续未完成 query。候选清洗也加了成本边界：每批最多 5 个候选进入 GPT 买家判断，联系方式探测缩到 6 个常见页面 + 4 个二级 contact 链接，单页面 3.5 秒超时。
+- Chrome DevTools 复核历史任务恢复：页面显示“本轮搜索已完成：执行 29 条 query，命中 114 条结果，新增 76 家候选客户，等待人工审核”，主表展示 9 家可复核客户，其中 3 家 ICP 75+；历史任务恢复时已修正前端 `searchResult/status`，不再停留在“待启动 / 等待首轮搜索结果”。
+
 最近一次 Chrome 9222 页面验证：
 
 - 恢复 AI 外贸员历史任务后可打开邮件确认弹窗。
@@ -62,6 +91,7 @@
 - `done01.md`：页面重构、100% 视口检查、核心 API、CRM、Gmail 回复同步、模板 CRUD 等。
 - `done02.md`：真实 Brave 搜索、注册登录、候选质量过滤、AI 搜索动态效果、Gmail OAuth、真实 Gmail 发送、CRM 同步和 3 天跟进。
 - `done03.md`：导航和画像保存修正、历史任务、真实 Gmail 收发件箱、邮件弹窗多收件人 / AI 改写、数据看板卡片对齐、收件人紧凑行。
+- `done04.md`：GPT-5.5 接入获客主链路、产品目录抓取放宽、GPT-led query 生成、GPT 候选买家判断、60/40 ICP 融合、画像页读取已保存配置。
 
 ## 4. 已完成能力总览
 
@@ -121,6 +151,34 @@
 12. 邮件确认弹窗预填候选客户、主题、正文。
 13. Gmail OAuth 授权后可真实发送。
 14. 发送成功后同步 CRM、创建 3 天后跟进任务、刷新 AI 外贸员页面状态。
+15. LangGraph checkpoint 已从开发期 MemorySaver 改为可配置存储，非测试环境默认 PostgreSQL。
+16. GPT-5.5 已进入获客主链路：分析产品画像和客户画像、扩展关键词、生成搜索策略、判断候选买家质量。
+17. 后端搜索校验只做边界：国家、operator、数量、重复、基本信号、安全排除词；不把“可能是好客户”的语义判断交给校验器删除。
+18. 创建任务后后端会自动执行首轮完整链路：生成 query -> 校验 query -> 执行全部 pending Brave 搜索 -> 清洗候选 -> GPT/规则融合评分 -> 暂停在人工审核客户。前端只轮询任务详情，不再承担搜索接力。
+19. 后端具备基础恢复：服务重启 / 开发热更新后会恢复最近 24 小时的 running 首轮任务；`search_queries.executionStatus=running` 会重置为 pending 后续跑。
+
+当前产品站抓取：
+
+- `WebsiteContentService` 用后端 `fetch` 读取产品画像和客户画像里的 URL，只读取 HTML / plain text，6 秒超时。
+- 产品站会识别 WooCommerce 产品列表、分页和产品总数。
+- 产品目录抓取上限已改为 50 页 / 1000 个产品名，能覆盖 `telecorenet.com` 当前约 158 个产品的目录规模。
+- 参考客户官网会作为客户画像证据读取，给 GPT-5.5 分析“相似客户类型”和“买家场景”。
+
+最近一次真实 UI 获客验证：
+
+- 输入：`帮我找5G通信设备配件相关的买家客户，目标 Nigeria 和 Saudi Arabia，优先基站维护、RAN维护、铁塔维护、通信电源维护、运营商和ISP/FTTH网络运维客户。`
+- 任务 ID：`591215bb-8b7e-40a9-bc3c-96c0762cef48`
+- 页面读取产品画像：`telecorenet.com` 和 `/products` 已回填。
+- 页面读取客户画像：`spectrummea.com` 和 `hctgroup.ae` 已作为参考客户证据读取。
+- 结果：网站证据读取 4/4；生成 55 条搜索指令；目标市场从任务文本落到 Nigeria、Saudi Arabia、Lagos、Riyadh、Jeddah；首批执行 15 条 query，其中 11 条完成、4 条失败。
+- 运行时注意：本次 GPT-5.5 兼容接口返回 HTTP 503，任务按设计降级为 `deterministic_fallback`，`gptSearchQueryCount=0`。代码已接入 GPT 主链路，但要验证 GPT 真正参与，需要先确认 GPT-5.5 服务恢复。
+
+当前产品方向：
+
+- 首轮任务不再展示“再次搜索 / 继续找更多客户”按钮；创建任务后自动跑完本轮全部 query。
+- 后续“继续找更多客户”应围绕同一个长期客户池继续执行、去重、学习和再拓展，等客户池模型补齐后再加回入口。
+- 普通 UI 不展示 `LangGraph`、`checkpoint`、`human_approval`、`wait_email_confirmation` 等内部技术词。
+- 强制人工节点保留：客户必须人工审核，邮件必须人工确认。
 
 ### Brave Search
 
@@ -129,6 +187,14 @@
 - Brave `country` 参数做了兼容，不支持的市场降级为 `ALL`，市场词仍保留在 query。
 - 开发兜底搜索已改为显式开关 `LEADHUNT_DEV_SEARCH_FALLBACK=true|1`，默认不静默 fallback。
 - 候选质量已做第一轮增强：过滤 LinkedIn、Facebook、YouTube、Wikipedia、Medium、ResearchGate、Alibaba、Amazon、AliExpress、`.edu`、`.gov`、新闻、博客、报告、招聘等。
+
+### LangGraph checkpoint / 客户池
+
+- API 已接入 `@langchain/langgraph-checkpoint-postgres`。
+- `LANGGRAPH_CHECKPOINT_STORE=postgres` 时使用 PostgreSQL checkpoint；`memory` 只建议给单元测试和一次性本地 demo。
+- 未单独配置 `LANGGRAPH_CHECKPOINT_DATABASE_URL` 时，checkpoint 复用 `DATABASE_URL`。
+- 当前代码已能在单个任务内记录 query、候选、步骤和 checkpoint；完整的长期 `lead_pools` / 跨任务去重 / 继续拓展 API 仍未全部实现。
+- 下一步不要再做“重复提交同一个 prompt”的再次搜索，应先补客户池模型和去重键。
 
 ### 邮件确认弹窗 / Gmail
 
@@ -293,13 +359,14 @@ Get-NetTCPConnection -LocalPort 3000,4000 -State Listen
 
 - 不要重复做 `done01/02/03` 已完成项，除非先复现到确实回归。
 - 不要恢复或覆盖用户未说明的改动。
-- 当前不是 git 仓库，无法依赖 git diff 做回滚。
+- 当前是 git 仓库，但已有未提交改动；不要恢复或覆盖非自己明确负责的文件。
 - `.env` 里有真实连接和 key，不要打印。
 - Brave / Google / GPT-5.5 都可能依赖本机代理；如果外部 API 超时，先查代理感知 fetch 和 Windows 系统代理，不要立刻判断 key 坏了。
 - Gmail OAuth callback 的旧链接不能刷新复用，state 过期后必须从 `/mailbox` 重新点授权。
 - 真实 Gmail 发送已打通，但外部候选客户发信要用户明确确认。
 - 模板自建数据在 localStorage，不在远程数据库。
 - `/campaigns` 和 `/brochures` 不应被误认为已经有完整后端业务闭环。
+- “继续找更多客户”还缺完整客户池模型和跨轮次去重实现；当前不要把它说成已完成闭环。
 
 ## 9. 最推荐的下一步
 
@@ -312,4 +379,11 @@ Get-NetTCPConnection -LocalPort 3000,4000 -State Listen
 5. 打开 `/mailbox`，确认能读取真实 Gmail 收件箱。
 6. 打开 `/dashboard`，确认数据概况卡片仍对齐。
 
-然后优先继续做“候选客户质量提升”和“目录页拆真实公司条目”。这是目前最贴近用户业务价值的下一步。
+然后优先做“持续客户池 / 继续找更多客户”：
+
+1. 建 `lead_pools`、`lead_search_rounds`、`lead_dedupe_keys`、`lead_candidate_events`。
+2. API 支持按客户池继续拓展，优先执行未完成 query，再根据审核反馈生成下一轮 query。
+3. 前端把“再次搜索”统一改成“继续找更多客户”，展示业务状态，不展示内部节点名。
+4. 继续保留两个强制人工点：客户审核和邮件发送确认。
+
+候选客户质量提升仍然是并行重点，尤其要避免消费电子、零售、电商、招聘、新闻、报告等弱线索。

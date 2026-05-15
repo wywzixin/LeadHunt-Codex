@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { ChatMessage } from "./gpt55.client.js";
 import { Gpt55Client } from "./gpt55.client.js";
 import {
+  candidateBuyerEvaluationSchema,
   customerProfileAnalysisSchema,
   icpScoreSchema,
   keywordExpansionSchema,
@@ -14,6 +15,7 @@ import {
   taskSummarySchema
 } from "./leadhunt-ai.schemas.js";
 import type {
+  CandidateBuyerEvaluationResult,
   CustomerProfileAnalysis,
   IcpScoreResult,
   KeywordExpansionResult,
@@ -74,6 +76,26 @@ export type IcpScoreInput = {
   };
   productProfile: ProductProfileAnalysis | ProductProfileAnalysisInput;
   customerProfile: CustomerProfileAnalysis | CustomerProfileAnalysisInput;
+};
+
+export type CandidateBuyerEvaluationInput = {
+  candidate: {
+    companyName: string;
+    websiteUrl: string;
+    country?: string | null;
+    title?: string | null;
+    snippet?: string | null;
+    sourceUrl?: string | null;
+    contacts?: {
+      emails?: string[];
+      phones?: string[];
+      socialProfiles?: string[];
+    };
+  };
+  productProfile: unknown;
+  customerProfile: unknown;
+  targetRegions?: string[];
+  taskContext?: string;
 };
 
 export type OutreachEmailInput = {
@@ -151,6 +173,14 @@ export class LeadHuntAiService {
 
   scoreIcp(input: IcpScoreInput): Promise<IcpScoreResult> {
     return this.completeJson(leadHuntPromptTemplates.icpScoring, input, icpScoreSchema);
+  }
+
+  evaluateCandidateBuyer(input: CandidateBuyerEvaluationInput): Promise<CandidateBuyerEvaluationResult> {
+    return this.completeJson(
+      leadHuntPromptTemplates.candidateBuyerEvaluation,
+      input,
+      candidateBuyerEvaluationSchema
+    );
   }
 
   generateOutreachEmail(input: OutreachEmailInput): Promise<OutreachEmailResult> {

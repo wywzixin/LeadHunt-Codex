@@ -1726,6 +1726,13 @@ body:has(.aiProjectApp) {
   white-space: nowrap;
 }
 
+.leadCompanyCell {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .leadCheck {
   display: block;
   width: 16px;

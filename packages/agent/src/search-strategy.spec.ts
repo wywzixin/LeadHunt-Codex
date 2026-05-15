@@ -14,16 +14,18 @@ describe("search strategy library", () => {
 
     expect(queries).toHaveLength(15);
     expect(
-      queries.every((item) => /telecom|RRU|BBU|Huawei|ZTE|network/i.test(item.query))
+      queries.every((item) => /telecom|RRU|BBU|Huawei|ZTE|network|5G|maintenance|base station/i.test(item.query))
     ).toBe(true);
     expect(new Set(queries.map((item) => item.country))).not.toContain("Nigeria");
-    expect(queries[0]?.templateId).toBe("direct_distributor_country");
-    expect(queries[0]?.query).not.toContain('-"consumer phone"');
-    expect(queries[0]?.query).not.toContain("-job");
+    expect(queries[0]?.templateId).toBe("maintenance_company_contact");
+    expect(queries[0]?.query).toContain("-job");
+    expect(queries[0]?.query).toContain("-marketplace");
+    expect(queries[0]?.query).toContain('-"yellow pages"');
+    expect(queries[0]?.query).toContain('-"supplier directory"');
     expect(queries[0]?.query).not.toContain("-phone");
-    expect(queries[0]?.query).not.toMatch(/supplier directory|yellow pages/i);
     expect(queries.map((item) => item.query).join("\n")).not.toMatch(/\binpage:|\bloc:|\blang:/);
     expect(queries.map((item) => item.query).join("\n")).not.toMatch(/\bsite:/);
+    expect(queries.map((item) => item.query).join("\n")).not.toMatch(/\{exclude(?:_terms)?\}/);
   });
 
   it("uses product and reference customer profile URLs to create similar-customer queries", () => {
@@ -37,14 +39,14 @@ describe("search strategy library", () => {
 
     const queryText = queries.map((query) => query.query).join("\n");
 
-    expect(queries[0]?.query).toMatch(/distributor|stockist|system integrator/i);
+    expect(queries[0]?.query).toMatch(/maintenance|RAN|cell site/i);
     expect(queryText).toMatch(/5G|RRU|BBU|microwave backhaul|telecom power/i);
     expect(queryText).not.toMatch(/\binpage:|\bloc:|\blang:/);
     expect(queries[0]?.keywordGroups.customerIntentTerms).toEqual(
-      expect.arrayContaining(["telecom system integrator", "network maintenance company", "project procurement"])
+      expect.arrayContaining(["telecom system integrator", "network maintenance company", "base station maintenance company"])
     );
     expect(queries[0]?.keywordGroups.excludeTerms).toEqual(
-      expect.arrayContaining(["Accio", "TradeWheel", "Alibaba"])
+      expect.arrayContaining(["Accio", "TradeWheel", "Alibaba", "directory", "yellow pages"])
     );
   });
 
@@ -59,7 +61,8 @@ describe("search strategy library", () => {
     const modelQuery = queries.find((query) => query.templateId === "specific_model_stockist");
     expect(modelQuery?.query).toContain("Huawei RRU3959 02311BPD");
     expect(modelQuery?.query).toContain("Ericsson 2212 B3 KRC161496/2");
-    expect(modelQuery?.query).toContain("telecom spare parts");
+    expect(modelQuery?.query).toContain("spare parts");
+    expect(modelQuery?.query).toContain("maintenance");
   });
 
   it("adds additional catalog model queries when a product site has many product names", () => {
@@ -157,13 +160,14 @@ describe("search strategy library", () => {
         strategyTemplate: expect.any(String),
         keywordGroups: expect.objectContaining({
           productTerms: expect.arrayContaining(["telecom equipment"]),
-          customerIntentTerms: expect.arrayContaining(["distributor"]),
-          excludeTerms: expect.arrayContaining(["job"])
-        }),
-        effectivenessScore: expect.any(Number)
-      })
-    );
-    expect(query?.keywordGroups.excludeTerms).not.toEqual(expect.arrayContaining(["directory", "yellowpages"]));
+        customerIntentTerms: expect.arrayContaining(["distributor"]),
+        excludeTerms: expect.arrayContaining(["job", "directory", "yellow pages"])
+      }),
+      effectivenessScore: expect.any(Number)
+    })
+  );
+    expect(query?.query).toContain("-job");
+    expect(query?.query).toContain("-directory");
   });
 
   it("keeps common SEO manual-only and disabled templates out of automatic Brave execution", () => {

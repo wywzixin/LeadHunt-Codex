@@ -166,6 +166,36 @@ describe("LeadHuntAiService", () => {
     expect(result.recommendedAction).toBe("approve");
   });
 
+  it("parses candidate buyer evaluation output", async () => {
+    const { service } = serviceWithResponses([
+      JSON.stringify({
+        companyName: "TowerCo Gulf",
+        websiteUrl: "https://towerco.example/",
+        resultType: "possible_buyer",
+        buyerType: "tower maintenance company",
+        fitScore: 82,
+        confidence: 0.78,
+        decision: "review",
+        matchedSignals: ["telecom infrastructure", "site maintenance"],
+        risks: ["No explicit spare parts purchasing signal"]
+      })
+    ]);
+
+    const result = await service.evaluateCandidateBuyer({
+      candidate: {
+        companyName: "TowerCo Gulf",
+        websiteUrl: "https://towerco.example/",
+        snippet: "Telecom tower site maintenance and infrastructure operations"
+      },
+      productProfile: { keyProducts: ["RRU", "BBU"] },
+      customerProfile: { idealCustomerTypes: ["tower maintenance company"] },
+      targetRegions: ["UAE"]
+    });
+
+    expect(result.resultType).toBe("possible_buyer");
+    expect(result.fitScore).toBe(82);
+  });
+
   it("parses outreach, rewrite, reply classification, and task summary outputs", async () => {
     const { service } = serviceWithResponses([
       JSON.stringify({

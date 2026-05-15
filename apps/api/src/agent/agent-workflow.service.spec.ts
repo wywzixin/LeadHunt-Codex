@@ -95,6 +95,7 @@ function createPrismaMock() {
     },
     searchQuery: {
       createMany: vi.fn().mockResolvedValue({ count: 15 }),
+      findMany: vi.fn().mockResolvedValue([{ executionStatus: "completed", resultCount: 1 }]),
       update: vi.fn().mockResolvedValue({}),
       count: vi.fn().mockResolvedValue(0)
     },
@@ -202,6 +203,23 @@ function createWebsiteContentMock() {
 }
 
 describe("AgentWorkflowService", () => {
+  it("rejects unknown LangGraph checkpoint stores", () => {
+    const originalStore = process.env.LANGGRAPH_CHECKPOINT_STORE;
+    process.env.LANGGRAPH_CHECKPOINT_STORE = "redis";
+
+    try {
+      expect(() => new AgentWorkflowService(createPrismaMock() as any)).toThrow(
+        "LANGGRAPH_CHECKPOINT_STORE must be one of: memory, postgres"
+      );
+    } finally {
+      if (originalStore === undefined) {
+        delete process.env.LANGGRAPH_CHECKPOINT_STORE;
+      } else {
+        process.env.LANGGRAPH_CHECKPOINT_STORE = originalStore;
+      }
+    }
+  });
+
   it("lists task history with candidate and query counts", async () => {
     const prisma = createPrismaMock();
     const service = new AgentWorkflowService(prisma as any);
@@ -665,19 +683,19 @@ describe("AgentWorkflowService", () => {
     );
   });
 
-  it("runs a full first search batch without exceeding the query cap", async () => {
+  it("runs all pending searches when no explicit limit is provided", async () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
     const leadQualification = createLeadQualificationMock();
     const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
 
-    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 20 });
+    await service.executeBraveSearchForTask("user-1", "task-1");
 
     expect(prisma.leadTask.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         include: {
-          searchQueries: expect.objectContaining({
-            take: 15
+          searchQueries: expect.not.objectContaining({
+            take: expect.any(Number)
           })
         }
       })

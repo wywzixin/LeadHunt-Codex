@@ -122,4 +122,42 @@ describe("WebsiteContentService", () => {
       expect.arrayContaining(["AAU5271 02311TPK", "Huawei RRU3959", "ZTE BPN2"])
     );
   });
+
+  it("can read a 158 item WooCommerce catalog without stopping at eight pages", async () => {
+    const fetchImpl = vi.fn().mockImplementation((url: string) => {
+      const pageMatch = url.match(/\/page\/(\d+)\//);
+      const page = pageMatch?.[1] ? Number(pageMatch[1]) : 1;
+      const start = (page - 1) * 12 + 1;
+      const end = Math.min(page * 12, 158);
+      const products = Array.from({ length: end - start + 1 }, (_, index) => {
+        const productNumber = start + index;
+        return `<h2 class="woocommerce-loop-product__title">Telecom Product ${productNumber}</h2>`;
+      }).join(" ");
+
+      return Promise.resolve(
+        htmlResponse(
+          url,
+          [
+            `<p class="woocommerce-result-count">Showing ${start}&ndash;${end} of 158 results</p>`,
+            products
+          ].join(" ")
+        )
+      );
+    });
+    const service = new WebsiteContentService(fetchImpl as unknown as typeof fetch);
+
+    const result = await service.readProfileSites({
+      productUrls: ["https://telecorenet.com/products"],
+      referenceCustomerUrls: []
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith("https://telecorenet.com/products/page/14/", expect.any(Object));
+    expect(result.productSites[0]?.productNames).toHaveLength(158);
+    expect(result.productSites[0]?.productCatalog).toMatchObject({
+      totalProducts: 158,
+      listedProducts: 158,
+      pagesRead: 14,
+      truncated: false
+    });
+  });
 });

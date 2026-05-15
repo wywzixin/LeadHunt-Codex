@@ -1,7 +1,7 @@
 "use client";
 
 import type { ChangeEvent } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Globe2, LockKeyhole, Play, RotateCcw, Save, Sparkles, UploadCloud } from "lucide-react";
 
@@ -14,7 +14,7 @@ type ProductProfileState = {
 
 const initialState: ProductProfileState = {
   productLinksText: "https://telecorenet.com/\nhttps://telecorenet.com/products",
-  keywords: "RRU、BBU、微波设备、基站板卡、电源模块",
+  keywords: "RRU, BBU, microwave equipment, base station board, power module",
   documentUrlsText: "",
   notes:
     "我们主要做 Huawei / ZTE / Ericsson / Nokia 通信设备，支持整套项目供货，也能单卖 RRU、BBU、板卡、备件和电源模块。部分产品有现货，可支持紧急补货。"
@@ -24,17 +24,17 @@ const guideItems = [
   {
     icon: Globe2,
     title: "填写官网或产品页",
-    text: "让 AI 快速了解你的产品和业务范围"
+    text: "让 AI 读取你的独立站、产品目录和主营产品范围"
   },
   {
     icon: UploadCloud,
     title: "补充产品资料",
-    text: "可上传目录、库存表、报价表或产品图片"
+    text: "可补充产品目录、库存表、报价表、产品图片或资料链接"
   },
   {
     icon: Sparkles,
     title: "说明产品优势",
-    text: "补充官网没写清楚的卖点、供货能力和品牌范围"
+    text: "补充官网没有写清楚的品牌范围、现货能力、供货场景和适用客户"
   }
 ];
 
@@ -50,6 +50,40 @@ export function ProductProfileForm() {
   const brandTags = useMemo(() => extractBrands(form.notes), [form.notes]);
   const advantageTags = useMemo(() => extractAdvantages(form.notes), [form.notes]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSavedProfile() {
+      try {
+        const response = await fetch("/api/profiles/product", { credentials: "include" });
+        if (!response.ok) return;
+        const profile = (await response.json()) as {
+          websiteUrl?: string | null;
+          productPageUrl?: string | null;
+          documentUrls?: string[] | null;
+          notes?: string | null;
+        } | null;
+        if (!profile || cancelled) return;
+
+        const extractedKeywords = extractMergedNoteValues(profile.notes, "Product keywords");
+        setForm({
+          productLinksText: [profile.websiteUrl, profile.productPageUrl].filter(Boolean).join("\n") || initialState.productLinksText,
+          keywords: extractedKeywords.length ? extractedKeywords.join(", ") : initialState.keywords,
+          documentUrlsText: (profile.documentUrls ?? []).join("\n"),
+          notes: stripMergedNote(profile.notes, "Product keywords") || initialState.notes
+        });
+      } catch {
+        // Keep defaults if loading fails.
+      }
+    }
+
+    void loadSavedProfile();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function updateField(field: keyof ProductProfileState, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
   }
@@ -62,9 +96,7 @@ export function ProductProfileForm() {
   async function persistProfile() {
     const response = await fetch("/api/profiles/product", {
       method: "PUT",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({
         websiteUrl: productLinks[0] ?? "",
@@ -73,6 +105,7 @@ export function ProductProfileForm() {
         notes: mergeProfileNotes(form.notes, "Product keywords", keywordTags)
       })
     });
+
     return response.ok;
   }
 
@@ -80,14 +113,14 @@ export function ProductProfileForm() {
     setStatus("保存中...");
     try {
       const ok = await persistProfile();
-      setStatus(ok ? "已保存，AI 外贸员会在后续任务中读取这份产品资料。" : "保存失败，请检查链接格式或登录状态。");
+      setStatus(ok ? "已保存。AI 外贸员会在后续任务中读取这份产品画像。" : "保存失败，请检查链接格式或登录状态。");
     } catch {
       setStatus("网络异常，稍后重试。");
     }
   }
 
   async function handleSaveAndStart() {
-    setStatus("保存中并准备进入 AI 外贸员...");
+    setStatus("保存中，并准备进入 AI 外贸员...");
     try {
       const ok = await persistProfile();
       if (!ok) {
@@ -105,11 +138,11 @@ export function ProductProfileForm() {
     <section className="productProfileShell">
       <header className="productProfileHeader">
         <h1>产品画像</h1>
-        <p>告诉 AI 外贸员你卖什么产品，系统会根据这些信息自动理解你的产品能力，并在找客户、写邮件和生成推广内容时使用。</p>
+        <p>告诉 AI 外贸员你卖什么产品，系统会在找客户、写邮件和生成营销内容时使用这些资料。</p>
       </header>
 
       <section className="productGuide">
-        <h2>这个功能是做什么的?</h2>
+        <h2>这个功能是做什么的？</h2>
         <div className="productGuideGrid">
           {guideItems.map((item) => {
             const Icon = item.icon;
@@ -135,19 +168,17 @@ export function ProductProfileForm() {
       <section className="productFormCard">
         <aside className="productSteps" aria-label="产品画像填写步骤">
           <StepItem index={1} title="产品基础信息" text="先告诉 AI 你的官网、产品页或主营产品范围" />
-          <StepItem index={2} title="补充资料" text="上传资料或导入成交记录，帮助 AI 更准确理解产品能力" />
+          <StepItem index={2} title="补充资料" text="上传资料或导入库存记录，帮助 AI 更准确理解产品能力" />
           <StepItem index={3} title="补充说明" text="补充官网看不出来的优势、现货能力、品牌范围和适用场景" />
         </aside>
 
         <div className="productFields">
           <label className="productField productLinksField">
-            <span>
-              官网 / 产品页链接 <b>*</b>
-            </span>
+            <span>官网 / 产品页链接 *</span>
             <textarea
               value={form.productLinksText}
               onChange={(event) => updateField("productLinksText", event.target.value)}
-              placeholder={"例如：\nhttps://telecorenet.com/\n也可以填写多个产品页链接，每行一个"}
+              placeholder="https://your-domain.com&#10;https://your-domain.com/products"
             />
             <small>建议填写官网首页或核心产品页，AI 会优先读取这些信息。</small>
           </label>
@@ -157,40 +188,38 @@ export function ProductProfileForm() {
             <textarea
               value={form.keywords}
               onChange={(event) => updateField("keywords", event.target.value)}
-              placeholder="例如：RRU、BBU、微波设备、基站板卡、电源模块"
+              placeholder="RRU, BBU, AAU, microwave backhaul, telecom power module"
             />
           </label>
 
-          <div className="productUploadBox">
+          <label className="productField productUploadField">
             <span>上传资料（可选）</span>
-            <p>支持产品目录、库存表、报价表、产品图片</p>
-            <label>
-              <input
-                accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.jpg,.jpeg,.png"
-                multiple
-                type="file"
-                onChange={updateDocumentFiles}
-              />
-              <UploadCloud aria-hidden="true" size={18} />
-              {documentFileNames.length ? `${documentFileNames.length} 个文件已选择` : "点击上传或拖拽文件到此处"}
-            </label>
-          </div>
+            <div className="productUploadBox">
+              <input type="file" multiple onChange={updateDocumentFiles} />
+              <UploadCloud aria-hidden="true" size={21} />
+              <strong>点击上传或拖拽文件到此处</strong>
+              <small>支持产品目录、库存表、报价表、产品图片</small>
+            </div>
+            {documentFileNames.length ? <small>已选择：{documentFileNames.join(", ")}</small> : null}
+          </label>
 
-          <div className="productImportBox">
-            <span>历史成交（可选）</span>
-            <p>也可以从 CRM 导入成交产品或高频品牌</p>
-            <button type="button">从 CRM 导入</button>
-          </div>
+          <label className="productField">
+            <span>资料链接（可选，每行一个）</span>
+            <textarea
+              value={form.documentUrlsText}
+              onChange={(event) => updateField("documentUrlsText", event.target.value)}
+              placeholder="https://your-domain.com/catalog.pdf"
+            />
+          </label>
 
           <label className="productField productNotesField">
             <span>补充说明（可选）</span>
             <textarea
-              maxLength={300}
               value={form.notes}
               onChange={(event) => updateField("notes", event.target.value)}
-              placeholder="例如：我们主要做 Huawei / ZTE / Ericsson / Nokia 通信设备，支持整套项目供货，也能单卖 RRU、BBU、板卡、备件和电源模块。"
+              placeholder="例如：我们主要做 Huawei / ZTE / Ericsson / Nokia 通信设备..."
             />
-            <small>{form.notes.length} / 300</small>
+            <small>{form.notes.length} / 4000</small>
           </label>
         </div>
       </section>
@@ -207,15 +236,15 @@ export function ProductProfileForm() {
           </button>
         </div>
         <div className="understandingRows">
-          <UnderstandingRow icon="◇" label="核心产品" tags={keywordTags.length ? keywordTags : ["通信设备", "RRU", "BBU"]} />
-          <UnderstandingRow icon="♧" label="支持品牌" tags={brandTags} />
-          <UnderstandingRow icon="◇" label="产品优势（根据补充说明提供）" tags={advantageTags} />
+          <UnderstandingRow icon="◆" label="核心产品" tags={keywordTags.length ? keywordTags : ["telecom equipment", "RRU", "BBU"]} />
+          <UnderstandingRow icon="◇" label="支持品牌" tags={brandTags} />
+          <UnderstandingRow icon="●" label="产品优势" tags={advantageTags} />
         </div>
       </section>
 
       <div className="profileActionTips" aria-label="保存方式说明">
         <span>
-          <b>保存并开始找客户</b>：保存产品画像后进入 AI 外贸员，直接用最新资料启动找客户流程。
+          <b>保存并开始找客户</b>：保存产品画像后进入 AI 外贸员，用最新资料启动找客户流程。
         </span>
         <span>
           <b>仅保存</b>：只更新产品画像，停留在当前页面，不创建找客户任务。
@@ -277,36 +306,57 @@ function splitLines(value: string) {
 
 function splitTags(value: string) {
   return value
-    .split(/[，,、\n]/)
+    .split(/[,，、\n]/)
     .map((item) => item.trim())
     .filter(Boolean)
-    .slice(0, 8);
+    .slice(0, 12);
 }
 
 function mergeProfileNotes(notes: string, label: string, values: string[]) {
   const cleanNotes = notes.trim();
   const cleanValues = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
-
-  if (!cleanValues.length) {
-    return cleanNotes;
-  }
-
+  if (!cleanValues.length) return cleanNotes;
   return [cleanNotes, `${label}: ${cleanValues.join(", ")}`].filter(Boolean).join("\n");
 }
 
+function extractMergedNoteValues(notes: string | null | undefined, label: string) {
+  const marker = `${label}:`;
+  const line = (notes ?? "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .find((item) => item.toLowerCase().startsWith(marker.toLowerCase()));
+  if (!line) return [];
+  return line
+    .slice(marker.length)
+    .split(/[,，、]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function stripMergedNote(notes: string | null | undefined, label: string) {
+  const marker = `${label}:`;
+  return (notes ?? "")
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().toLowerCase().startsWith(marker.toLowerCase()))
+    .join("\n")
+    .trim();
+}
+
 function extractBrands(value: string) {
-  const brands = ["Huawei", "ZTE", "Ericsson", "Nokia", "Eltek"].filter((brand) => value.toLowerCase().includes(brand.toLowerCase()));
+  const brands = ["Huawei", "ZTE", "Ericsson", "Nokia", "Eltek", "Alcatel-Lucent"].filter((brand) =>
+    value.toLowerCase().includes(brand.toLowerCase())
+  );
   return brands.length ? brands : ["Huawei", "ZTE", "Ericsson", "Nokia"];
 }
 
 function extractAdvantages(value: string) {
   const options = [
     { keyword: "整套", label: "整套项目供货" },
-    { keyword: "现货", label: "单品现货" },
+    { keyword: "现货", label: "现货支持" },
     { keyword: "备件", label: "备件补货" },
     { keyword: "紧急", label: "紧急交付" },
     { keyword: "品牌", label: "多品牌兼容" }
   ];
   const tags = options.filter((item) => value.includes(item.keyword)).map((item) => item.label);
-  return tags.length ? tags : ["整套项目供货", "单品现货", "备件补货"];
+  return tags.length ? tags : ["整套项目供货", "现货支持", "备件补货"];
 }

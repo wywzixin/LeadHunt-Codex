@@ -1,7 +1,7 @@
 # LeadHunt AI 技术架构文档
 
 版本：V1 架构草案  
-日期：2026-04-29  
+日期：2026-05-14
 定位：通信设备行业垂直 AI 外贸获客系统
 
 ## 1. 产品目标
@@ -13,11 +13,12 @@ LeadHunt AI 面向通信设备出口商，目标不是泛外贸工具，而是�
 1. 用户输入开发任务，例如“帮我找 50 个 UAE 通信设备经销商”。
 2. 系统分析用户独立站 `telecorenet.com` 的产品和供应能力。
 3. 系统分析现有客户 `spectrummea.com`、`highcloud.ae` 的客户类型和关键词。
-4. LangGraph Agent 基于高级搜索策略库和通信设备关键词生成组合查询，并调用 Brave AI 搜索候选公司。
-5. GPT-5.5 根据产品画像、参考客户画像和搜索结果做 ICP 判断。
-6. 合格客户进入客户库，并生成可编辑开发信。
-7. 验证模式只展示结果；半托管等待用户确认后发送邮件；WhatsApp 不进入 V1 发送链路，后续版本再接入。
-8. 系统同步客户回复、识别意向、创建跟进任务，并分析哪些搜索词、模板和渠道带来高质量客户。
+4. 系统创建或复用长期客户池，例如“5G通信设备买家客户池”。
+5. LangGraph Agent 基于高级搜索策略库和通信设备关键词生成组合查询，并调用 Brave AI 搜索候选公司。
+6. GPT-5.5 根据产品画像、参考客户画像和搜索结果做 ICP 判断。
+7. 合格客户进入客户库，并生成可编辑开发信。
+8. 验证模式只展示结果；半托管等待用户确认后发送邮件；WhatsApp 不进入 V1 发送链路，后续版本再接入。
+9. 系统同步客户回复、识别意向、创建跟进任务，并分析哪些搜索词、模板和渠道带来高质量客户。
 
 ## 2. 总体技术选型
 
@@ -26,7 +27,7 @@ LeadHunt AI 面向通信设备出口商，目标不是泛外贸工具，而是�
 | 前端 | Next.js + React + TypeScript | 登录注册、SaaS 管理后台、AI 外贸员会话页、客户库、邮件营销、个人邮箱授权 |
 | UI | Tailwind CSS / CSS Modules + Lucide Icons | 沿用当前原型风格，图标按钮优先 |
 | 后端 API | Node.js + NestJS + TypeScript | 负责业务 API、认证、OAuth、任务创建、Webhook、权限控制 |
-| Agent 编排 | LangGraph JS + @langchain/core | 编排 AI 外贸员长流程、分支、循环、暂停、恢复 |
+| Agent 编排 | LangGraph JS + @langchain/core + Postgres checkpoint | 编排 AI 外贸员长流程、分支、循环、暂停、恢复和跨请求状态保存 |
 | 后台队列 | BullMQ + Redis | 负责任务排队、限速、重试、延迟发送、Worker 调度 |
 | 数据库 | PostgreSQL + Prisma | 保存任务、客户、搜索结果、ICP 评分、开发信、发送记录 |
 | 搜索 | 高级搜索策略库 + Brave Search API / LLM Context API | 先生成带 operator 来源和执行状态的 query，再获取候选 URL、标题、摘要、网页片段和来源 |
@@ -199,6 +200,18 @@ LeadHunt AI 的任务不是一次性问答，而是长流程：
 
 LangGraph 用来把这些步骤编排成可控工作流。GPT-5.5 不直接调用外部 API，而是由 LangGraph 节点在后端调用受控工具。
 
+### 6.1.1 当前做实的 LangGraph 职责
+
+LangGraph 在项目中不是只做展示时间线，而是作为 AI 外贸员主流程编排层：
+
+- 维护任务状态、搜索轮次、候选客户、人工确认和错误信息。
+- 负责编排搜索、清洗、ICP 打分、人工审核、开发信生成、邮件确认、Gmail 发送、CRM 同步和跟进计划。
+- 在 `human_approval` 节点强制暂停，客户必须人工审核后才能进入邮件生成。
+- 在 `wait_email_confirmation` 节点强制暂停，邮件必须人工确认后才能发送。
+- 使用 LangGraph checkpoint 保存图状态，生产环境使用 PostgreSQL checkpoint，测试或一次性本地调试才使用 MemorySaver。
+
+用户界面不要直接暴露这些节点名。普通用户只看到“待审核客户”“等待确认发送”“继续找更多客户”等业务状态。
+
 ### 6.2 Agent 工作流图
 
 ```mermaid
@@ -237,7 +250,32 @@ flowchart TD
   FinishValidate --> Finish
 ```
 
-### 6.2.1 回复和跟进闭环图
+### 6.2.1 持续客户池与继续拓展图
+
+```mermaid
+flowchart TD
+  Start(["用户发起获客需求"]) --> Pool{"是否已有同主题客户池?"}
+  Pool -- 否 --> CreatePool["创建客户池"]
+  Pool -- 是 --> LoadPool["加载客户池状态"]
+  CreatePool --> PlanRound["生成首轮搜索指令"]
+  LoadPool --> Pending{"还有未执行搜索指令?"}
+  Pending -- 有 --> RunPending["优先执行未完成指令"]
+  Pending -- 没有 --> Learn["读取审核通过 / 拒绝 / 过滤反馈"]
+  Learn --> PlanNext["生成下一轮搜索指令"]
+  PlanRound --> RunSearch["调用 Brave 搜索"]
+  RunPending --> RunSearch
+  PlanNext --> RunSearch
+  RunSearch --> Normalize["清洗与结构化候选"]
+  Normalize --> Dedupe["按域名 / 邮箱 / 公司名 + 国家 / CRM 去重"]
+  Dedupe --> Score["ICP 评分"]
+  Score --> SavePool["写入客户池、搜索轮次和候选状态"]
+  SavePool --> HumanReview["展示待审核客户"]
+  HumanReview --> Continue{"用户继续找更多客户?"}
+  Continue -- 是 --> Pending
+  Continue -- 否 --> Finish(["保留客户池，等待下次继续"])
+```
+
+### 6.2.2 回复和跟进闭环图
 
 ```mermaid
 flowchart TD
@@ -269,12 +307,18 @@ flowchart TD
 type LeadHuntGraphState = {
   taskId: string
   userId: string
+  leadPoolId: string
+  searchRoundId?: string
   mode: 'validate' | 'semi_auto' | 'full_auto'
   targetCount: number
   targetRegions: string[]
   productProfile?: ProductProfile
   referenceProfiles: ReferenceCustomerProfile[]
   searchQueries: SearchQuery[]
+  pendingSearchQueries: SearchQuery[]
+  executedSearchQueryIds: string[]
+  rejectedLeadSignals: LeadFeedbackSignal[]
+  approvedLeadSignals: LeadFeedbackSignal[]
   searchResults: SearchResult[]
   candidates: LeadCandidate[]
   qualifiedLeads: QualifiedLead[]
@@ -297,7 +341,24 @@ type LeadHuntGraphState = {
 }
 ```
 
-### 6.4 工具注册
+### 6.4 LangGraph checkpoint 持久化
+
+当前代码已从开发期 `MemorySaver` 切换为可配置 checkpoint：
+
+- `LANGGRAPH_CHECKPOINT_STORE=postgres`：生产和联调推荐值，使用 `@langchain/langgraph-checkpoint-postgres`。
+- `LANGGRAPH_CHECKPOINT_STORE=memory`：只用于单元测试、一次性本地调试或无状态 demo。
+- `LANGGRAPH_CHECKPOINT_DATABASE_URL`：可单独指定 checkpoint 数据库；不配置时复用 `DATABASE_URL`。
+- `LANGGRAPH_CHECKPOINT_SCHEMA`：checkpoint 表所在 schema，默认 `public`。
+
+选择 PostgreSQL checkpoint 的原因：
+
+- AI 外贸员任务会跨多个 API 请求、人工审核和邮件确认，服务重启后必须能恢复。
+- checkpoint 状态和业务数据都在 PostgreSQL，方便按 `thread_id` / `task_id` 联合排查。
+- 当前项目已经有 PostgreSQL 依赖，先用 PostgresSaver 比额外引入 Redis checkpoint 更简单。
+
+Redis 仍用于队列、短期缓存和限速。除非后续需要极高频的短生命周期图状态，否则不建议把 LangGraph checkpoint 主存储放到 Redis。
+
+### 6.5 工具注册
 
 ```ts
 export const tools = {
@@ -366,6 +427,50 @@ V1 回到最初用高级搜索方法开发客户的思路，但不把 `google se
 - Agent 读取版：`search/advanced-search-strategy-library.json`
 
 Brave AI 在这里是搜索执行器，不是替代高级搜索方法论。系统需要同时保存“原始策略模板”和“实际提交给 Brave 的 query”，方便后续切换到 Google Custom Search、SerpApi 或其他搜索 API。
+
+### 7.2.1 GPT-led 搜索规划实现
+
+当前代码中，`AgentWorkflowService.buildTaskContext()` 是获客任务搜索规划的核心入口：
+
+1. 读取 `ProductProfileService` 和 `CustomerProfileService` 保存的画像。
+2. 用 `WebsiteContentService.readProfileSites()` 抓取产品官网、产品目录、产品资料 URL 和参考客户官网。
+3. 用确定性 `createKeywordGroups()` / `generateSearchQueries()` 先生成兜底关键词和 query。
+4. 调用 `LeadHuntAiService.analyzeProductProfile()` 分析产品画像。
+5. 调用 `LeadHuntAiService.analyzeCustomerProfile()` 分析客户画像。
+6. 调用 `LeadHuntAiService.expandKeywords()` 扩展产品词、买家词、场景词、目标市场词和排除词。
+7. 调用 `LeadHuntAiService.generateSearchStrategy()` 生成 GPT-led 搜索策略。
+8. 用 `normalizeAiSearchPlan()` 校验和规范化 GPT query。
+9. GPT query 不足 15 条时，用确定性 query 补足。
+
+创建获客任务后的执行方式已改为后端自动接力：
+
+- `POST /api/lead-tasks` 只负责创建 `lead_task`、初始化 `agent_steps`，然后立即返回 `task_id`。
+- 后端在后台继续执行 `读取画像 -> GPT 规划 query -> 校验 query -> Brave 搜索全部 pending query -> 清洗候选 -> GPT/规则融合评分 -> 写入候选`。
+- 前端不再等待 45 秒后调用 `/api/lead-tasks/:taskId/search` 接力；前端只轮询 `GET /api/lead-tasks/:taskId` 展示进度。
+- 搜索执行时，单条 query 开始处理即写为 `running`，拿到 Brave 原始结果后先回写 `resultCount`，避免页面看起来“搜索指令待生成 / 不动了”。
+- 后端启动时会恢复最近 24 小时仍处于 `running` 的获客任务；如果任务已经有 query，则跳过 GPT 规划，重置卡在 `running` 的 query 并继续执行 pending query。
+- 本轮所有 query 执行完后，任务停在人工审核客户阶段；邮件生成和发送仍必须等待用户确认。
+
+后端校验器的职责边界：
+
+- 可以丢弃：不在自动执行白名单里的 operator、无国家约束的 query、完全没有产品/客户/场景信号的 query、重复 query、过长 query。
+- 可以补充：安全排除词，例如 `-job`、`-career`、`-hiring`、`-training`。
+- 不负责：判断这个 query 搜出来的客户是否值钱。客户质量由 GPT 候选买家判断和 ICP 融合评分处理。
+
+候选清洗和 GPT 评分的成本边界：
+
+- Brave 每条 query 当前取 1 页，`count=20`；候选清洗最多处理前 20 条。
+- 联系方式探测只对规则判断仍有买家可能性的官网执行，单候选最多探测 6 个常见页面，单页面 3.5 秒超时，二级 contact 链接最多 4 个。
+- GPT 候选买家判断不是对所有搜索结果无脑调用；每批最多评估 5 个通过规则预筛的候选，低分文章页、目录页、消费电子页由规则层直接压低。
+- 最终 ICP 仍按 GPT 买家匹配分和规则证据分融合；规则预筛只控制成本和速度，不替代最终人工审核。
+
+`WebsiteContentService` 抓取规则：
+
+- 使用后端 `fetch`，`LeadHuntAI/0.1 website profile reader` User-Agent，跟随重定向。
+- 只读取 `text/html`、`text/plain`、`application/xhtml+xml`。
+- 单 URL 读取超时为 6 秒。
+- 对 WooCommerce 产品目录，识别 `woocommerce-loop-product__title`、`Showing x-y of n results` 和 `/page/{n}/` 分页。
+- 产品目录上限为 50 页 / 1000 个产品名，防止无限抓取，同时覆盖 `telecorenet.com` 当前 158 个产品规模。
 
 V1 自动执行以 Brave 官方文档列出的 operator 为优先白名单。由于 Brave 官方也说明 search operators 仍处于实验阶段，V1 需要记录每个 operator 的执行效果并持续测试，不把任何 operator 写成永久稳定能力。
 
@@ -436,6 +541,13 @@ filetype:pdf "telecom" "exhibitors" "UAE"
 65-79：待人工确认
 0-64：不建议触达
 ```
+
+当前实现采用“规则证据分 + GPT 买家语义分”融合：
+
+- `LeadQualificationService.scoreCandidate()` 输出规则证据分，处理行业词、产品词、买家场景、目标国家、联系方式、风险域名、目录 / 内容页等确定性信号。
+- `LeadHuntAiService.evaluateCandidateBuyer()` 输出 GPT 买家判断，分类为 `target_buyer`、`possible_buyer`、`supplier_or_competitor`、`directory`、`content_article`、`job_page`、`market_report`、`irrelevant`、`unknown`。
+- `mergeAiEvaluationWithRuleScore()` 计算最终分：GPT `fitScore` 占 60%，规则分占 40%。
+- `directory`、`content_article`、`job_page`、`market_report`、`irrelevant` 最高封顶到低分；`supplier_or_competitor` 最高封顶到复核区间；真实买家且高置信时可进入高匹配。
 
 ## 8. 邮件触达与后续 WhatsApp 扩展
 
@@ -568,11 +680,35 @@ erDiagram
   lead_tasks {
     uuid id PK
     uuid user_id FK
+    uuid lead_pool_id FK
     string mode
     string status
     int target_count
     json input_payload
     datetime created_at
+  }
+
+  lead_pools {
+    uuid id PK
+    uuid user_id FK
+    string name
+    string status
+    json target_regions
+    json product_keywords
+    json buyer_type_keywords
+    datetime created_at
+    datetime updated_at
+  }
+
+  lead_search_rounds {
+    uuid id PK
+    uuid pool_id FK
+    uuid task_id FK
+    int round_index
+    string status
+    json feedback_summary
+    datetime started_at
+    datetime finished_at
   }
 
   agent_steps {
@@ -589,6 +725,8 @@ erDiagram
   search_queries {
     uuid id PK
     uuid task_id FK
+    uuid pool_id FK
+    uuid round_id FK
     string provider
     string operator_source
     string execution_status
@@ -614,11 +752,32 @@ erDiagram
   lead_candidates {
     uuid id PK
     uuid task_id FK
+    uuid pool_id FK
+    uuid round_id FK
     string company_name
     string website
     string country
     string source_url
     string status
+  }
+
+  lead_candidate_events {
+    uuid id PK
+    uuid lead_id FK
+    uuid pool_id FK
+    string event_type
+    text note
+    json metadata
+    datetime created_at
+  }
+
+  lead_dedupe_keys {
+    uuid id PK
+    uuid pool_id FK
+    uuid lead_id FK
+    string key_type
+    string key_value
+    datetime created_at
   }
 
   lead_contacts {
@@ -737,10 +896,14 @@ erDiagram
 | `user_sessions` | 登录会话、刷新令牌哈希、过期时间和设备信息 |
 | `password_reset_tokens` | 忘记密码重置令牌哈希、有效期和使用状态 |
 | `lead_tasks` | 用户创建的获客任务 |
+| `lead_pools` | 长期客户池，例如“5G通信设备买家客户池”，承载连续拓展和跨轮次去重 |
+| `lead_search_rounds` | 客户池下的搜索轮次，记录本轮来源、反馈摘要和执行状态 |
 | `agent_steps` | LangGraph 每个节点的输入、输出、状态、错误 |
-| `search_queries` | GPT-5.5 生成的高级搜索策略模板、operator 来源、执行状态、关键词组合、实际执行 query 和效果评分 |
+| `search_queries` | GPT-5.5 生成的高级搜索策略模板、operator 来源、执行状态、关键词组合、实际执行 query、所属客户池 / 轮次和效果评分 |
 | `search_results` | Brave 返回的 URL、标题、摘要、片段 |
-| `lead_candidates` | 候选公司 |
+| `lead_candidates` | 候选公司，绑定任务、客户池和搜索轮次 |
+| `lead_candidate_events` | 客户审核、过滤、加入 CRM、发送、退订等事件 |
+| `lead_dedupe_keys` | 域名、邮箱、公司名 + 国家等去重键，避免继续拓展时重复返回同一客户 |
 | `lead_contacts` | 邮箱、电话、WhatsApp、LinkedIn 等联系方式 |
 | `icp_scores` | ICP 分数、匹配理由、风险点 |
 | `outreach_drafts` | 邮件开发信草稿；V2 可扩展 WhatsApp 文案 |
@@ -761,8 +924,7 @@ sequenceDiagram
   participant U as 用户
   participant FE as 前端
   participant API as 后端 API
-  participant Q as BullMQ
-  participant W as Agent Worker
+  participant BG as 后端后台任务
   participant G as LangGraph
   participant LLM as GPT-5.5
   participant B as Brave Search
@@ -770,31 +932,25 @@ sequenceDiagram
 
   U->>FE: 输入“开发 50 个 UAE 客户”
   FE->>API: POST /api/lead-tasks
-  API->>DB: 创建 lead_task
-  API->>Q: 入队 task_id
-  API-->>FE: 返回 task_id
+  API->>DB: 创建 lead_task + agent_steps
+  API-->>FE: 立即返回 task_id
+  API->>BG: 启动后台自动获客流水线
 
-  Q->>W: 分配任务
-  W->>G: 启动 LangGraph
-  G->>LLM: 分析产品画像和参考客户
-  LLM-->>G: 返回画像和搜索词
-  G->>B: 调用 Brave 搜索
-  B-->>G: 返回搜索结果
-  G->>LLM: ICP 判断和去重
-  LLM-->>G: 返回合格客户
-  G->>DB: 保存步骤和客户
-
-  loop 直到够 50 个或预算用完
-    G->>LLM: 生成下一组搜索词
-    G->>B: 继续搜索
-    G->>DB: 保存新候选和评分
+  loop 前端轮询
+    FE->>API: GET /api/lead-tasks/:id
+    API-->>FE: 返回步骤、query、原始命中、候选客户
   end
 
-  G->>LLM: 生成开发信草稿
-  G->>DB: 保存 outreach_drafts
-  G->>DB: 创建默认 followup_tasks
-  FE->>API: GET /api/lead-tasks/:id
-  API-->>FE: 返回进度和客户列表
+  BG->>G: load_task / analyze_product_profile / analyze_customer_profile
+  G->>LLM: 分析产品画像、参考客户和关键词
+  LLM-->>G: 返回画像、关键词和搜索策略
+  G->>DB: 写入 search_queries
+  BG->>B: 一次性执行本轮全部 pending query
+  B-->>BG: 返回搜索结果
+  BG->>DB: 保存 search_results，query 标记 running/completed/failed
+  BG->>LLM: 候选买家判断
+  BG->>DB: 保存候选客户、联系人、ICP 分数
+  BG->>DB: human_approval 置为 waiting，任务暂停等待人工审核
 ```
 
 ## 10.1 回复同步和跟进时序图
@@ -872,6 +1028,13 @@ AUTH_COOKIE_SECRET=change_me
 # Database
 DATABASE_URL=postgresql://user:password@localhost:5432/leadhunt
 REDIS_URL=redis://localhost:6379
+
+# LangGraph checkpoint
+# production / shared dev: postgres
+# unit tests / disposable local demo: memory
+LANGGRAPH_CHECKPOINT_STORE=postgres
+LANGGRAPH_CHECKPOINT_SCHEMA=public
+LANGGRAPH_CHECKPOINT_DATABASE_URL=postgresql://user:password@localhost:5432/leadhunt
 
 # GPT-5.5
 OPENAI_BASE_URL=http://43.167.204.62:8080/v1

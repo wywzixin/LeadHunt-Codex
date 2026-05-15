@@ -13,6 +13,7 @@
     "prisma": "prisma"
   },
   "dependencies": {
+    "@langchain/langgraph-checkpoint-postgres": "1.0.1",
     "@leadhunt/agent": "workspace:*",
     "@leadhunt/shared": "workspace:*",
     "@nestjs/common": "^11.1.9",
