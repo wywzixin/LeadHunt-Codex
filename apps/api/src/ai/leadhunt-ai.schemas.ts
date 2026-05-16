@@ -38,6 +38,39 @@ export const keywordExpansionSchema = z.object({
 });
 
 export const searchStrategyPlanSchema = z.object({
+  evidenceSummary: z
+    .object({
+      availableSources: z.array(z.string().min(1)).default([]),
+      missingSources: z.array(z.string().min(1)).default([]),
+      confidence: z.number().min(0).max(1).default(0.5)
+    })
+    .optional(),
+  productUnderstanding: z
+    .object({
+      productCategory: z.string().optional(),
+      productType: z.string().optional(),
+      coreProducts: z.array(z.string()).default([]),
+      modelTerms: z.array(z.string()).default([]),
+      priorityModelTerms: z.array(z.string()).default([]),
+      brandTerms: z.array(z.string()).default([]),
+      productGroups: z.array(z.string()).default([]),
+      applicationScenarios: z.array(z.string()).default([]),
+      demandTriggers: z.array(z.string()).default([]),
+      likelyBuyerTypes: z.array(z.string()).default([]),
+      channelTypes: z.array(z.string()).default([]),
+      badTargets: z.array(z.string()).default([])
+    })
+    .optional(),
+  strategyMix: z
+    .object({
+      buyerScenario: z.number().int().min(0).max(100).default(0),
+      productGroup: z.number().int().min(0).max(100).default(0),
+      brandEcosystem: z.number().int().min(0).max(100).default(0),
+      modelSpecific: z.number().int().min(0).max(100).default(0),
+      procurementEvent: z.number().int().min(0).max(100).default(0),
+      channel: z.number().int().min(0).max(100).default(0)
+    })
+    .optional(),
   queries: z
     .array(
       z.object({
@@ -47,10 +80,24 @@ export const searchStrategyPlanSchema = z.object({
         operatorSource: z.enum(["google_official", "brave_official", "common_seo"]),
         executionStatus: z.enum(["supported", "experimental", "manual_only", "disabled"]),
         rationale: z.string().min(1),
+        strategyType: z
+          .enum(["buyer_scenario", "product_group", "brand_ecosystem", "model_specific", "procurement_event", "channel"])
+          .optional(),
+        sourceEvidence: z.enum(["user_prompt", "product_profile", "website", "product_list", "crm_sample", "inferred"]).optional(),
+        buyerIntent: z.string().optional(),
+        negativeTerms: z.array(z.string()).default([]),
         priority: z.number().int().min(1).max(5)
       })
     )
-    .min(15)
+    .min(15),
+  rejectedIdeas: z
+    .array(
+      z.object({
+        badQueryIdea: z.string().min(1),
+        reason: z.string().min(1)
+      })
+    )
+    .default([])
 });
 
 export const icpScoreSchema = z.object({
