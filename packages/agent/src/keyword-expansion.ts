@@ -229,6 +229,8 @@ const marketMatchers: Array<{ terms: string[]; patterns: RegExp[] }> = [
     terms: expandMarketMacro("Oceania"),
     patterns: [/oceania/i, /\u5927\u6d0b\u6d32/]
   },
+  { terms: ["Canada"], patterns: [/canada/i, /\u52a0\u62ff\u5927/] },
+  { terms: ["Australia"], patterns: [/australia/i, /\u6fb3\u5927\u5229\u4e9a|\u6fb3\u6d32/] },
   {
     terms: ["UAE", "Dubai", "Abu Dhabi"],
     patterns: [/uae/i, /united arab emirates/i, /dubai/i, /abu dhabi/i, /\u963f\u8054\u914b/]

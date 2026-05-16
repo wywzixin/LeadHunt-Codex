@@ -17,6 +17,8 @@ import {
   generateSearchQueries,
   getSearchStrategyLibrary,
   countryToSearchApiCode,
+  countryToSite as marketToSite,
+  resolveCountry,
   leadHuntWorkflowNodes,
   type KeywordGroups,
   type LeadHuntWorkflowNode,
@@ -131,6 +133,39 @@ const MAX_CANDIDATE_RESULTS_PER_QUERY = 20;
 const RUNNING_TASK_RECOVERY_LIMIT = 5;
 const RUNNING_TASK_RECOVERY_WINDOW_HOURS = 24;
 const LANGGRAPH_CHECKPOINT_STORE_VALUES = ["memory", "postgres"] as const;
+const knownQueryMarkets = [
+  "Canada",
+  "Australia",
+  "UAE",
+  "United Arab Emirates",
+  "Saudi Arabia",
+  "Iran",
+  "Russia",
+  "Ukraine",
+  "Middle East",
+  "Africa",
+  "Brazil",
+  "Nigeria",
+  "United States",
+  "United Kingdom",
+  "Germany",
+  "Poland",
+  "Oman",
+  "Qatar",
+  "Kenya",
+  "South Africa",
+  "India",
+  "Indonesia",
+  "Philippines",
+  "Mexico",
+  "Chile",
+  "Colombia",
+  "Peru",
+  "Argentina",
+  "Italy",
+  "Ireland",
+  "Bulgaria"
+];
 
 type LangGraphCheckpointStore = (typeof LANGGRAPH_CHECKPOINT_STORE_VALUES)[number];
 type LangGraphCheckpointer = MemorySaver | PostgresSaver;
@@ -1586,7 +1621,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     const siteKeywordHints = collectSiteKeywordHints(siteEvidence);
     const ruleProductProfileAnalysis = buildProductProfileAnalysis(product, siteEvidence.productSites);
     const ruleCustomerProfileAnalysis = buildCustomerProfileAnalysis(customer, siteEvidence.referenceCustomerSites);
-    const targetMarkets = resolveTargetMarkets(input.prompt, customer?.targetRegions);
+    const marketSelection = resolveTargetMarketSelection(input.prompt, customer?.targetRegions);
+    const targetMarkets = marketSelection.targetMarkets;
     const profileKeywordInput = {
       taskText: input.prompt,
       productProfileUrls,
@@ -1647,6 +1683,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           .map((site) => site.finalUrl),
         failedUrlCount: siteEvidence.summary.failed,
         crmSampleCount: crmSamples.length,
+        marketSelection,
         aiPlanning: aiPlanning.profileSignals
       },
       executionPlan: buildExecutionPlan(Boolean(product), Boolean(customer)),
@@ -1686,6 +1723,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     let searchQueries = mapGeneratedSearchQueries(input.ruleSearchQueries);
     let aiKeywordExpansion: KeywordExpansionResult | null = null;
     let aiQueryCount = 0;
+    let rejectedAiQueries: Array<{ query: string; country: string; reason: string }> = [];
 
     if (!this.leadHuntAiService) {
       return {
@@ -1759,6 +1797,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         keywordGroupsFromAiExpansion(aiKeywordExpansion, input.targetMarkets),
         input.ruleKeywordGroups
       );
+      keywordGroups = constrainKeywordGroupMarkets(keywordGroups, input.targetMarkets);
     } catch (error) {
       fallbackReasons.push(`GPT keyword expansion failed: ${searchErrorMessage(error)}`);
     } finally {
@@ -1769,13 +1808,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.markOptionalPlanningStepRunning(input.taskId, "plan_search_queries");
+      const searchTargetMarkets = input.targetMarkets?.length ? input.targetMarkets : keywordGroups.marketTerms;
       const searchPlan = await this.leadHuntAiService.generateSearchStrategy({
         keywordGroups: aiKeywordExpansion ?? keywordExpansionFromKeywordGroups(keywordGroups),
-        targetMarkets: keywordGroups.marketTerms.length ? keywordGroups.marketTerms : input.targetMarkets ?? [],
+        targetMarkets: searchTargetMarkets,
         operatorLibrary: compactOperatorLibrary(),
         minQueryCount: 15
       });
-      const aiQueries = normalizeAiSearchPlan(searchPlan, keywordGroups, input.ruleSearchQueries, 15);
+      const normalization = normalizeAiSearchPlan(searchPlan, keywordGroups, input.ruleSearchQueries, 15, searchTargetMarkets);
+      const aiQueries = normalization.queries;
+      rejectedAiQueries = normalization.rejected;
       aiQueryCount = aiQueries.filter((query) => query.templateId === "gpt55_search_strategy").length;
       searchQueries = aiQueries;
     } catch (error) {
@@ -1793,6 +1835,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         querySource: aiQueryCount ? "gpt55_with_deterministic_fallback" : "deterministic_fallback",
         gptSearchQueryCount: aiQueryCount,
         fallbackQueryCount: searchQueries.length - aiQueryCount,
+        rejectedQueryCount: rejectedAiQueries.length,
+        rejectedQueries: rejectedAiQueries,
         fallbackReasons
       }
     };
@@ -1917,6 +1961,18 @@ function mergeKeywordGroups(primary: KeywordGroups, fallback: KeywordGroups): Ke
   };
 }
 
+function constrainKeywordGroupMarkets(keywordGroups: KeywordGroups, targetMarkets: string[] | undefined): KeywordGroups {
+  const markets = normalizeTargetMarkets(targetMarkets);
+  if (!markets?.length) {
+    return keywordGroups;
+  }
+
+  return {
+    ...keywordGroups,
+    marketTerms: markets
+  };
+}
+
 function compactOperatorLibrary() {
   const library = getSearchStrategyLibrary();
   return {
@@ -1950,25 +2006,41 @@ function normalizeAiSearchPlan(
   plan: SearchStrategyPlan,
   keywordGroups: KeywordGroups,
   fallbackQueries: GeneratedSearchQuery[],
-  minQueryCount: number
-): PlannedSearchQuery[] {
-  const countryPool = keywordGroups.marketTerms.length ? keywordGroups.marketTerms : ["UAE"];
+  minQueryCount: number,
+  targetMarkets: string[] | undefined
+): { queries: PlannedSearchQuery[]; rejected: Array<{ query: string; country: string; reason: string }> } {
+  const countryPool = normalizeTargetMarkets(targetMarkets) ?? normalizeTargetMarkets(keywordGroups.marketTerms) ?? ["UAE"];
   const supportedStatuses = new Set(["supported", "experimental"]);
   const seen = new Set<string>();
   const output: PlannedSearchQuery[] = [];
+  const rejected: Array<{ query: string; country: string; reason: string }> = [];
 
   for (const query of [...plan.queries].sort((left, right) => left.priority - right.priority)) {
     if (!supportedStatuses.has(query.executionStatus)) {
+      rejected.push({ query: query.query, country: query.country, reason: `unsupported_execution_status:${query.executionStatus}` });
       continue;
     }
 
-    const country = resolveAiQueryCountry(query.country, countryPool, output.length);
-    const queryText = normalizeAiQueryText(query.query, country, keywordGroups);
+    const countryResolution = resolveAiQueryCountry(query.country, query.query, countryPool, output.length);
+    if (!countryResolution.country) {
+      rejected.push({ query: query.query, country: query.country, reason: countryResolution.reason });
+      continue;
+    }
+
+    const country = countryResolution.country;
+    const queryNormalization = normalizeAiQueryText(query.query, country, keywordGroups, countryPool);
+    if (!queryNormalization.query) {
+      rejected.push({ query: query.query, country: query.country, reason: queryNormalization.reason });
+      continue;
+    }
+
+    const queryText = queryNormalization.query;
     if (!queryText || seen.has(queryText.toLowerCase())) {
       continue;
     }
 
     if (!hasEnoughQuerySignals(queryText, keywordGroups, country)) {
+      rejected.push({ query: query.query, country: query.country, reason: "missing_product_customer_or_market_signal" });
       continue;
     }
 
@@ -1991,6 +2063,9 @@ function normalizeAiSearchPlan(
     if (output.length >= minQueryCount) {
       break;
     }
+    if (fallback.country && !countryPool.some((country) => marketMatches(country, fallback.country ?? ""))) {
+      continue;
+    }
     const key = fallback.query.toLowerCase();
     if (seen.has(key)) {
       continue;
@@ -1999,17 +2074,37 @@ function normalizeAiSearchPlan(
     output.push(fallback);
   }
 
-  return output;
+  return { queries: output, rejected };
 }
 
-function resolveAiQueryCountry(rawCountry: string, countryPool: string[], index: number) {
-  const normalized = normalizeCountryAlias(rawCountry);
-  const direct = countryPool.find((country) => country.toLowerCase() === normalized.toLowerCase());
-  if (direct) {
-    return direct;
+function resolveAiQueryCountry(
+  rawCountry: string,
+  queryText: string,
+  countryPool: string[],
+  index: number
+): { country: string | null; reason: string } {
+  const normalizedRaw = normalizeCountryAlias(rawCountry);
+  const direct = countryPool.find((country) => marketMatches(country, normalizedRaw));
+  if (direct && isValidSearchCountry(rawCountry)) {
+    return { country: direct, reason: "direct" };
   }
 
-  return countryPool[index % countryPool.length] ?? countryPool[0] ?? "UAE";
+  const combinedText = `${rawCountry} ${queryText}`;
+  const mentionedKnown = findMentionedKnownMarkets(combinedText);
+  const mentionedOffTarget = mentionedKnown.filter((market) => !countryPool.some((country) => marketMatches(country, market)));
+  const mentioned = findMentionedMarkets(combinedText, countryPool);
+  if (mentionedOffTarget.length && !mentioned.length) {
+    return { country: null, reason: `off_target_market:${mentionedOffTarget.slice(0, 3).join(",")}` };
+  }
+
+  if (mentioned.length === 1) {
+    return { country: mentioned[0]!, reason: "extracted_from_query" };
+  }
+
+  const fallback = countryPool[index % countryPool.length] ?? countryPool[0] ?? null;
+  return fallback
+    ? { country: fallback, reason: "round_robin_target_market" }
+    : { country: null, reason: "no_target_market_available" };
 }
 
 function normalizeCountryAlias(value: string) {
@@ -2025,26 +2120,56 @@ function normalizeCountryAlias(value: string) {
     om: "Oman",
     us: "United States",
     usa: "United States",
-    uk: "United Kingdom"
+    uk: "United Kingdom",
+    ca: "Canada",
+    canada: "Canada",
+    au: "Australia",
+    australia: "Australia",
+    "加拿大": "Canada",
+    "澳大利亚": "Australia",
+    "澳洲": "Australia"
   };
 
   return aliases[normalized] ?? value.trim();
 }
 
-function normalizeAiQueryText(query: string, country: string, keywordGroups: KeywordGroups) {
+function normalizeAiQueryText(
+  query: string,
+  country: string,
+  keywordGroups: KeywordGroups,
+  targetMarkets: string[]
+): { query: string; reason: string } {
   const cleaned = query
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
     .replace(/\s+/g, " ")
     .trim();
   if (!cleaned) {
-    return "";
+    return { query: "", reason: "empty_query" };
   }
 
-  const withCountry = queryMentionsCountry(cleaned, country) ? cleaned : `${cleaned} "${country}"`;
-  return appendSafeNegativeTerms(withCountry, keywordGroups.excludeTerms)
-    .slice(0, 480)
-    .replace(/\s+$/, "");
+  let sanitized = removeQuotedMarketPhrases(cleaned, targetMarkets);
+  const conflicts = findMentionedKnownMarkets(sanitized).filter((market) => !marketMatches(country, market));
+  if (conflicts.length) {
+    sanitized = removeConflictingMarketMentions(sanitized, country, conflicts);
+  }
+
+  const siteConflict = siteCountryConflict(sanitized, country);
+  if (siteConflict) {
+    sanitized = sanitized.replace(/\bsite:[^\s)]+/gi, "").replace(/\s+/g, " ").trim();
+  }
+
+  sanitized = reduceQueryComplexity(sanitized);
+  const withCountry = queryMentionsCountry(sanitized, country) ? sanitized : `${sanitized} ${country}`;
+  const withNegatives = appendSafeNegativeTerms(withCountry, keywordGroups.excludeTerms);
+  const compacted = reduceQueryComplexity(withNegatives).replace(/\s+$/, "");
+
+  const remainingConflicts = findMentionedKnownMarkets(compacted).filter((market) => !marketMatches(country, market));
+  if (remainingConflicts.length) {
+    return { query: "", reason: `market_conflict:${remainingConflicts.slice(0, 3).join(",")}` };
+  }
+
+  return { query: compacted, reason: "ok" };
 }
 
 function queryMentionsCountry(query: string, country: string) {
@@ -2052,10 +2177,165 @@ function queryMentionsCountry(query: string, country: string) {
   return lower.includes(country.toLowerCase()) || lower.includes(normalizeCountryAlias(country).toLowerCase());
 }
 
+function isValidSearchCountry(value: string) {
+  const normalized = normalizeCountryAlias(value);
+  return Boolean(resolveCountry(normalized)) || ["UAE", "Dubai", "Abu Dhabi"].some((market) => marketMatches(market, normalized));
+}
+
+function marketMatches(left: string, right: string) {
+  const leftAlias = normalizeCountryAlias(left);
+  const rightAlias = normalizeCountryAlias(right);
+  const leftCountry = resolveCountry(leftAlias);
+  const rightCountry = resolveCountry(rightAlias);
+  if (leftCountry && rightCountry) {
+    return leftCountry.code === rightCountry.code;
+  }
+
+  return leftAlias.toLowerCase() === rightAlias.toLowerCase();
+}
+
+function findMentionedMarkets(text: string, marketPool: string[]) {
+  return marketPool.filter((market) => queryMentionsMarket(text, market));
+}
+
+function findMentionedKnownMarkets(text: string) {
+  return knownQueryMarkets.filter((market) => queryMentionsMarket(text, market));
+}
+
+function queryMentionsMarket(text: string, market: string) {
+  const normalized = normalizeCountryAlias(market);
+  const aliases = queryMarketAliases(normalized);
+  return aliases.some((alias) => new RegExp(`(^|[^a-z0-9])${quoteRegExp(alias)}([^a-z0-9]|$)`, "i").test(text));
+}
+
+function queryMarketAliases(market: string) {
+  const aliases = new Set<string>([market, normalizeCountryAlias(market)]);
+  const resolved = resolveCountry(market);
+  if (resolved) {
+    aliases.add(resolved.name);
+    aliases.add(resolved.code);
+  }
+  const lower = market.toLowerCase();
+  if (lower === "uae" || lower === "united arab emirates") {
+    aliases.add("UAE");
+    aliases.add("United Arab Emirates");
+    aliases.add("Dubai");
+    aliases.add("Abu Dhabi");
+  }
+  if (lower === "saudi arabia") {
+    aliases.add("Saudi Arabia");
+    aliases.add("Saudi");
+    aliases.add("Riyadh");
+    aliases.add("Jeddah");
+  }
+  return [...aliases].filter((alias) => alias.length >= 2);
+}
+
+function removeQuotedMarketPhrases(query: string, targetMarkets: string[]) {
+  return query
+    .replace(/"([^"]{20,})"/g, (match, phrase: string) => {
+      const phraseLower = phrase.toLowerCase();
+      const mentionsMarket = Boolean(
+        findMentionedKnownMarkets(phrase).length || targetMarkets.some((market) => queryMentionsMarket(phrase, market))
+      );
+      const looksLikeSegment =
+        mentionsMarket &&
+        /\b(telecom|equipment|distributor|supplier|stockist|maintenance|operator|network|tower|ftth|isp|buyer|company)\b/i.test(
+          phraseLower
+        );
+      return looksLikeSegment ? "" : match;
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function removeConflictingMarketMentions(query: string, country: string, conflicts: string[]) {
+  let output = query;
+  for (const conflict of conflicts) {
+    for (const alias of queryMarketAliases(conflict)) {
+      if (marketMatches(country, alias)) {
+        continue;
+      }
+      output = output.replace(new RegExp(`"[^"]*${quoteRegExp(alias)}[^"]*"`, "gi"), " ");
+      output = output.replace(new RegExp(`(^|[^a-z0-9])${quoteRegExp(alias)}([^a-z0-9]|$)`, "gi"), " ");
+    }
+  }
+  return output.replace(/\s+/g, " ").trim();
+}
+
+function siteCountryConflict(query: string, country: string) {
+  const siteMatches = query.match(/\bsite:([^\s)]+)/gi) ?? [];
+  const expectedSite = marketToSite(country).toLowerCase();
+  if (!siteMatches.length || expectedSite === ".com") {
+    return false;
+  }
+
+  return siteMatches.some((match) => {
+    const site = match.replace(/^site:/i, "").toLowerCase();
+    return site.startsWith(".") && site !== expectedSite;
+  });
+}
+
+function reduceQueryComplexity(query: string) {
+  let output = query.replace(/\s+/g, " ").trim();
+  output = keepFirstOrGroup(output);
+  output = limitNegativeTerms(output, 3);
+  while (output.length > 160) {
+    const shortened = output
+      .replace(/\s+\([^()]*\bOR\b[^()]*\)/i, "")
+      .replace(/\s+-[^\s]+(?=(?:\s+-[^\s]+)*$)/, "")
+      .trim();
+    if (!shortened || shortened === output) {
+      break;
+    }
+    output = shortened;
+  }
+
+  return output.length > 180 ? output.slice(0, 180).replace(/\s+\S*$/, "").trim() : output;
+}
+
+function keepFirstOrGroup(query: string) {
+  let seenOrGroup = false;
+  return query
+    .replace(/\(([^()]*\bOR\b[^()]*)\)/gi, (match, group: string) => {
+      if (seenOrGroup) {
+        return "";
+      }
+      seenOrGroup = true;
+      const terms = group
+        .split(/\s+OR\s+/i)
+        .map((term) => term.trim())
+        .filter(Boolean)
+        .slice(0, 3);
+      return terms.length > 1 ? `(${terms.join(" OR ")})` : terms[0] ?? "";
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function limitNegativeTerms(query: string, maxTerms: number) {
+  const tokens = query.split(/\s+/);
+  const output: string[] = [];
+  const seen = new Set<string>();
+  let negatives = 0;
+  for (const token of tokens) {
+    if (token.startsWith("-")) {
+      const key = token.toLowerCase().replace(/^-+/, "").replace(/^"|"$/g, "");
+      if (seen.has(key) || negatives >= maxTerms) {
+        continue;
+      }
+      seen.add(key);
+      negatives += 1;
+    }
+    output.push(token);
+  }
+  return output.join(" ").replace(/\s+/g, " ").trim();
+}
+
 function appendSafeNegativeTerms(query: string, excludeTerms: string[]) {
-  const safeTerms = ["job", "jobs", "career", "careers", "hiring", "salary", "training", "course", "wikipedia"];
+  const safeTerms = ["jobs", "careers", "news", "wikipedia"];
   const configuredSafeTerms = excludeTerms.filter((term) => safeTerms.includes(term.toLowerCase()));
-  const terms = uniqueStrings([...safeTerms.slice(0, 5), ...configuredSafeTerms]).slice(0, 8);
+  const terms = uniqueStrings([...safeTerms.slice(0, 3), ...configuredSafeTerms]).slice(0, 3);
   const missingTerms = terms
     .filter((term) => !new RegExp(`-${quoteRegExp(term)}\\b`, "i").test(query))
     .map((term) => `-${term}`);
@@ -2069,8 +2349,10 @@ function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, coun
   const hasProduct = keywordGroups.productTerms.some((term) => lower.includes(term.toLowerCase()));
   const hasCustomer = keywordGroups.customerIntentTerms.some((term) => lower.includes(term.toLowerCase()));
   const hasScenario = keywordGroups.scenarioTerms.some((term) => lower.includes(term.toLowerCase()));
+  const hasBuyerRole = hasCustomer || hasScenario || queryBuyerRoleTerms.some((term) => lower.includes(term));
+  const hasSellerOnlyTrap = querySellerOnlyTerms.some((term) => lower.includes(term)) && !hasBuyerRole;
 
-  return hasCountry && (hasProduct || hasCustomer || hasScenario);
+  return hasCountry && hasBuyerRole && !hasSellerOnlyTrap && (hasProduct || hasCustomer || hasScenario || hasTelecomQueryContext(lower));
 }
 
 function extractKnownBrandTerms(values: string[]) {
@@ -2082,6 +2364,48 @@ function extractKnownBrandTerms(values: string[]) {
 function quoteRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+function hasTelecomQueryContext(query: string) {
+  return /\b(telecom|5g|4g|ran|rru|bbu|aau|olt|sfp|cell site|base station|fiber|ftth)\b/i.test(query);
+}
+
+const queryBuyerRoleTerms = [
+  "maintenance",
+  "network operations",
+  "operator",
+  "tower",
+  "towerco",
+  "isp",
+  "wisp",
+  "ftth",
+  "contractor",
+  "integrator",
+  "field services",
+  "repair service",
+  "procurement",
+  "purchasing",
+  "distributor",
+  "stockist",
+  "reseller",
+  "importer",
+  "deployment",
+  "rollout"
+];
+
+const querySellerOnlyTerms = [
+  "supplier",
+  "manufacturer",
+  "wholesale",
+  "price",
+  "datasheet",
+  "buy now",
+  "for sale",
+  "showroom",
+  "ebay",
+  "alibaba",
+  "pdfcoffee",
+  "router-switch"
+];
 
 function buildExecutionPlan(hasProductProfile: boolean, hasCustomerProfile: boolean) {
   return [
@@ -2147,9 +2471,45 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-function resolveTargetMarkets(taskText: string, profileRegions: string[] | undefined): string[] | undefined {
-  const taskMarkets = detectTaskMarkets(taskText);
-  return normalizeTargetMarkets(taskMarkets.length ? taskMarkets : profileRegions);
+function resolveTargetMarketSelection(taskText: string, profileRegions: string[] | undefined) {
+  const promptMarkets = normalizeTargetMarkets(detectTaskMarkets(taskText)) ?? [];
+  const profileMarkets = normalizeTargetMarkets(profileRegions) ?? [];
+  const promptHasGlobal = promptMarkets.some((market) => market.toLowerCase() === "global");
+  const promptSpecificMarkets = promptMarkets.filter((market) => market.toLowerCase() !== "global");
+
+  if (promptSpecificMarkets.length) {
+    return {
+      targetMarkets: promptSpecificMarkets,
+      promptMarkets,
+      profileMarkets,
+      marketSource: "prompt" as const
+    };
+  }
+
+  if (promptHasGlobal && profileMarkets.length) {
+    return {
+      targetMarkets: profileMarkets,
+      promptMarkets,
+      profileMarkets,
+      marketSource: "profile" as const
+    };
+  }
+
+  if (profileMarkets.length) {
+    return {
+      targetMarkets: profileMarkets,
+      promptMarkets,
+      profileMarkets,
+      marketSource: "profile" as const
+    };
+  }
+
+  return {
+    targetMarkets: promptMarkets.length ? promptMarkets : undefined,
+    promptMarkets,
+    profileMarkets,
+    marketSource: promptMarkets.length ? ("prompt" as const) : ("none" as const)
+  };
 }
 
 function normalizeTargetMarkets(markets: string[] | undefined) {
@@ -2167,6 +2527,8 @@ function detectTaskMarkets(text: string): string[] {
     [/\biran\b|\u4f0a\u6717/i, ["Iran"]],
     [/\bisrael\b|\u4ee5\u8272\u5217/i, ["Israel"]],
     [/\bunited states\b|\busa\b|\bus\b|\u7f8e\u56fd/i, ["United States"]],
+    [/\bcanada\b|\u52a0\u62ff\u5927/i, ["Canada"]],
+    [/\baustralia\b|\u6fb3\u5927\u5229\u4e9a|\u6fb3\u6d32/i, ["Australia"]],
     [/\u6c99\u7279|\u963f\u62c9\u4f2f/i, ["Saudi Arabia", "Riyadh", "Jeddah"]],
     [/\bgermany\b|\u5fb7\u56fd/i, ["Germany"]],
     [/\bpoland\b|\u6ce2\u5170/i, ["Poland"]],
@@ -2360,7 +2722,7 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
   const keywordGroups = payload.keywordGroups ?? {};
   const marketTerms = asStringArray(keywordGroups.marketTerms).slice(0, 40);
   const profileRegions = asStringArray(payload.customerProfile?.targetRegions).slice(0, 40);
-  const targetRegions = Array.from(new Set([...profileRegions, ...marketTerms]));
+  const targetRegions = marketTerms.length ? marketTerms : profileRegions;
 
   return {
     targetRegions: targetRegions.length ? targetRegions : profileRegions,
@@ -2398,8 +2760,12 @@ function resolveSearchBatchLimit(limit: number | undefined) {
 }
 
 function countryToBraveCode(country: string | null) {
+  if (!country) {
+    return "US";
+  }
+
   const genericCode = countryToSearchApiCode(country);
-  if (genericCode !== "ALL" || !country) {
+  if (genericCode !== "ALL" && (resolveCountry(country) || genericCode !== "US")) {
     return genericCode;
   }
 

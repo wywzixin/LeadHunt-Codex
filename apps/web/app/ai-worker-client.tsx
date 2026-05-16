@@ -136,6 +136,16 @@ type ProfileSignals = {
   referenceCustomerUrlsRead?: string[];
   failedUrlCount?: number;
   crmSampleCount?: number;
+  marketSelection?: {
+    targetMarkets?: string[];
+    promptMarkets?: string[];
+    profileMarkets?: string[];
+    marketSource?: "prompt" | "profile" | "merged" | "none" | string;
+  };
+  aiPlanning?: {
+    rejectedQueryCount?: number;
+    rejectedQueries?: Array<{ query?: string; country?: string; reason?: string }>;
+  };
 };
 
 type SiteEvidenceRow = {
@@ -394,7 +404,7 @@ export function AiWorkerClient() {
     () => displayLeads.reduce((total, lead) => total + pendingFollowups(lead.raw).length, 0),
     [displayLeads]
   );
-  const keywordRows = useMemo(() => buildKeywordRows(currentTask), [currentTask]);
+  const keywordRows = useMemo(() => buildKeywordRows(currentTask, view !== "landing"), [currentTask, view]);
   const profileSourceRows = useMemo(() => buildProfileSourceRows(currentTask), [currentTask]);
   const flowRows = useMemo(
     () =>
@@ -1959,15 +1969,16 @@ function normalizeCreatedTask(payload: CreateLeadTaskResponse): LeadTask {
   };
 }
 
-function buildKeywordRows(task: LeadTask | null): KeywordRow[] {
+function buildKeywordRows(task: LeadTask | null, taskSurfaceActive = false): KeywordRow[] {
+  const pendingRows = fallbackKeywordRows.map((row) => keywordRow(row.label, [], ["正在生成"]));
   const searchInstructionRow = keywordRow(
     "搜索指令",
     unique(collectSearchQueries(task).map((query) => query.query)),
-    fallbackSearchQueries
+    task || taskSurfaceActive ? ["正在生成"] : fallbackSearchQueries
   );
 
   if (!task) {
-    return [...fallbackKeywordRows, searchInstructionRow];
+    return taskSurfaceActive ? [...pendingRows, searchInstructionRow] : [...fallbackKeywordRows, searchInstructionRow];
   }
 
   const groups = task.inputPayload?.keywordGroups ?? firstKeywordGroups(task.searchQueries) ?? {};
@@ -1976,16 +1987,16 @@ function buildKeywordRows(task: LeadTask | null): KeywordRow[] {
     keywordRow(
       "产品扩展词",
       [...(groups.productTerms ?? []), ...(groups.longTailProductTerms ?? [])],
-      fallbackKeywordRows[0]?.values
+      ["正在生成"]
     ),
-    keywordRow("客户类型词", groups.customerIntentTerms, fallbackKeywordRows[1]?.values),
-    keywordRow("品牌/型号词", groups.brandTerms, fallbackKeywordRows[2]?.values),
+    keywordRow("客户类型词", groups.customerIntentTerms, ["正在生成"]),
+    keywordRow("品牌/型号词", groups.brandTerms, ["正在生成"]),
     keywordRow(
       "场景/市场词",
       [...(groups.scenarioTerms ?? []), ...(groups.marketTerms ?? [])],
-      fallbackKeywordRows[3]?.values
+      ["正在生成"]
     ),
-    keywordRow("ICP 风险词", groups.excludeTerms, fallbackKeywordRows[4]?.values),
+    keywordRow("ICP 风险词", groups.excludeTerms, ["正在生成"]),
     searchInstructionRow
   ];
 }
@@ -2020,11 +2031,41 @@ function buildProfileSourceRows(task: LeadTask | null): ProfileSourceRow[] {
       ]
     });
   }
+  if (signals?.marketSelection) {
+    const selectedMarkets = signals.marketSelection.targetMarkets ?? [];
+    const promptMarkets = signals.marketSelection.promptMarkets ?? [];
+    const profileMarkets = signals.marketSelection.profileMarkets ?? [];
+    rows.push({
+      label: "目标市场来源",
+      values: [
+        `本轮采用：${selectedMarkets.length ? selectedMarkets.join(", ") : "-"}`,
+        `用户输入：${promptMarkets.length ? promptMarkets.join(", ") : "-"}`,
+        `画像保存：${profileMarkets.length ? profileMarkets.join(", ") : "-"}`,
+        `来源：${formatMarketSource(signals.marketSelection.marketSource)}`
+      ]
+    });
+  }
+  if (signals?.aiPlanning?.rejectedQueryCount) {
+    rows.push({
+      label: "Query 守门",
+      values: [`已拦截 ${signals.aiPlanning.rejectedQueryCount} 条异常 GPT query`]
+    });
+  }
   if (signals?.crmSampleCount) {
     rows.push({ label: "CRM 样本", values: [`${signals.crmSampleCount} 个已选客户`] });
   }
 
   return rows;
+}
+
+function formatMarketSource(source: string | undefined) {
+  const labels: Record<string, string> = {
+    prompt: "用户输入优先",
+    profile: "客户画像默认",
+    merged: "合并",
+    none: "未识别"
+  };
+  return source ? labels[source] ?? source : "-";
 }
 
 function keywordRow(label: string, values: string[] | undefined, fallback: string[] = []): KeywordRow {

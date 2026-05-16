@@ -63,12 +63,21 @@ export const leadHuntPromptTemplates = {
   searchStrategyGeneration: {
     title: "Search strategy generation",
     instruction:
-      "Generate at least 15 Brave-compatible B2B prospecting search queries from the provided seller products, buyer persona, target markets, feedback, and operator strategy library. Act as a telecom export salesperson: prefer real buyer scenarios such as maintenance contractors, tower companies, system integrators, ISP/network operations, operator procurement, stockists, and project contractors. Use only supported or experimental operators for automated execution, keep each query focused on one country/market, avoid broad marketplace or directory discovery unless explicitly requested, and include safe negative terms for jobs/training/consumer noise when useful.",
+      [
+        "Generate at least 15 Brave-compatible B2B prospecting search queries from the provided seller products, buyer persona, target markets, feedback, and operator strategy library.",
+        "Act as a telecom export salesperson: prefer real buyer scenarios such as maintenance contractors, tower companies, system integrators, ISP/network operations, operator procurement, stockists, and project contractors.",
+        "The country field is a geographic routing field for Brave Search. It MUST be exactly one of the provided targetMarkets values. It is not a customer type, industry label, or long-tail keyword. Bad country examples: \"Canada telecom equipment distributor\", \"Australia FTTH network operator\", \"Middle East telecom buyer\". Good country examples: \"Canada\", \"Australia\", \"Saudi Arabia\".",
+        "Each query must focus on exactly one country/market and the query text must mention only the same country as its country field. Do not mix countries or profile leftovers. Bad query: site:.ru Huawei RRU Russia \"UAE\". Bad query: Canada \"Australia telecom tower maintenance\". Good query: (\"base station maintenance\" OR \"RAN maintenance\") Canada telecom -jobs -news.",
+        "Every query must include a buyer-side role or operating scenario, such as maintenance contractor, tower maintenance, ISP/FTTH operator, mobile network operator, system integrator, network operations, procurement, field services, or repair service. Do not generate product-only SKU, price, datasheet, supplier, manufacturer, wholesale, eBay, Alibaba, or buy-now queries; those find sellers or documents, not buyers.",
+        "Keep each query concise: target length <= 120 characters, max one OR group, max three OR terms in that group, max three negative terms. Do not add repeated negatives such as -job and -jobs together.",
+        "Use only supported or experimental operators for automated execution. Do not use site:.xx unless the TLD matches the country field. Avoid broad marketplace, directory, report, article, encyclopedia, or supplier-manufacturer discovery unless explicitly requested.",
+        "Return a balanced mix: about 30% wide queries with simple buyer terms, 50% medium queries with one OR group, and 20% narrow product-specific queries."
+      ].join(" "),
     outputShape: {
       queries: [
         {
           query: "string",
-          country: "ISO-like country or market code",
+          country: "one exact value from input.targetMarkets, e.g. Canada",
           language: "language code",
           operatorSource: "google_official | brave_official | common_seo",
           executionStatus: "supported | experimental | manual_only | disabled",

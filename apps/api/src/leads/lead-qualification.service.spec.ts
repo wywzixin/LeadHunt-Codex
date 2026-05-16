@@ -219,7 +219,7 @@ describe("LeadQualificationService", () => {
     expect(JSON.stringify(reasons)).not.toContain("\u0000");
   });
 
-  it("keeps noisy article and social results in the candidate pool with ICP risk scoring", async () => {
+  it("skips obvious report/list pages while keeping direct company and social evidence", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -249,9 +249,9 @@ describe("LeadQualificationService", () => {
       "UAE"
     );
 
-    expect(result.createdCount).toBe(3);
-    expect(result.skippedCount).toBe(0);
-    expect(prisma.leadCandidate.create).toHaveBeenCalledTimes(3);
+    expect(result.createdCount).toBe(2);
+    expect(result.skippedCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledTimes(2);
     expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -300,7 +300,7 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("saves marketplace and non-ICP results but lets ICP mark weak fits", async () => {
+  it("skips marketplace results but still lets weak non-marketplace fits reach ICP scoring", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -333,8 +333,8 @@ describe("LeadQualificationService", () => {
       "Saudi Arabia"
     );
 
-    expect(result.createdCount).toBe(3);
-    expect(result.skippedCount).toBe(0);
+    expect(result.createdCount).toBe(2);
+    expect(result.skippedCount).toBe(1);
     expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -344,7 +344,7 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps B2B marketplace platforms without inheriting the query country blindly", async () => {
+  it("skips B2B marketplace platforms without inheriting the query country blindly", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -382,9 +382,9 @@ describe("LeadQualificationService", () => {
       "UAE"
     );
 
-    expect(result.createdCount).toBe(2);
-    expect(result.skippedCount).toBe(0);
-    expect(prisma.leadCandidate.create).toHaveBeenCalledTimes(2);
+    expect(result.createdCount).toBe(0);
+    expect(result.skippedCount).toBe(2);
+    expect(prisma.leadCandidate.create).not.toHaveBeenCalled();
   });
 
   it("uses a specific query country for real company pages without forcing marketplace results through", async () => {
@@ -473,7 +473,7 @@ describe("LeadQualificationService", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           companyName: "Poznan Radio Systems",
-          country: null
+          country: "POLAND"
         })
       })
     );
@@ -488,7 +488,7 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps tender portals as discovery evidence with lower ICP confidence", async () => {
+  it("skips tender portals while keeping direct company evidence", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -513,8 +513,8 @@ describe("LeadQualificationService", () => {
       "UAE"
     );
 
-    expect(result.createdCount).toBe(2);
-    expect(result.skippedCount).toBe(0);
+    expect(result.createdCount).toBe(1);
+    expect(result.skippedCount).toBe(1);
     expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -524,7 +524,7 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps market reports when they expose contact evidence but scores them lower", async () => {
+  it("skips market reports even when they expose contact evidence", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -549,8 +549,8 @@ describe("LeadQualificationService", () => {
       "UAE"
     );
 
-    expect(result.createdCount).toBe(2);
-    expect(result.skippedCount).toBe(0);
+    expect(result.createdCount).toBe(1);
+    expect(result.skippedCount).toBe(1);
     expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -560,7 +560,7 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps index and indicator pages as low-confidence candidates", async () => {
+  it("skips index and indicator pages as discovery noise", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -588,8 +588,8 @@ describe("LeadQualificationService", () => {
       "Saudi Arabia"
     );
 
-    expect(result.createdCount).toBe(2);
-    expect(result.skippedCount).toBe(0);
+    expect(result.createdCount).toBe(1);
+    expect(result.skippedCount).toBe(1);
     expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -599,7 +599,7 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps list pages when they expose company contact details", async () => {
+  it("skips top-list pages even when they expose contact details", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -627,8 +627,8 @@ describe("LeadQualificationService", () => {
       "UAE"
     );
 
-    expect(result.createdCount).toBe(2);
-    expect(result.skippedCount).toBe(0);
+    expect(result.createdCount).toBe(1);
+    expect(result.skippedCount).toBe(1);
     expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({

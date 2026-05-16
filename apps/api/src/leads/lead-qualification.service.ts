@@ -243,6 +243,11 @@ export class LeadQualificationService {
     let aiEvaluationsUsed = 0;
 
     for (const candidate of normalized) {
+      if (shouldHardRejectCandidate(candidate)) {
+        skipped += 1;
+        continue;
+      }
+
       const key = candidateKey(candidate);
       const emailKeys = candidate.contacts
         .filter((contact) => contact.type === "email")
@@ -464,7 +469,7 @@ function normalizeResult(
     taskId: options.taskId,
     companyName: extractCompanyName(result.title, result.url),
     website,
-    country: inferCountry(fullText) ?? defaultCountryForCandidate(options.defaultCountry, sourceUrl, fullText),
+    country: defaultCountryForCandidate(options.defaultCountry, sourceUrl, fullText) ?? inferCountry(fullText),
     sourceUrl,
     summary: result.snippet || null,
     contacts: extractContacts(fullText, sourceUrl)
@@ -648,12 +653,17 @@ function defaultCountryForCandidate(country: string | undefined, sourceUrl: stri
     return null;
   }
 
+  const domainCountry = inferCountryFromText(sourceUrl);
+  if (domainCountry && !matchesTargetRegion(domainCountry, [country])) {
+    return null;
+  }
+
   const targetSite = countryToSite(country).toLowerCase();
   if (domain && targetSite !== ".com" && (domain === targetSite.slice(1) || domain.endsWith(targetSite))) {
     return normalizeCountry(country);
   }
 
-  return null;
+  return normalizeCountry(country);
 }
 
 function extractContacts(text: string, sourceUrl: string): NormalizedLeadCandidate["contacts"] {
@@ -763,6 +773,28 @@ function shouldProbeContactPages(candidate: NormalizedLeadCandidate) {
   }
 
   return !looksLikeArticlePath(path) || hasAny(text, buyerRoleTerms);
+}
+
+function shouldHardRejectCandidate(candidate: NormalizedLeadCandidate) {
+  const domain = candidate.website ? domainFromUrl(candidate.website) : domainFromUrl(candidate.sourceUrl);
+  const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (domain && isHardRejectedDiscoveryDomain(domain)) {
+    return true;
+  }
+
+  if (domain && isBlockedMarketplaceDomain(domain)) {
+    return true;
+  }
+
+  if ((looksLikeContentTitle(candidate.companyName) || hasAny(text, hardRejectContentTerms)) && !looksLikeDirectCompanyEvidence(candidate)) {
+    return true;
+  }
+
+  return false;
 }
 
 function isRiskyDiscoveryPage(candidate: NormalizedLeadCandidate) {
@@ -1124,6 +1156,14 @@ function isBlockedMarketplaceDomain(domain: string) {
   );
 }
 
+function isHardRejectedDiscoveryDomain(domain: string) {
+  if (domain.endsWith(".edu") || domain.endsWith(".gov")) {
+    return true;
+  }
+
+  return hardRejectedDiscoveryDomains.some((blockedDomain) => domain === blockedDomain || domain.endsWith(`.${blockedDomain}`));
+}
+
 function looksLikeCompanyOrDirectoryPath(path: string) {
   if (!path || path === "/" || path.split("/").filter(Boolean).length <= 1) {
     return true;
@@ -1182,7 +1222,7 @@ function toJsonInput(value: unknown): Prisma.InputJsonValue {
       }
 
       if (typeof item === "string") {
-        return item.replace(/\u0000/g, "");
+        return item.split(String.fromCharCode(0)).join("");
       }
 
       return item;
@@ -1420,6 +1460,10 @@ const blockedContentDomains = [
   "rantcell.com",
   "penguindata.com",
   "eximpedia.app",
+  "pdfcoffee.com",
+  "ebay.com",
+  "ebay.ca",
+  "ebay.com.au",
   "alibaba.com",
   "amazon.com",
   "aliexpress.com",
@@ -1438,6 +1482,9 @@ const blockedMarketplaceDomains = [
   "tradewheel.com",
   "alibaba.com",
   "1688.com",
+  "ebay.com",
+  "ebay.ca",
+  "ebay.com.au",
   "made-in-china.com",
   "globalsources.com",
   "indiamart.com",
@@ -1462,6 +1509,29 @@ const blockedMarketplaceDomains = [
   "yello.ae",
   "yellosa.co.za",
   "uaeplusplus.com"
+];
+
+const hardRejectedDiscoveryDomains = [
+  "wikipedia.org",
+  "wikidata.org",
+  "mobilityforesights.com",
+  "mordorintelligence.com",
+  "analysysmason.com",
+  "grantthornton.com",
+  "grantthornton.global",
+  "datacenterdynamics.com",
+  "towerxchange.com",
+  "dgtlinfra.com",
+  "inven.ai",
+  "xytower.com",
+  "xhtower.com",
+  "grokipedia.com",
+  "baike.baidu.com",
+  "gartner.com",
+  "mckinsey.com",
+  "statista.com",
+  "pdfcoffee.com",
+  "wordpress.com"
 ];
 
 const companyPagePathTerms = [
@@ -1622,6 +1692,36 @@ const contentTitleTerms = [
   "types, challenges",
   "companies in the world",
   "companies worldwide"
+];
+
+const hardRejectContentTerms = [
+  "market report",
+  "market research",
+  "market size",
+  "market share",
+  "market forecast",
+  "industry report",
+  "research report",
+  "top 10",
+  "top companies",
+  "best companies",
+  "company database",
+  "startup database",
+  "wikipedia",
+  "grokipedia",
+  "what is",
+  "glossary",
+  "dictionary",
+  "datasheet",
+  "price and datasheet",
+  "buy now",
+  "add to cart",
+  "for sale",
+  "showroom",
+  "wholesale suppliers",
+  "manufacturers and suppliers",
+  "supplier directory",
+  "product details"
 ];
 
 const genericDiscoveryTitlePatterns = [

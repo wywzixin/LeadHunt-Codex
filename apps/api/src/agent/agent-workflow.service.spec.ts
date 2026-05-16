@@ -202,6 +202,80 @@ function createWebsiteContentMock() {
   };
 }
 
+function createLeadHuntAiMock(
+  generateSearchStrategy: (input: {
+    targetMarkets: string[];
+  }) => Promise<{
+    queries: Array<{
+      query: string;
+      country: string;
+      language: string;
+      operatorSource: string;
+      executionStatus: string;
+      rationale: string;
+      priority: number;
+    }>;
+  }>
+) {
+  return {
+    analyzeProductProfile: vi.fn().mockResolvedValue({
+      brandName: "TeleCoreNet",
+      websiteUrl: "https://telecorenet.com/",
+      productCategories: ["Telecom equipment"],
+      keyProducts: ["RRU", "BBU", "telecom power"],
+      targetUseCases: ["5G network maintenance"],
+      buyerPainPoints: ["Maintenance teams need spare parts"],
+      supplyCapabilities: ["Telecom spare parts"],
+      searchKeywords: ["RRU spare parts", "telecom power modules"],
+      negativeKeywords: ["jobs", "training"],
+      confidence: 0.82,
+      evidence: ["Mock product evidence"]
+    }),
+    analyzeCustomerProfile: vi.fn().mockResolvedValue({
+      targetRegions: ["UAE", "Saudi Arabia"],
+      idealCustomerTypes: ["telecom maintenance contractor", "ISP operations"],
+      buyingSignals: ["base station maintenance", "FTTH operations"],
+      referenceCompanies: ["Spectrum MEA"],
+      industries: ["telecommunications"],
+      searchKeywords: ["telecom maintenance contractor"],
+      disqualifiers: ["training center"],
+      confidence: 0.8,
+      evidence: ["Mock customer evidence"]
+    }),
+    expandKeywords: vi.fn().mockResolvedValue({
+      primaryProducts: ["telecom equipment"],
+      relatedProducts: ["RRU", "BBU", "rectifier module"],
+      longTailProducts: ["Huawei RRU spare parts", "Eltek rectifier module"],
+      upstreamDownstreamTerms: ["base station maintenance", "tower maintenance", "FTTH operations"],
+      purchaseIntentTerms: ["telecom maintenance contractor", "ISP network operations", "tower maintenance company"],
+      targetMarketTerms: ["UAE", "Saudi Arabia"],
+      industryScenarioTerms: ["5G network maintenance", "cell site power maintenance"],
+      exclusionTerms: ["jobs", "careers", "news"]
+    }),
+    generateSearchStrategy: vi.fn(generateSearchStrategy)
+  };
+}
+
+function aiSearchQuery(query: string, country: string, priority: number) {
+  return {
+    query,
+    country,
+    language: "en",
+    operatorSource: "brave_official",
+    executionStatus: "supported",
+    rationale: "Targets telecom infrastructure buyers",
+    priority
+  };
+}
+
+function simpleAiQueriesForMarkets(markets: string[]) {
+  return Array.from({ length: 15 }, (_, index) => {
+    const country = markets[index % markets.length] ?? "Canada";
+    const buyerTerm = index % 3 === 0 ? "base station maintenance" : index % 3 === 1 ? "ISP network operations" : "tower maintenance";
+    return aiSearchQuery(`"${buyerTerm}" ${country} telecom -jobs -news`, country, index + 1);
+  });
+}
+
 describe("AgentWorkflowService", () => {
   it("rejects unknown LangGraph checkpoint stores", () => {
     const originalStore = process.env.LANGGRAPH_CHECKPOINT_STORE;
@@ -331,6 +405,115 @@ describe("AgentWorkflowService", () => {
       "Oman"
     ]);
     expect(result.searchQueries.map((query) => query.country)).not.toContain("Global");
+  });
+
+  it("lets explicit prompt markets override saved profile target regions for AI planning", async () => {
+    const prisma = createPrismaMock();
+    prisma.customerProfile.findUnique.mockResolvedValue({
+      targetRegions: ["Middle East", "UAE", "Iran", "Russia", "Saudi Arabia"],
+      referenceCustomerUrls: ["https://spectrummea.com/"],
+      crmSampleIds: [],
+      notes: "Legacy profile regions should not override this task."
+    });
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(prisma as any, undefined, undefined, undefined, ai as any);
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt:
+        "甲方验收测试:帮我找加拿大和澳大利亚的5G通信设备买家客户,优先基站维护、铁塔维护、通信电源维护、运营商和ISP/FTTH网络运维客户。",
+      targetCount: 20
+    });
+
+    const queryCountries = result.searchQueries.map((query) => query.country);
+    expect(new Set(queryCountries)).toEqual(new Set(["Canada", "Australia"]));
+    expect(queryCountries).not.toContain("UAE");
+    expect(queryCountries).not.toContain("Saudi Arabia");
+    expect(queryCountries).not.toContain("Iran");
+    expect(queryCountries).not.toContain("Russia");
+    expect(ai.generateSearchStrategy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetMarkets: ["Canada", "Australia"]
+      })
+    );
+    expect(prisma.leadTask.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        inputPayload: expect.objectContaining({
+          keywordGroups: expect.objectContaining({
+            marketTerms: ["Canada", "Australia"]
+          }),
+          profileSignals: expect.objectContaining({
+            marketSelection: expect.objectContaining({
+              targetMarkets: ["Canada", "Australia"],
+              promptMarkets: ["Canada", "Australia"],
+              profileMarkets: expect.arrayContaining(["UAE", "Iran", "Russia", "Saudi Arabia"]),
+              marketSource: "prompt"
+            })
+          })
+        })
+      })
+    });
+  });
+
+  it("sanitizes or rejects mixed-country GPT search queries before persisting them", async () => {
+    const prisma = createPrismaMock();
+    prisma.customerProfile.findUnique.mockResolvedValue({
+      targetRegions: ["UAE", "Iran", "Russia", "Saudi Arabia"],
+      referenceCustomerUrls: [],
+      crmSampleIds: [],
+      notes: "Legacy profile regions should be ignored when prompt names markets."
+    });
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: [
+        aiSearchQuery(
+          'site:.ru (Huawei OR ZTE OR Ericsson OR Nokia) ("RRU" OR "BBU" OR "AAU") Russia "UAE" -jobs -careers',
+          "UAE",
+          1
+        ),
+        aiSearchQuery(
+          '("base station maintenance" OR "RAN maintenance" OR "cell site maintenance") Canada "Australia telecom tower maintenance" -jobs -careers -training -news',
+          "Australia telecom tower maintenance",
+          2
+        ),
+        aiSearchQuery(
+          '("telecom contractor" OR "network maintenance") Ukraine "Iran" -jobs -careers',
+          "Iran",
+          3
+        ),
+        aiSearchQuery('("Huawei MA5800" OR "Huawei MA5608T") Canada OLT supplier price datasheet -jobs -news', "Canada", 4),
+        ...simpleAiQueriesForMarkets(input.targetMarkets).map((query, index) => ({
+          ...query,
+          priority: index + 5
+        }))
+      ]
+    }));
+    const service = new AgentWorkflowService(prisma as any, undefined, undefined, undefined, ai as any);
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt: "Find Canada and Australia 5G telecom maintenance buyers",
+      targetCount: 20
+    });
+    const queryText = result.searchQueries.map((query) => query.query).join("\n");
+    const persistedPayload = prisma.leadTask.create.mock.calls[0]?.[0].data.inputPayload;
+
+    expect(result.searchQueries).toHaveLength(15);
+    expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(new Set(["Canada", "Australia"]));
+    expect(queryText).not.toMatch(/\bRussia\b/i);
+    expect(queryText).not.toMatch(/\bUAE\b/i);
+    expect(queryText).not.toMatch(/\bUkraine\b/i);
+    expect(queryText).not.toMatch(/\bIran\b/i);
+    expect(queryText).not.toContain("site:.ru");
+    expect(queryText).not.toContain('"Australia telecom tower maintenance"');
+    expect(queryText).not.toContain("supplier price datasheet");
+    expect(persistedPayload.profileSignals.aiPlanning.rejectedQueryCount).toBeGreaterThan(0);
+    expect(persistedPayload.profileSignals.aiPlanning.rejectedQueries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: expect.stringMatching(/off_target_market|market_conflict/)
+        })
+      ])
+    );
   });
 
   it("reads profile websites and stores evidence-based analysis in the task payload", async () => {
