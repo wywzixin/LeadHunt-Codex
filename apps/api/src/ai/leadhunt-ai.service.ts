@@ -167,7 +167,7 @@ export class LeadHuntAiService {
       leadHuntPromptTemplates.searchStrategyGeneration,
       input,
       searchStrategyPlanSchema,
-      8192
+      16384
     );
   }
 

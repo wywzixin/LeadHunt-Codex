@@ -72,6 +72,7 @@ type PlannedSearchQuery = {
   executionStatus?: string | null;
   operatorName?: string | null;
   strategyTemplate?: string | null;
+  strategyType?: string | null;
   query: string;
   keywordGroups: KeywordGroups;
   country?: string | null;
@@ -130,6 +131,8 @@ type EmailReviewResume = {
 
 const MAX_SYNC_SEARCH_QUERY_LIMIT = 500;
 const MAX_CANDIDATE_RESULTS_PER_QUERY = 20;
+const DEFAULT_SEARCH_QUERY_COUNT = 30;
+const FIRST_STAGE_SEARCH_QUERY_LIMIT = 15;
 const RUNNING_TASK_RECOVERY_LIMIT = 5;
 const RUNNING_TASK_RECOVERY_WINDOW_HOURS = 24;
 const LANGGRAPH_CHECKPOINT_STORE_VALUES = ["memory", "postgres"] as const;
@@ -139,6 +142,12 @@ const knownQueryMarkets = [
   "UAE",
   "United Arab Emirates",
   "Saudi Arabia",
+  "Qatar",
+  "Oman",
+  "Kuwait",
+  "Bahrain",
+  "Jordan",
+  "Iraq",
   "Iran",
   "Russia",
   "Ukraine",
@@ -146,14 +155,16 @@ const knownQueryMarkets = [
   "Africa",
   "Brazil",
   "Nigeria",
+  "Kenya",
+  "South Africa",
+  "Egypt",
+  "Morocco",
+  "Ghana",
+  "Tanzania",
   "United States",
   "United Kingdom",
   "Germany",
   "Poland",
-  "Oman",
-  "Qatar",
-  "Kenya",
-  "South Africa",
   "India",
   "Indonesia",
   "Philippines",
@@ -166,6 +177,38 @@ const knownQueryMarkets = [
   "Ireland",
   "Bulgaria"
 ];
+
+const searchTargetMarketExpansions: Record<string, string[]> = {
+  "middle east": ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait", "Bahrain", "Jordan", "Iraq", "Iran"],
+  mena: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait", "Bahrain", "Jordan", "Iraq", "Iran", "Egypt", "Morocco"],
+  gcc: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait", "Bahrain"],
+  africa: ["Nigeria", "Kenya", "South Africa", "Egypt", "Morocco", "Ghana", "Tanzania"],
+  "north africa": ["Egypt", "Morocco", "Algeria", "Tunisia"],
+  europe: ["Germany", "United Kingdom", "France", "Italy", "Spain", "Poland", "Netherlands", "Romania", "Ukraine"],
+  "latin america": ["Brazil", "Mexico", "Chile", "Colombia", "Peru", "Argentina", "Ecuador", "Costa Rica"],
+  latam: ["Brazil", "Mexico", "Chile", "Colombia", "Peru", "Argentina", "Ecuador", "Costa Rica"],
+  americas: ["United States", "Canada", "Mexico", "Brazil", "Chile", "Colombia", "Peru", "Argentina"],
+  "north america": ["United States", "Canada", "Mexico"],
+  asia: [
+    "UAE",
+    "Saudi Arabia",
+    "Qatar",
+    "India",
+    "Pakistan",
+    "Bangladesh",
+    "Indonesia",
+    "Vietnam",
+    "Malaysia",
+    "Philippines",
+    "Thailand",
+    "Kazakhstan",
+    "Uzbekistan"
+  ],
+  "southeast asia": ["Indonesia", "Vietnam", "Malaysia", "Philippines", "Thailand", "Singapore", "Cambodia"],
+  "south asia": ["India", "Pakistan", "Bangladesh", "Sri Lanka", "Nepal"],
+  "central asia": ["Kazakhstan", "Uzbekistan", "Kyrgyzstan", "Tajikistan", "Turkmenistan"],
+  oceania: ["Australia", "New Zealand", "Papua New Guinea"]
+};
 
 type LangGraphCheckpointStore = (typeof LANGGRAPH_CHECKPOINT_STORE_VALUES)[number];
 type LangGraphCheckpointer = MemorySaver | PostgresSaver;
@@ -277,7 +320,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         data: {
           userId,
           status: "running",
-          targetCount: input.targetCount ?? 50,
+          targetCount: input.targetCount ?? DEFAULT_SEARCH_QUERY_COUNT,
           inputPayload: toJsonValue({
             ...input,
             ...context
@@ -294,7 +337,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       data: {
         userId,
         status: "running",
-        targetCount: input.targetCount ?? 50,
+        targetCount: input.targetCount ?? DEFAULT_SEARCH_QUERY_COUNT,
         inputPayload: input
       }
     });
@@ -418,13 +461,56 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       }
 
       await this.resetStaleRunningSearchQueries(taskId);
-      const searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, {});
+      let searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, {
+        limit: FIRST_STAGE_SEARCH_QUERY_LIMIT
+      });
+      let qualityGateOutput: Record<string, unknown> | null = null;
       if (!searchResult.ok) {
         await this.prisma.leadTask.update({
           where: { id: taskId },
           data: { status: "failed" }
         });
         return;
+      }
+
+      const qualityGate = await this.evaluateFirstStageSearchQuality(taskId);
+      if (qualityGate.shouldStop) {
+        const qualityFallback = await this.rewritePendingQueriesForQualityGate(taskId, qualityGate);
+        searchResult = {
+          ...searchResult,
+          hasMore: qualityFallback.remainingQueries > 0,
+          remainingQueries: qualityFallback.remainingQueries
+        };
+        qualityGateOutput = {
+          ...qualityGate,
+          action: qualityFallback.rewrittenCount
+            ? "rewrote_pending_queries_with_local_buyer_fallback"
+            : "no_pending_queries_to_rewrite",
+          qualityFallback
+        };
+        await this.markStepCompleted(taskId, "brave_search", {
+          ...searchResult,
+          qualityGate: qualityGateOutput
+        });
+      }
+
+      while (searchResult.hasMore) {
+        searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, {
+          limit: FIRST_STAGE_SEARCH_QUERY_LIMIT
+        });
+        if (!searchResult.ok) {
+          await this.prisma.leadTask.update({
+            where: { id: taskId },
+            data: { status: "failed" }
+          });
+          return;
+        }
+      }
+      if (qualityGateOutput) {
+        await this.markStepCompleted(taskId, "brave_search", {
+          ...searchResult,
+          qualityGate: qualityGateOutput
+        });
       }
 
       await this.pauseAtHumanApproval(taskId, "human_approval");
@@ -489,7 +575,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       load_task: () =>
         this.completeWorkflowStep(taskId, "load_task", {
           prompt: input.prompt,
-          targetCount: input.targetCount ?? 50,
+          targetCount: input.targetCount ?? DEFAULT_SEARCH_QUERY_COUNT,
           hasProductProfile: Boolean(context.productProfile),
           hasCustomerProfile: Boolean(context.customerProfile)
         }),
@@ -635,6 +721,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         SELECT count(*)::int AS lead_count
         FROM lead_candidates
         WHERE lead_candidates.task_id = lead_tasks.id
+          AND lead_candidates.status IN ('review', 'qualified', 'approved', 'contacted', 'email_sent')
+          AND lead_candidates.country_confidence IN ('high', 'medium')
+          AND lead_candidates.country_conflict = false
       ) lead_counts ON true
       LEFT JOIN LATERAL (
         SELECT count(*)::int AS query_count
@@ -1113,6 +1202,233 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private async evaluateFirstStageSearchQuality(taskId: string) {
+    const [task, candidates, executedQueryCount] = await Promise.all([
+      this.prisma.leadTask.findUnique({
+        where: { id: taskId },
+        select: { inputPayload: true }
+      }),
+      this.prisma.leadCandidate.findMany({
+        where: { taskId },
+        select: {
+          status: true,
+          country: true,
+          countryConfidence: true,
+          countryConflict: true
+        }
+      }),
+      this.prisma.searchQuery.count({
+        where: {
+          taskId,
+          executionStatus: { in: ["completed", "failed"] }
+        }
+      })
+    ]);
+    const criteria = buildIcpCriteria(parseTaskPayload(task?.inputPayload ?? null));
+    const targetRegions = criteria.targetRegions;
+    const totalCandidates = candidates.length;
+    const mainCandidates = candidates.filter((candidate) => isMainCandidateStatus(candidate.status)).length;
+    const rejectedCandidates = candidates.filter((candidate) => candidate.status === "rejected").length;
+    const countryIssueCandidates = candidates.filter(
+      (candidate) =>
+        candidate.status === "needs_country_review" ||
+        candidate.status === "country_conflict_review" ||
+        candidate.countryConflict ||
+        !candidate.country ||
+        candidate.countryConfidence === "low" ||
+        candidate.countryConfidence === "unknown" ||
+        (targetRegions.length > 0 && candidate.country && !countryMatchesAnyTarget(candidate.country, targetRegions))
+    ).length;
+    const rejectedRatio = ratio(rejectedCandidates, totalCandidates);
+    const countryIssueRatio = ratio(countryIssueCandidates, totalCandidates);
+    const shouldStop =
+      executedQueryCount >= FIRST_STAGE_SEARCH_QUERY_LIMIT &&
+      totalCandidates >= 10 &&
+      ((mainCandidates < 1 && rejectedRatio >= 0.85) || countryIssueRatio >= 0.4 || rejectedRatio >= 0.9);
+    const reasons = [
+      ...(mainCandidates < 1 && rejectedRatio >= 0.85 ? ["review_plus_under_1_and_rejected_ratio_high"] : []),
+      ...(countryIssueRatio >= 0.4 ? ["country_issue_ratio_high"] : []),
+      ...(rejectedRatio >= 0.9 ? ["rejected_ratio_high"] : [])
+    ];
+
+    return {
+      phase: "first_15_queries",
+      shouldStop,
+      executedQueryCount,
+      totalCandidates,
+      mainCandidates,
+      rejectedCandidates,
+      countryIssueCandidates,
+      rejectedRatio,
+      countryIssueRatio,
+      reasons
+    };
+  }
+
+  private async rewritePendingQueriesForQualityGate(
+    taskId: string,
+    qualityGate: { reasons: string[]; executedQueryCount: number }
+  ) {
+    const task = await this.prisma.leadTask.findUnique({
+      where: { id: taskId },
+      select: {
+        inputPayload: true,
+        searchQueries: {
+          select: {
+            query: true,
+            provider: true,
+            operatorSource: true,
+            executionStatus: true,
+            operatorName: true,
+            strategyTemplate: true,
+            keywordGroups: true,
+            country: true,
+            effectivenessScore: true
+          },
+          orderBy: { createdAt: "asc" }
+        }
+      }
+    });
+
+    if (!task) {
+      throw new NotFoundException("Lead task not found");
+    }
+
+    const pendingQueries = task.searchQueries.filter((query) => query.executionStatus === "pending");
+    if (!pendingQueries.length) {
+      return {
+        rewrittenCount: 0,
+        removedPendingCount: 0,
+        remainingQueries: 0,
+        reasons: qualityGate.reasons
+      };
+    }
+
+    const payload = parseTaskPayload(task.inputPayload);
+    const criteria = buildIcpCriteria(payload);
+    const countryPool =
+      normalizeTargetMarkets(criteria.targetRegions) ??
+      normalizeTargetMarkets(asStringArray(payload.keywordGroups?.marketTerms)) ??
+      ["UAE"];
+    const keywordGroups = keywordGroupsFromPayload(payload, countryPool);
+    const channelCustomersRequested = isChannelCustomerRequest(payload.prompt ?? "");
+    const existingQueryTexts = new Set(task.searchQueries.map((query) => query.query.toLowerCase()));
+    const replacementQueries = buildQualityFallbackSearchQueries(
+      keywordGroups,
+      countryPool,
+      channelCustomersRequested,
+      pendingQueries.length,
+      existingQueryTexts
+    );
+
+    await this.prisma.searchQuery.deleteMany({
+      where: {
+        taskId,
+        executionStatus: "pending"
+      }
+    });
+
+    if (replacementQueries.length) {
+      await this.prisma.searchQuery.createMany({
+        data: replacementQueries.map((query) => ({
+          taskId,
+          provider: query.provider,
+          operatorSource: query.operatorSource,
+          executionStatus: "pending",
+          operatorName: query.operatorName,
+          strategyTemplate: query.strategyTemplate,
+          query: query.query,
+          keywordGroups: query.keywordGroups,
+          country: query.country,
+          effectivenessScore: query.effectivenessScore
+        }))
+      });
+    }
+
+    const remainingQueries = await this.countPendingSearchQueries(taskId);
+    await this.updateTaskPayloadAfterQualityFallback(taskId, task.inputPayload, {
+      replacementQueries,
+      preservedQueries: task.searchQueries.filter((query) => query.executionStatus !== "pending"),
+      removedPendingQueries: pendingQueries.map((query) => ({ query: query.query, country: query.country })),
+      qualityGate,
+      remainingQueries
+    });
+
+    return {
+      rewrittenCount: replacementQueries.length,
+      removedPendingCount: pendingQueries.length,
+      remainingQueries,
+      reasons: qualityGate.reasons,
+      countries: uniqueStrings(replacementQueries.map((query) => query.country ?? "").filter(Boolean)),
+      sampleQueries: replacementQueries.slice(0, 5).map((query) => query.query)
+    };
+  }
+
+  private async updateTaskPayloadAfterQualityFallback(
+    taskId: string,
+    inputPayload: Prisma.JsonValue | null,
+    fallback: {
+      replacementQueries: PlannedSearchQuery[];
+      preservedQueries: Array<{
+        query: string;
+        provider: string;
+        operatorSource: string | null;
+        executionStatus: string;
+        operatorName: string | null;
+        strategyTemplate: string | null;
+        keywordGroups: Prisma.JsonValue | null;
+        country: string | null;
+        effectivenessScore: number | null;
+      }>;
+      removedPendingQueries: Array<{ query: string; country: string | null }>;
+      qualityGate: { reasons: string[]; executedQueryCount: number };
+      remainingQueries: number;
+    }
+  ) {
+    const payloadObject = toPlainObject(inputPayload);
+    const profileSignals = toPlainObject(payloadObject.profileSignals);
+    const nextSearchQueries = [
+      ...fallback.preservedQueries.map((query) => ({
+        provider: query.provider,
+        operatorSource: query.operatorSource,
+        executionStatus: query.executionStatus,
+        operatorName: query.operatorName,
+        strategyTemplate: query.strategyTemplate,
+        query: query.query,
+        keywordGroups: query.keywordGroups,
+        country: query.country,
+        effectivenessScore: query.effectivenessScore
+      })),
+      ...fallback.replacementQueries.map(serializePlannedSearchQuery)
+    ];
+
+    await this.prisma.leadTask.update({
+      where: { id: taskId },
+      data: {
+        inputPayload: toJsonValue({
+          ...payloadObject,
+          searchQueries: nextSearchQueries,
+          profileSignals: {
+            ...profileSignals,
+            qualityFallback: {
+              action: "rewrote_pending_queries_with_local_buyer_fallback",
+              reasons: fallback.qualityGate.reasons,
+              executedQueryCount: fallback.qualityGate.executedQueryCount,
+              removedPendingQueryCount: fallback.removedPendingQueries.length,
+              replacementQueryCount: fallback.replacementQueries.length,
+              remainingQueries: fallback.remainingQueries,
+              removedPendingQueries: fallback.removedPendingQueries.slice(0, 10),
+              sampleReplacementQueries: fallback.replacementQueries.slice(0, 10).map((query) => ({
+                query: query.query,
+                country: query.country
+              }))
+            }
+          }
+        }) as Prisma.InputJsonValue
+      }
+    });
+  }
+
   private countPendingSearchQueries(taskId: string) {
     return this.prisma.searchQuery.count({
       where: {
@@ -1308,12 +1624,23 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     }
 
     const requestedIds = input.leadIds ?? [];
+    const eligibleCandidates = task.leadCandidates.filter(
+      (candidate) =>
+        isMainCandidateStatus(candidate.status) &&
+        (candidate.icpScore?.score ?? 0) >= 50 &&
+        (candidate.countryConfidence === "high" || candidate.countryConfidence === "medium") &&
+        !candidate.countryConflict
+    );
     const selected = requestedIds.length
       ? task.leadCandidates.filter((candidate) => requestedIds.includes(candidate.id))
-      : task.leadCandidates.filter((candidate) => (candidate.icpScore?.score ?? 0) >= 80).slice(0, 10);
+      : eligibleCandidates.filter((candidate) => (candidate.icpScore?.score ?? 0) >= 80).slice(0, 10);
 
     if (requestedIds.length && selected.length !== requestedIds.length) {
       throw new BadRequestException("Some candidates do not belong to this task");
+    }
+
+    if (selected.some((candidate) => !eligibleCandidates.some((eligible) => eligible.id === candidate.id))) {
+      throw new BadRequestException("Only country-verified review or qualified candidates can be approved");
     }
 
     if (!selected.length) {
@@ -1648,7 +1975,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     });
     const ruleSearchQueries = generateSearchQueries({
       ...profileKeywordInput,
-      minQueryCount: 15
+      minQueryCount: DEFAULT_SEARCH_QUERY_COUNT
     });
     const aiPlanning = await this.buildAiPlanningContext({
       taskId,
@@ -1719,8 +2046,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     const fallbackReasons: string[] = [];
     let productProfileAnalysis = input.ruleProductProfileAnalysis;
     let customerProfileAnalysis = input.ruleCustomerProfileAnalysis;
-    let keywordGroups = input.ruleKeywordGroups;
-    let searchQueries = mapGeneratedSearchQueries(input.ruleSearchQueries);
+    const channelCustomersRequested = isChannelCustomerRequest(input.input.prompt);
+    let keywordGroups = prioritizeKeywordGroupCustomerIntentTerms(input.ruleKeywordGroups, channelCustomersRequested);
+    let searchQueries = limitPlannedSearchQueries(mapGeneratedSearchQueries(input.ruleSearchQueries));
     let aiKeywordExpansion: KeywordExpansionResult | null = null;
     let aiQueryCount = 0;
     let rejectedAiQueries: Array<{ query: string; country: string; reason: string }> = [];
@@ -1797,6 +2125,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         keywordGroupsFromAiExpansion(aiKeywordExpansion, input.targetMarkets),
         input.ruleKeywordGroups
       );
+      keywordGroups = prioritizeKeywordGroupCustomerIntentTerms(keywordGroups, channelCustomersRequested);
       keywordGroups = constrainKeywordGroupMarkets(keywordGroups, input.targetMarkets);
     } catch (error) {
       fallbackReasons.push(`GPT keyword expansion failed: ${searchErrorMessage(error)}`);
@@ -1812,17 +2141,24 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       const searchPlan = await this.leadHuntAiService.generateSearchStrategy({
         keywordGroups: aiKeywordExpansion ?? keywordExpansionFromKeywordGroups(keywordGroups),
         targetMarkets: searchTargetMarkets,
-        operatorLibrary: compactOperatorLibrary(),
-        minQueryCount: 15
+        operatorLibrary: compactOperatorLibrary(channelCustomersRequested),
+        minQueryCount: DEFAULT_SEARCH_QUERY_COUNT
       });
-      const normalization = normalizeAiSearchPlan(searchPlan, keywordGroups, input.ruleSearchQueries, 15, searchTargetMarkets);
-      const aiQueries = normalization.queries;
+      const normalization = normalizeAiSearchPlan(
+        searchPlan,
+        keywordGroups,
+        input.ruleSearchQueries,
+        DEFAULT_SEARCH_QUERY_COUNT,
+        searchTargetMarkets,
+        channelCustomersRequested
+      );
+      const aiQueries = limitPlannedSearchQueries(normalization.queries);
       rejectedAiQueries = normalization.rejected;
       aiQueryCount = aiQueries.filter((query) => query.templateId === "gpt55_search_strategy").length;
       searchQueries = aiQueries;
     } catch (error) {
       fallbackReasons.push(`GPT search strategy failed: ${searchErrorMessage(error)}`);
-      searchQueries = mapGeneratedSearchQueries(input.ruleSearchQueries);
+      searchQueries = limitPlannedSearchQueries(mapGeneratedSearchQueries(input.ruleSearchQueries));
     }
 
     return {
@@ -1916,6 +2252,10 @@ function mapGeneratedSearchQueries(queries: GeneratedSearchQuery[]): PlannedSear
   }));
 }
 
+function limitPlannedSearchQueries(queries: PlannedSearchQuery[]) {
+  return queries.slice(0, DEFAULT_SEARCH_QUERY_COUNT);
+}
+
 function keywordGroupsFromAiExpansion(input: KeywordExpansionResult, targetMarkets: string[] | undefined): KeywordGroups {
   const brandTerms = extractKnownBrandTerms([
     ...input.primaryProducts,
@@ -1961,6 +2301,58 @@ function mergeKeywordGroups(primary: KeywordGroups, fallback: KeywordGroups): Ke
   };
 }
 
+function prioritizeKeywordGroupCustomerIntentTerms(
+  keywordGroups: KeywordGroups,
+  channelCustomersRequested: boolean
+): KeywordGroups {
+  return {
+    ...keywordGroups,
+    customerIntentTerms: prioritizeCustomerIntentTerms(keywordGroups.customerIntentTerms, channelCustomersRequested)
+  };
+}
+
+function prioritizeCustomerIntentTerms(terms: string[], channelCustomersRequested: boolean) {
+  const uniqueTerms = uniqueStrings(terms);
+  if (channelCustomersRequested) {
+    return uniqueTerms;
+  }
+
+  const primary: string[] = [];
+  for (const term of uniqueTerms) {
+    if (!isChannelCustomerTerm(term)) {
+      primary.push(term);
+    }
+  }
+
+  return primary;
+}
+
+function isChannelCustomerRequest(prompt: string) {
+  return /\b(channels?|channel partners?|suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b|经销|分销|渠道|库存商|代理商|进口商|批发/i.test(
+    prompt
+  );
+}
+
+function isChannelCustomerTerm(term: string) {
+  return /\b(distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?|suppliers?)\b|经销|分销|渠道|库存商|代理商|进口商|批发/i.test(
+    term
+  );
+}
+
+function isChannelOnlyQuery(query: string) {
+  const lower = query.toLowerCase();
+  const hasChannel = /\b(suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b/i.test(lower);
+  if (!hasChannel) {
+    return false;
+  }
+
+  return !/\b(maintenance|repair|replacement|operation|operations|operator|carrier|isp|wisp|ftth|contractor|integrator|procurement|purchasing|rfq|tender|bid|vendor registration|supplier registration|deployment|rollout|project|field services|managed services|o&m)\b/i.test(
+    lower
+  );
+}
+
+const channelTemplateIds = new Set(["direct_distributor_country", "distributor_exact_scenario"]);
+
 function constrainKeywordGroupMarkets(keywordGroups: KeywordGroups, targetMarkets: string[] | undefined): KeywordGroups {
   const markets = normalizeTargetMarkets(targetMarkets);
   if (!markets?.length) {
@@ -1973,13 +2365,14 @@ function constrainKeywordGroupMarkets(keywordGroups: KeywordGroups, targetMarket
   };
 }
 
-function compactOperatorLibrary() {
+function compactOperatorLibrary(channelCustomersRequested = false) {
   const library = getSearchStrategyLibrary();
   return {
     version: library.version,
     operators: library.operators.map(compactStrategyTemplate),
     templates: library.templates
       .filter((template) => template.executionStatus === "supported" || template.executionStatus === "experimental")
+      .filter((template) => channelCustomersRequested || !channelTemplateIds.has(template.id))
       .map(compactStrategyTemplate)
   };
 }
@@ -2007,7 +2400,8 @@ function normalizeAiSearchPlan(
   keywordGroups: KeywordGroups,
   fallbackQueries: GeneratedSearchQuery[],
   minQueryCount: number,
-  targetMarkets: string[] | undefined
+  targetMarkets: string[] | undefined,
+  channelCustomersRequested = false
 ): { queries: PlannedSearchQuery[]; rejected: Array<{ query: string; country: string; reason: string }> } {
   const countryPool = normalizeTargetMarkets(targetMarkets) ?? normalizeTargetMarkets(keywordGroups.marketTerms) ?? ["UAE"];
   const supportedStatuses = new Set(["supported", "experimental"]);
@@ -2015,9 +2409,14 @@ function normalizeAiSearchPlan(
   const output: PlannedSearchQuery[] = [];
   const rejected: Array<{ query: string; country: string; reason: string }> = [];
 
-  for (const query of [...plan.queries].sort((left, right) => left.priority - right.priority)) {
+  for (const query of [...plan.queries].sort(compareAiSearchQueries)) {
     if (!supportedStatuses.has(query.executionStatus)) {
       rejected.push({ query: query.query, country: query.country, reason: `unsupported_execution_status:${query.executionStatus}` });
+      continue;
+    }
+
+    if (!isStrategyTypeWithinBudget(output, query.strategyType, channelCustomersRequested)) {
+      rejected.push({ query: query.query, country: query.country, reason: `strategy_budget_exceeded:${query.strategyType ?? "unknown"}` });
       continue;
     }
 
@@ -2044,6 +2443,11 @@ function normalizeAiSearchPlan(
       continue;
     }
 
+    if (!channelCustomersRequested && isChannelOnlyQuery(queryText)) {
+      rejected.push({ query: query.query, country: query.country, reason: "channel_query_without_user_request" });
+      continue;
+    }
+
     seen.add(queryText.toLowerCase());
     output.push({
       provider: "brave",
@@ -2051,12 +2455,17 @@ function normalizeAiSearchPlan(
       executionStatus: query.executionStatus as "supported" | "experimental",
       operatorName: "GPT-5.5 buyer-led search",
       strategyTemplate: query.rationale,
+      strategyType: query.strategyType ?? null,
       query: queryText,
       keywordGroups,
       country,
       effectivenessScore: Math.max(0.2, 1 - (query.priority - 1) * 0.12),
       templateId: "gpt55_search_strategy"
     });
+
+    if (output.length >= minQueryCount) {
+      break;
+    }
   }
 
   for (const fallback of mapGeneratedSearchQueries(fallbackQueries)) {
@@ -2064,6 +2473,9 @@ function normalizeAiSearchPlan(
       break;
     }
     if (fallback.country && !countryPool.some((country) => marketMatches(country, fallback.country ?? ""))) {
+      continue;
+    }
+    if (!channelCustomersRequested && isChannelOnlyQuery(fallback.query)) {
       continue;
     }
     const key = fallback.query.toLowerCase();
@@ -2074,7 +2486,74 @@ function normalizeAiSearchPlan(
     output.push(fallback);
   }
 
+  for (const supplemental of buildSupplementalBuyerSearchQueries(keywordGroups, countryPool, channelCustomersRequested)) {
+    if (output.length >= minQueryCount) {
+      break;
+    }
+    const key = supplemental.query.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(supplemental);
+  }
+
   return { queries: output, rejected };
+}
+
+function compareAiSearchQueries(
+  left: SearchStrategyPlan["queries"][number],
+  right: SearchStrategyPlan["queries"][number]
+) {
+  const strategyRank = aiSearchStrategyRank(left.strategyType) - aiSearchStrategyRank(right.strategyType);
+  if (strategyRank !== 0) {
+    return strategyRank;
+  }
+
+  return left.priority - right.priority;
+}
+
+function aiSearchStrategyRank(strategyType: string | undefined) {
+  switch (strategyType) {
+    case "buyer_scenario":
+      return 0;
+    case "product_group":
+      return 1;
+    case "brand_ecosystem":
+      return 2;
+    case "model_specific":
+      return 3;
+    case "procurement_event":
+      return 4;
+    case "channel":
+      return 5;
+    default:
+      return 2;
+  }
+}
+
+function isStrategyTypeWithinBudget(
+  existingQueries: PlannedSearchQuery[],
+  strategyType: SearchStrategyPlan["queries"][number]["strategyType"],
+  channelCustomersRequested: boolean
+) {
+  if (strategyType === "channel" && !channelCustomersRequested) {
+    return false;
+  }
+
+  const normalizedType = strategyType ?? "unknown";
+  const limits: Record<string, number> = {
+    buyer_scenario: 12,
+    product_group: 9,
+    brand_ecosystem: 3,
+    model_specific: 6,
+    procurement_event: 3,
+    channel: channelCustomersRequested ? 4 : 0,
+    unknown: 6
+  };
+  const limit = limits[normalizedType] ?? limits.unknown ?? 6;
+  const used = existingQueries.filter((query) => (query.strategyType ?? "unknown") === normalizedType).length;
+  return used < limit;
 }
 
 function resolveAiQueryCountry(
@@ -2105,6 +2584,253 @@ function resolveAiQueryCountry(
   return fallback
     ? { country: fallback, reason: "round_robin_target_market" }
     : { country: null, reason: "no_target_market_available" };
+}
+
+function buildSupplementalBuyerSearchQueries(
+  keywordGroups: KeywordGroups,
+  countryPool: string[],
+  channelCustomersRequested: boolean
+): PlannedSearchQuery[] {
+  const countries = countryPool.length ? countryPool : ["UAE"];
+  const productGroups = selectSupplementalProductGroups(keywordGroups);
+  const modelTerms = selectSupplementalModelTerms(keywordGroups);
+  const coreProduct = productGroups[0] ?? keywordGroups.productTerms[0] ?? "equipment";
+  const secondaryProduct = productGroups[1] ?? coreProduct;
+  const queryFactories: Array<{
+    strategyType: string;
+    render: (country: string) => string;
+  }> = [
+    ...[
+      `"maintenance company" "${coreProduct}" {country} contact`,
+      `"field service company" "${coreProduct}" {country} contact`,
+      `"system integrator" "${coreProduct}" {country} contact`,
+      `"engineering contractor" "${coreProduct}" {country} contact`,
+      `"installation contractor" "${coreProduct}" {country} contact`,
+      `"operator" "${coreProduct}" procurement {country}`,
+      `"service provider" "${coreProduct}" {country} contact`,
+      `"vendor registration" "${coreProduct}" {country}`,
+      `"project contractor" "${secondaryProduct}" {country} contact`,
+      `"repair service" "${secondaryProduct}" {country} contact`,
+      `"network operations" "${secondaryProduct}" {country} contact`,
+      `"procurement" "${secondaryProduct}" {country}`
+    ].map((templateText) => ({
+      strategyType: "buyer_scenario",
+      render: (country: string) => templateText.replace("{country}", country)
+    })),
+    ...productGroups.map((product) => ({
+      strategyType: "product_group",
+      render: (country: string) => `"${product}" maintenance ${country} contact`
+    })),
+    ...productGroups.slice(0, 8).map((product) => ({
+      strategyType: "product_group",
+      render: (country: string) => `"${product}" replacement ${country} contact`
+    })),
+    ...modelTerms.map((model) => ({
+      strategyType: "model_specific",
+      render: (country: string) => `"${model}" replacement ${country} contact`
+    })),
+    ...[
+      `"${coreProduct}" RFQ {country}`,
+      `"${coreProduct}" procurement {country}`,
+      `"${coreProduct}" "vendor registration" {country}`,
+      `"${secondaryProduct}" tender {country}`,
+      `"${secondaryProduct}" "request for quotation" {country}`
+    ].map((templateText) => ({
+      strategyType: "procurement_event",
+      render: (country: string) => templateText.replace("{country}", country)
+    })),
+    ...(channelCustomersRequested
+      ? [
+          {
+            strategyType: "channel",
+            render: (country: string) => `"${coreProduct}" distributor ${country} contact`
+          },
+          {
+            strategyType: "channel",
+            render: (country: string) => `"${secondaryProduct}" stockist ${country} contact`
+          }
+        ]
+      : [])
+  ];
+  const queries: PlannedSearchQuery[] = [];
+
+  for (let index = 0; index < queryFactories.length * countries.length; index += 1) {
+    const country = countries[index % countries.length] ?? countries[0] ?? "UAE";
+    const factory = queryFactories[Math.floor(index / countries.length) % queryFactories.length];
+    if (!factory) {
+      break;
+    }
+    const query = appendSafeNegativeTerms(factory.render(country), keywordGroups.excludeTerms);
+    queries.push({
+      provider: "brave",
+      operatorSource: "brave_official",
+      executionStatus: "experimental",
+      operatorName: "Supplemental buyer-led search",
+      strategyTemplate: `supplemental:${factory.strategyType}`,
+      strategyType: factory.strategyType,
+      query,
+      keywordGroups,
+      country,
+      effectivenessScore: 0.66,
+      templateId: `supplemental_${factory.strategyType}`
+    });
+  }
+
+  return queries;
+}
+
+function buildQualityFallbackSearchQueries(
+  keywordGroups: KeywordGroups,
+  countryPool: string[],
+  channelCustomersRequested: boolean,
+  limit: number,
+  existingQueryTexts: Set<string>
+): PlannedSearchQuery[] {
+  const countries = countryPool.length ? countryPool : ["UAE"];
+  const productGroups = selectSupplementalProductGroups(keywordGroups).slice(0, 8);
+  const coreProduct = productGroups[0] ?? keywordGroups.productTerms[0] ?? "equipment";
+  const secondaryProduct = productGroups[1] ?? coreProduct;
+  const templates: Array<{
+    strategyType: string;
+    render: (country: string) => string;
+  }> = [
+    ...[
+      `"maintenance company" "${coreProduct}" {country} contact`,
+      `"field service company" "${coreProduct}" {country} "contact us"`,
+      `"system integrator" "${coreProduct}" {country} contact`,
+      `"engineering contractor" "${coreProduct}" {country} contact`,
+      `"installation contractor" "${coreProduct}" {country} contact`,
+      `"operator" "${coreProduct}" procurement {country}`,
+      `"service provider" "${coreProduct}" {country} contact`,
+      `"vendor registration" "${coreProduct}" {country}`,
+      `"project contractor" "${secondaryProduct}" {country} contact`,
+      `"repair service" "${secondaryProduct}" {country} contact`,
+      `"network operations" "${secondaryProduct}" {country} contact`,
+      `"procurement" "${secondaryProduct}" {country}`
+    ].map((templateText) => ({
+      strategyType: "quality_fallback_buyer",
+      render: (country: string) => templateText.replace("{country}", country)
+    })),
+    ...productGroups.map((product) => ({
+      strategyType: "quality_fallback_product",
+      render: (country: string) => `"${product}" maintenance ${country} contact`
+    })),
+    ...[
+      `"${coreProduct}" RFQ {country}`,
+      `"${coreProduct}" procurement {country}`,
+      `"${coreProduct}" "vendor registration" {country}`,
+      `"${secondaryProduct}" tender {country}`,
+      `"${secondaryProduct}" "request for quotation" {country}`,
+      `"${coreProduct}" maintenance {country} contact`,
+      `"${secondaryProduct}" replacement {country} contact`
+    ].map((templateText) => ({
+      strategyType: "quality_fallback_category",
+      render: (country: string) => templateText.replace("{country}", country)
+    })),
+    ...(channelCustomersRequested
+      ? [
+          {
+            strategyType: "quality_fallback_channel",
+            render: (country: string) => `"${coreProduct}" reseller ${country} contact`
+          }
+        ]
+      : [])
+  ];
+  const queries: PlannedSearchQuery[] = [];
+  const seen = new Set(existingQueryTexts);
+
+  for (let index = 0; queries.length < limit && index < templates.length * countries.length; index += 1) {
+    const country = countries[index % countries.length] ?? countries[0] ?? "UAE";
+    const template = templates[Math.floor(index / countries.length) % templates.length];
+    if (!template) {
+      break;
+    }
+    const query = appendSafeNegativeTerms(template.render(country), keywordGroups.excludeTerms);
+    const normalizedQuery = normalizeAiQueryText(query, country, keywordGroups, countries).query || query;
+    const key = normalizedQuery.toLowerCase();
+    if (seen.has(key) || (!channelCustomersRequested && isChannelOnlyQuery(normalizedQuery))) {
+      continue;
+    }
+    seen.add(key);
+    queries.push({
+      provider: "brave",
+      operatorSource: "brave_official",
+      executionStatus: "experimental",
+      operatorName: "Quality fallback local buyer search",
+      strategyTemplate: `quality_fallback:${template.strategyType}`,
+      strategyType: template.strategyType,
+      query: normalizedQuery,
+      keywordGroups,
+      country,
+      effectivenessScore: 0.72,
+      templateId: `quality_fallback_${template.strategyType}`
+    });
+  }
+
+  return queries;
+}
+
+function serializePlannedSearchQuery(query: PlannedSearchQuery) {
+  return {
+    provider: query.provider,
+    operatorSource: query.operatorSource,
+    executionStatus: query.executionStatus,
+    operatorName: query.operatorName,
+    strategyTemplate: query.strategyTemplate,
+    strategyType: null,
+    query: query.query,
+    keywordGroups: query.keywordGroups,
+    country: query.country,
+    effectivenessScore: query.effectivenessScore,
+    templateId: query.templateId
+  };
+}
+
+function keywordGroupsFromPayload(payload: ReturnType<typeof parseTaskPayload>, marketTerms: string[]): KeywordGroups {
+  const groups = payload.keywordGroups ?? {};
+
+  return {
+    brandTerms: asStringArray(groups.brandTerms),
+    productTerms: asStringArray(groups.productTerms),
+    longTailProductTerms: asStringArray(groups.longTailProductTerms),
+    customerIntentTerms: prioritizeCustomerIntentTerms(asStringArray(groups.customerIntentTerms), false),
+    marketTerms,
+    scenarioTerms: asStringArray(groups.scenarioTerms),
+    excludeTerms: asStringArray(groups.excludeTerms)
+  };
+}
+
+function selectSupplementalProductGroups(keywordGroups: KeywordGroups) {
+  const preferred = [
+    "equipment",
+    "components",
+    "spare parts",
+    "industrial equipment",
+    "maintenance parts",
+    "replacement parts",
+    "RRU",
+    "BBU",
+    "AAU",
+    "OLT",
+    "rectifier",
+    "power module",
+    "SFP",
+    "optical module",
+    "base station equipment",
+    "RAN equipment",
+    "telecom spare parts",
+    "microwave backhaul"
+  ];
+  return uniqueStrings([...keywordGroups.productTerms, ...preferred])
+    .filter((term) => !isChannelCustomerTerm(term))
+    .slice(0, 15);
+}
+
+function selectSupplementalModelTerms(keywordGroups: KeywordGroups) {
+  return uniqueStrings([...keywordGroups.productTerms, ...keywordGroups.longTailProductTerms])
+    .filter((term) => /\d/.test(term) || /\b(?:rru|bbu|aau|olt|sfp|umpt|ubbp|wbbp|r8882|r8862|r4850|baseband)\b/i.test(term))
+    .filter((term) => !/\b(?:supplier|distributor|stockist|reseller|wholesale|manufacturer)\b/i.test(term))
+    .slice(0, 10);
 }
 
 function normalizeCountryAlias(value: string) {
@@ -2350,9 +3076,11 @@ function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, coun
   const hasCustomer = keywordGroups.customerIntentTerms.some((term) => lower.includes(term.toLowerCase()));
   const hasScenario = keywordGroups.scenarioTerms.some((term) => lower.includes(term.toLowerCase()));
   const hasBuyerRole = hasCustomer || hasScenario || queryBuyerRoleTerms.some((term) => lower.includes(term));
+  const hasEntryPoint = queryEntryPointTerms.some((term) => lower.includes(term));
   const hasSellerOnlyTrap = querySellerOnlyTerms.some((term) => lower.includes(term)) && !hasBuyerRole;
+  const hasProductOrIndustryContext = hasProduct || hasScenario || hasTelecomQueryContext(lower);
 
-  return hasCountry && hasBuyerRole && !hasSellerOnlyTrap && (hasProduct || hasCustomer || hasScenario || hasTelecomQueryContext(lower));
+  return hasCountry && !hasSellerOnlyTrap && hasProductOrIndustryContext && (hasBuyerRole || hasEntryPoint);
 }
 
 function extractKnownBrandTerms(values: string[]) {
@@ -2366,19 +3094,44 @@ function quoteRegExp(value: string) {
 }
 
 function hasTelecomQueryContext(query: string) {
-  return /\b(telecom|5g|4g|ran|rru|bbu|aau|olt|sfp|cell site|base station|fiber|ftth)\b/i.test(query);
+  return /\b(telecom|telecommunication|5g|4g|ran|open ran|rru|bbu|aau|olt|onu|ont|sfp|das|small cell|private 5g|microwave|backhaul|cell site|base station|towerco|tower company|fiber|ftth|wisp|isp|equipment|components|spare parts|power module|rectifier|maintenance|procurement|contractor|integrator|operator|carrier|service provider|industrial network)\b/i.test(
+    query
+  );
 }
+
+const queryEntryPointTerms = [
+  "contact",
+  "contact us",
+  "about us",
+  "services",
+  "projects",
+  "procurement",
+  "purchasing",
+  "rfq",
+  "tender",
+  "vendor registration",
+  "supplier registration",
+  "quote",
+  "quotation",
+  "inquiry",
+  "enquiry"
+];
 
 const queryBuyerRoleTerms = [
   "maintenance",
+  "maintenance company",
   "network operations",
   "operator",
+  "service provider",
+  "field service",
+  "field services",
   "tower",
   "towerco",
   "isp",
   "wisp",
   "ftth",
   "contractor",
+  "engineering contractor",
   "integrator",
   "field services",
   "repair service",
@@ -2417,17 +3170,17 @@ function buildExecutionPlan(hasProductProfile: boolean, hasCustomerProfile: bool
     {
       step: "analyze_product_profile",
       title: "分析产品能力",
-      detail: hasProductProfile ? "从官网、产品页和补充说明提取产品词" : "使用任务文本和默认通信设备词库补全产品词"
+      detail: hasProductProfile ? "从官网、产品页和补充说明提取产品词" : "使用任务文本和通用 B2B 词库补全产品词"
     },
     {
       step: "analyze_customer_profile",
       title: "分析目标客户",
-      detail: hasCustomerProfile ? "从目标地区、参考客户和 CRM 样本提取客户意图" : "使用任务文本和默认经销商画像补全客户意图"
+      detail: hasCustomerProfile ? "从目标地区、参考客户和 CRM 样本提取客户意图" : "使用任务文本和通用买家画像补全客户意图"
     },
     {
       step: "plan_search_queries",
       title: "生成高级搜索策略",
-      detail: "生成至少 15 条 Brave 可执行或实验性搜索 query"
+      detail: "生成 30 条 Brave 可执行或实验性搜索 query"
     },
     {
       step: "human_approval",
@@ -2514,11 +3267,49 @@ function resolveTargetMarketSelection(taskText: string, profileRegions: string[]
 
 function normalizeTargetMarkets(markets: string[] | undefined) {
   const uniqueMarkets = uniqueStrings(markets ?? []);
-  if (uniqueMarkets.length > 1) {
-    return uniqueMarkets.filter((market) => market.toLowerCase() !== "global");
+  const filteredMarkets =
+    uniqueMarkets.length > 1 ? uniqueMarkets.filter((market) => normalizeMarketKey(market) !== "global") : uniqueMarkets;
+  const expandedMarkets = uniqueStrings(filteredMarkets.flatMap(expandSearchTargetMarket).map(normalizeSearchTargetCountry));
+
+  return expandedMarkets.length ? expandedMarkets : undefined;
+}
+
+function expandSearchTargetMarket(market: string) {
+  const key = normalizeMarketKey(market);
+  const expansion = searchTargetMarketExpansions[key];
+  return expansion ?? [market];
+}
+
+function normalizeSearchTargetCountry(market: string) {
+  const key = normalizeMarketKey(market);
+  const aliases: Record<string, string> = {
+    ae: "UAE",
+    uae: "UAE",
+    "united arab emirates": "UAE",
+    dubai: "UAE",
+    "abu dhabi": "UAE",
+    ksa: "Saudi Arabia",
+    saudi: "Saudi Arabia",
+    "saudi arabia": "Saudi Arabia",
+    riyadh: "Saudi Arabia",
+    jeddah: "Saudi Arabia",
+    doha: "Qatar",
+    lagos: "Nigeria",
+    nairobi: "Kenya",
+    moscow: "Russia",
+    kyiv: "Ukraine",
+    kiev: "Ukraine"
+  };
+  const alias = aliases[key];
+  if (alias) {
+    return alias;
   }
 
-  return uniqueMarkets.length ? uniqueMarkets : undefined;
+  return resolveCountry(market)?.name ?? market.trim();
+}
+
+function normalizeMarketKey(market: string) {
+  return market.trim().toLowerCase();
 }
 
 function detectTaskMarkets(text: string): string[] {
@@ -2599,7 +3390,7 @@ function collectSiteKeywordHints(siteEvidence: ProfileSiteEvidence) {
       siteEvidence.productSites.flatMap((site) => [
         ...(site.productNames ?? []),
         ...site.extractedTerms.productTerms,
-        ...site.extractedTerms.brandTerms.map((brand) => `${brand} telecom equipment`)
+        ...site.extractedTerms.brandTerms.map((brand) => `${brand} equipment`)
       ])
     ),
     customerIntentTerms: uniqueStrings(
@@ -2664,7 +3455,10 @@ function buildCustomerProfileAnalysis(
 ) {
   const readSites = sites.filter((site) => site.status === "read");
   const failedSites = sites.filter((site) => site.status === "failed");
-  const customerTypes = uniqueStrings(readSites.flatMap((site) => site.extractedTerms.customerIntentTerms));
+  const customerTypes = prioritizeCustomerIntentTerms(
+    uniqueStrings(readSites.flatMap((site) => site.extractedTerms.customerIntentTerms)),
+    false
+  );
   const scenarios = uniqueStrings(readSites.flatMap((site) => site.extractedTerms.scenarioTerms));
   const evidence = readSites.flatMap((site) => site.evidenceSnippets).slice(0, 8);
 
@@ -2696,7 +3490,12 @@ function uniqueStrings(values: string[]) {
 
 function parseTaskPayload(value: Prisma.JsonValue | null): {
   prompt?: string | null;
-  productProfile?: { notes?: string | null } | null;
+  productProfile?: {
+    websiteUrl?: string | null;
+    productPageUrl?: string | null;
+    documentUrls?: string[];
+    notes?: string | null;
+  } | null;
   productProfileAnalysis?: Record<string, unknown> | null;
   customerProfile?: { targetRegions?: string[]; notes?: string | null } | null;
   customerProfileAnalysis?: Record<string, unknown> | null;
@@ -2723,6 +3522,12 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
   const marketTerms = asStringArray(keywordGroups.marketTerms).slice(0, 40);
   const profileRegions = asStringArray(payload.customerProfile?.targetRegions).slice(0, 40);
   const targetRegions = marketTerms.length ? marketTerms : profileRegions;
+  const productProfile = payload.productProfile;
+  const ownDomains = domainsFromUrls([
+    productProfile?.websiteUrl,
+    productProfile?.productPageUrl,
+    ...asStringArray(productProfile?.documentUrls)
+  ]);
 
   return {
     targetRegions: targetRegions.length ? targetRegions : profileRegions,
@@ -2731,6 +3536,8 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
       ...asStringArray(keywordGroups.longTailProductTerms).slice(0, 6)
     ],
     customerTypeKeywords: asStringArray(keywordGroups.customerIntentTerms).slice(0, 8),
+    ownDomains,
+    brandTerms: asStringArray(keywordGroups.brandTerms).slice(0, 12),
     disqualifiers: [
       "job",
       "career",
@@ -2748,6 +3555,23 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
       "TradeIndia"
     ]
   };
+}
+
+function domainsFromUrls(urls: Array<string | null | undefined>) {
+  return uniqueStrings(
+    urls
+      .map((url) => {
+        if (!url) {
+          return "";
+        }
+        try {
+          return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+        } catch {
+          return "";
+        }
+      })
+      .filter(Boolean)
+  );
 }
 
 function resolveSearchBatchLimit(limit: number | undefined) {
@@ -2878,11 +3702,11 @@ function buildDevelopmentSearchResults(query: string, country: string | null): B
   const companies = fallbackCompanies[market] ?? fallbackCompanies.UAE;
 
   return companies.map((company) => ({
-    title: `${company.name} - Telecom equipment ${company.type}`,
+    title: `${company.name} - B2B ${company.type}`,
     url: `https://${company.domain}`,
     snippet: [
       `${company.name} is a local development fallback result for ${market}.`,
-      `${company.type} focused on telecom equipment, RRU, BBU, microwave backhaul, telecom power, spare parts and network maintenance.`,
+      `${company.type} focused on equipment, spare parts, maintenance, project delivery and network services.`,
       `Query context: ${query}`,
       `Contact: sales@${company.domain}`
     ].join(" "),
@@ -2909,6 +3733,30 @@ function toNumberCount(value: number | bigint | null) {
   }
 
   return value ?? 0;
+}
+
+function ratio(value: number, total: number) {
+  return total > 0 ? value / total : 0;
+}
+
+function isMainCandidateStatus(status: string | null | undefined) {
+  return ["review", "qualified", "approved", "contacted", "email_sent"].includes(status ?? "");
+}
+
+function countryMatchesAnyTarget(country: string, targetRegions: string[]) {
+  const countryCode = resolveCountry(country)?.code;
+  if (!countryCode) {
+    return false;
+  }
+
+  return targetRegions.some((target) => {
+    const normalized = target.trim().toLowerCase();
+    if (!normalized || ["global", "worldwide", "all"].includes(normalized)) {
+      return true;
+    }
+
+    return resolveCountry(target)?.code === countryCode;
+  });
 }
 
 function workflowNodeOrder(nodeName: LeadHuntWorkflowNode) {
@@ -2989,20 +3837,20 @@ function buildOutreachDraft(candidate: {
   icpScore: { score: number; grade: string } | null;
 }) {
   const email = candidate.contacts.find((contact) => contact.type === "email")?.value;
-  const productFit = candidate.icpScore ? `ICP ${candidate.icpScore.score}/${candidate.icpScore.grade}` : "high-fit telecom profile";
+  const productFit = candidate.icpScore ? `ICP ${candidate.icpScore.score}/${candidate.icpScore.grade}` : "high-fit B2B profile";
   const countryLine = candidate.country ? ` in ${candidate.country}` : "";
 
   return {
     leadId: candidate.id,
     channel: "email",
-    subject: `Telecom equipment supply support for ${candidate.companyName}`,
+    subject: `Supply support for ${candidate.companyName}`,
     body: [
       `Hi ${candidate.companyName} team,`,
       "",
       `I noticed your company appears to be a strong ${productFit} prospect${countryLine}.`,
-      "We support telecom equipment supply, spare parts, RRU/BBU boards, microwave backhaul and power modules for distributors, stockists and system integrators.",
+      "We support equipment supply, spare parts, maintenance support and project delivery for buyers, integrators and operators.",
       "",
-      "Could you let me know whether you currently source telecom spare parts or project supply items?",
+      "Could you let me know whether you currently source spare parts or project supply items?",
       "",
       "Best regards,",
       "LeadHunt AI"

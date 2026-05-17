@@ -1684,8 +1684,15 @@ body:has(.aiProjectApp) {
 .leadTable,
 .taskTable {
   width: 100%;
-  min-width: 1120px;
   border-collapse: collapse;
+}
+
+.leadTable {
+  min-width: 1280px;
+}
+
+.taskTable {
+  min-width: 1120px;
 }
 
 .leadTable th,
@@ -1731,6 +1738,34 @@ body:has(.aiProjectApp) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.leadSourceCell {
+  max-width: 230px;
+}
+
+.leadSourceLink {
+  display: inline-flex;
+  max-width: 220px;
+  align-items: center;
+  gap: 6px;
+  color: var(--primary);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.leadSourceLink:hover {
+  text-decoration: underline;
+}
+
+.leadSourceLink span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leadSourceLink svg {
+  flex: 0 0 auto;
 }
 
 .leadCheck {
@@ -9022,6 +9057,9 @@ button.primary {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
   border-right: 1px solid var(--border);
   background: #fff;
   padding: 18px 18px 24px;
@@ -9108,8 +9146,16 @@ button.primary {
   flex-direction: column;
   gap: 6px;
   flex: 1;
-  overflow-y: auto;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.aiLandingTaskList::-webkit-scrollbar {
+  display: none;
 }
 
 .aiLandingTaskItem {

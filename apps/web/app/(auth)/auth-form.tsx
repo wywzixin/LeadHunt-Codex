@@ -122,13 +122,13 @@ export function AuthForm({ mode }: AuthFormProps) {
               <strong>
                 LeadHunt <span>AI</span>
               </strong>
-              <span>通信设备外贸工具</span>
+              <span>B2B 外贸获客工具</span>
             </div>
           </div>
 
           <div className="authHeroCopy">
             <h2>
-              AI 驱动的通信设备
+              AI 驱动的
               <br />
               外贸<span>获客与营销</span>平台
             </h2>

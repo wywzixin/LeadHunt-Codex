@@ -28,7 +28,7 @@ import {
 } from "./mail-confirmation-modal";
 
 const defaultTaskPrompt =
-  "帮我找5G通信设备配件相关的买家客户，优先找基站维护、RAN维护、铁塔维护、通信电源维护、系统集成商、运营商和ISP/FTTH网络运维客户。";
+  "帮我找某类产品相关的买家客户，优先找维护商、工程商、运营商、采购方、项目方和运维客户。";
 
 const landingShortcuts = [
   { label: "找客户", icon: Target },
@@ -41,11 +41,11 @@ const landingShortcuts = [
 const landingExamples = [
   {
     icon: Target,
-    title: "找通信设备买家客户",
+    title: "找 B2B 买家客户",
     description:
-      "读取已保存的产品画像和客户画像，搜索基站维护、铁塔维护、通信电源维护、系统集成商和网络运维客户，并筛选可做首轮触达的目标。",
+      "读取已保存的产品画像和客户画像，搜索维护商、工程商、运营商、采购方和运维客户，并筛选可做首轮触达的目标。",
     prompt:
-      "帮我找通信设备配件买家客户，优先找维护公司、铁塔公司、通信电源维护、系统集成商、运营商和ISP网络运维客户。"
+      "帮我找某类产品的买家客户，优先找维护公司、工程商、运营商、采购方和网络运维客户。"
   },
   {
     icon: UsersRound,
@@ -53,7 +53,7 @@ const landingExamples = [
     description:
       "使用已保存的参考客户画像，提炼客户类型、关键词、采购场景与地域特征，用于搜索同类客户。",
     prompt:
-      "按已保存的客户画像，帮我找同类型通信设备买家客户。"
+      "按已保存的客户画像，帮我找同类型买家客户。"
   },
   {
     icon: Mail,
@@ -68,26 +68,26 @@ const landingExamples = [
 const fallbackKeywordRows: KeywordRow[] = [
   {
     label: "产品扩展词",
-    values: ["telecom equipment", "RRU", "BBU", "AAU", "microwave backhaul", "telecom power"]
+    values: ["product category", "core product", "spare parts", "components", "equipment", "materials"]
   },
   {
     label: "客户类型词",
     values: [
-      "network maintenance company",
-      "base station maintenance",
-      "RAN maintenance",
-      "tower maintenance company",
-      "telecom power maintenance",
-      "telecom system integrator"
+      "maintenance company",
+      "system integrator",
+      "engineering contractor",
+      "operator",
+      "procurement",
+      "service provider"
     ]
   },
   {
     label: "品牌/型号词",
-    values: ["Huawei spare parts", "ZTE BBU boards", "Ericsson RRU", "Nokia radio unit", "rectifier module"]
+    values: ["brand + model", "model replacement", "SKU RFQ", "product group maintenance", "key spare parts"]
   },
   {
     label: "场景/市场词",
-    values: ["UAE", "Saudi Arabia", "network rollout", "tower power service", "IBS service"]
+    values: ["UAE", "Saudi Arabia", "project rollout", "maintenance service", "vendor registration"]
   },
   {
     label: "ICP 风险词",
@@ -96,11 +96,11 @@ const fallbackKeywordRows: KeywordRow[] = [
 ];
 
 const fallbackSearchQueries = [
-  '("base station maintenance" OR "RAN maintenance") telecom UAE -job -news -marketplace -directory',
-  '("tower maintenance" OR towerco) ("mobile network" OR "base station") Saudi Arabia -yellowpages -Alibaba',
-  '("telecom power maintenance" OR "rectifier replacement") ("48V" OR Eltek OR Huawei) Nigeria -marketplace -directory',
-  '("wireless infrastructure contractor" OR "network rollout contractor") 5G Brazil -job -blog -forum',
-  '(ISP OR WISP OR "FTTH operator") (OLT OR SFP OR "optical module") Philippines -marketplace -directory'
+  '("maintenance company" OR "field service") "product category" UAE -job -news -marketplace -directory',
+  '("system integrator" OR contractor) "core product" Saudi Arabia -yellowpages -Alibaba',
+  '("repair service" OR replacement) "spare parts" Nigeria -marketplace -directory',
+  '("project contractor" OR "deployment contractor") equipment Brazil -job -blog -forum',
+  '("vendor registration" OR RFQ OR procurement) "product category" Philippines -marketplace -directory'
 ];
 
 const fallbackMailLead: MailConfirmationLead = {
@@ -250,6 +250,11 @@ type LeadCandidate = {
   companyName: string;
   website?: string | null;
   country?: string | null;
+  queryCountry?: string | null;
+  inferredCountry?: string | null;
+  countryEvidence?: unknown;
+  countryConfidence?: "high" | "medium" | "low" | "unknown" | string | null;
+  countryConflict?: boolean | null;
   sourceUrl?: string | null;
   status?: string;
   contacts?: LeadContact[];
@@ -344,6 +349,14 @@ type ActivityLog = {
   state: StepState;
 };
 
+type LeadQualityCounts = {
+  rawEvidence: number;
+  main: number;
+  needsCountryReview: number;
+  rejected: number;
+  other: number;
+};
+
 type DisplaySearchResult = {
   id: string;
   title: string;
@@ -359,6 +372,8 @@ type DisplayLead = {
   companyName: string;
   score: number;
   source: string;
+  sourceUrl: string;
+  sourceLabel: string;
   country: string;
   tag: string;
   phone: string;
@@ -404,6 +419,7 @@ export function AiWorkerClient() {
     () => displayLeads.reduce((total, lead) => total + pendingFollowups(lead.raw).length, 0),
     [displayLeads]
   );
+  const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
   const keywordRows = useMemo(() => buildKeywordRows(currentTask, view !== "landing"), [currentTask, view]);
   const profileSourceRows = useMemo(() => buildProfileSourceRows(currentTask), [currentTask]);
   const flowRows = useMemo(
@@ -413,11 +429,22 @@ export function AiWorkerClient() {
         searching,
         approving,
         leadCount: displayLeads.length,
+        leadQualityCounts,
         sentCount,
         crmSyncedCount,
         pendingFollowupCount
       }),
-    [approving, creating, crmSyncedCount, currentTask, displayLeads.length, pendingFollowupCount, searching, sentCount]
+    [
+      approving,
+      creating,
+      crmSyncedCount,
+      currentTask,
+      displayLeads.length,
+      leadQualityCounts,
+      pendingFollowupCount,
+      searching,
+      sentCount
+    ]
   );
   const crmRows = useMemo(() => buildCrmRows(displayLeads), [displayLeads]);
   const crmPageCount = Math.max(1, Math.ceil(crmRows.length / crmPageSize));
@@ -555,7 +582,7 @@ export function AiWorkerClient() {
     try {
       const payload = await apiRequest<CreateLeadTaskResponse>("/api/lead-tasks", {
         method: "POST",
-        body: JSON.stringify({ prompt: nextPrompt, targetCount: 50 })
+        body: JSON.stringify({ prompt: nextPrompt, targetCount: 30 })
       });
       const task = normalizeCreatedTask(payload);
       taskStarted = true;
@@ -807,7 +834,7 @@ export function AiWorkerClient() {
                       <th>电话</th>
                       <th>邮箱</th>
                       <th>数据来源</th>
-                      <th>AI 标签</th>
+                      <th>客户简述</th>
                       <th>客户阶段</th>
                       <th>负责人</th>
                       <th>评分</th>
@@ -817,7 +844,7 @@ export function AiWorkerClient() {
                     {crmPageRows.length ? (
                       crmPageRows.map((row) => (
                         <tr key={row.id}>
-                          <td className="leadCompanyCell" title={row.companyName}>{row.companyName}</td>
+                          <td className="leadCompanyCell">{row.companyName}</td>
                           <td>{row.country}</td>
                           <td>{row.industry}</td>
                           <td>{row.phone}</td>
@@ -978,7 +1005,7 @@ function AiWorkerLanding({
                 >
                   <strong>{task.title || "未命名任务"}</strong>
                   <small>
-                    {formatHistoryDate(task.createdAt)} · 候选 {task.leadCount} · 指令 {task.queryCount}
+                    {formatHistoryDate(task.createdAt)} · 主客户 {task.leadCount} · 指令 {task.queryCount}
                   </small>
                   <span className={`aiLandingTaskStatus status-${task.status}`}>{task.status}</span>
                 </button>
@@ -1001,7 +1028,7 @@ function AiWorkerLanding({
               className="aiLandingComposerInput"
               value={prompt}
               onChange={(event) => onPromptChange(event.target.value)}
-              placeholder="例如：帮我找通信设备买家客户，先筛选目标客户，再生成首封开发信"
+              placeholder="例如：帮我找某类产品买家客户，先筛选目标客户，再生成首封开发信"
               aria-label="分配一个任务"
             />
             <div className="aiLandingComposerBottom">
@@ -1187,9 +1214,26 @@ function AiWorkerConversation({
     currentTask?.searchQueries?.reduce((total, query) => total + (query.resultCount ?? 0), 0) ?? rawSearchResults.length;
   const qualifiedCount = leads.filter((lead) => lead.score >= 75).length;
   const running = creating || searching || approving;
-  const activitySteps = buildActivitySteps({ creating, searching, currentTask, searchResult, leads, hasError: Boolean(error) });
-  const activityMetrics = buildActivityMetrics({ currentTask, searchResult, leads });
-  const activityLogs = buildActivityLogs({ creating, searching, currentTask, searchResult, leads, hasError: Boolean(error) });
+  const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
+  const activitySteps = buildActivitySteps({
+    creating,
+    searching,
+    currentTask,
+    searchResult,
+    leads,
+    leadQualityCounts,
+    hasError: Boolean(error)
+  });
+  const activityMetrics = buildActivityMetrics({ currentTask, searchResult, leads, leadQualityCounts });
+  const activityLogs = buildActivityLogs({
+    creating,
+    searching,
+    currentTask,
+    searchResult,
+    leads,
+    leadQualityCounts,
+    hasError: Boolean(error)
+  });
   const [leadPage, setLeadPage] = useState(1);
   const leadPageCount = Math.max(1, Math.ceil(leads.length / leadPageSize));
   const leadStartIndex = (leadPage - 1) * leadPageSize;
@@ -1232,7 +1276,7 @@ function AiWorkerConversation({
         <div className="taskBubble">{prompt}</div>
 
         <p className="agentText">
-          我将先帮你筛选符合要求的通信设备目标客户，再生成邮件触达任务，最后同步到 CRM
+          我将先帮你筛选符合要求的目标客户，再生成邮件触达任务，最后同步到 CRM
           系统并标记标签。当前第一步是筛选目标客户，系统会输出 AI 扩展词、搜索指令和候选客户列表。
         </p>
 
@@ -1250,6 +1294,7 @@ function AiWorkerConversation({
           executedCount={executedCount}
           resultCount={searchResult?.resultCount ?? 0}
           leadCount={leads.length}
+          leadQualityCounts={leadQualityCounts}
           logs={activityLogs}
           hasError={Boolean(error)}
         />
@@ -1332,13 +1377,13 @@ function AiWorkerConversation({
               <span>{searching ? "正在调用 Brave 搜索" : queryCount ? "搜索指令已就绪" : "等待任务创建"}</span>
             </div>
           </div>
-          <div className={leads.length ? "flowRow active" : "flowRow pending"}>
-            <div className={leads.length ? "flowDot" : "flowDot pending"}>{leads.length ? "✓" : "2"}</div>
+          <div className={leadQualityCounts.rawEvidence ? "flowRow active" : "flowRow pending"}>
+            <div className={leadQualityCounts.rawEvidence ? "flowDot" : "flowDot pending"}>{leadQualityCounts.rawEvidence ? "✓" : "2"}</div>
             <div>
-              <strong>候选客户调用结果</strong>
+              <strong>线索清洗结果</strong>
               <span>
                 {searchResult
-                  ? `执行 ${searchResult.executedQueries} 条 query，新增 ${searchResult.createdCandidates} 家，去重/跳过 ${searchResult.skippedCandidates} 条结果`
+                  ? formatLeadQualitySummary(leadQualityCounts)
                   : "等待首轮搜索结果"}
               </span>
             </div>
@@ -1369,7 +1414,7 @@ function AiWorkerConversation({
                 <tr>
                   <th>标题</th>
                   <th>域名</th>
-                  <th>国家/地区</th>
+                  <th>来源 query 国家</th>
                   <th>来源查询</th>
                   <th>状态</th>
                 </tr>
@@ -1380,7 +1425,7 @@ function AiWorkerConversation({
                     <tr key={result.id}>
                       <td className="rawResultTitle">{result.title}</td>
                       <td>{result.domain}</td>
-                      <td>{result.country}</td>
+                      <td title="仅代表这条搜索指令的目标国家，不代表客户官网真实国家。">{result.country}</td>
                       <td className="rawResultQuery">{result.query}</td>
                       <td>{result.status}</td>
                     </tr>
@@ -1408,8 +1453,9 @@ function AiWorkerConversation({
                   <th>公司名称</th>
                   <th>推荐指数</th>
                   <th>数据来源</th>
+                  <th>来源页</th>
                   <th>国家/地区</th>
-                  <th>AI 标签</th>
+                  <th>客户简述</th>
                   <th>电话</th>
                   <th>邮箱</th>
                   <th>官网</th>
@@ -1429,25 +1475,41 @@ function AiWorkerConversation({
                           onClick={() => onSelectLead(lead.id)}
                         />
                       </td>
-                      <td className="leadCompanyCell" title={lead.companyName}>{lead.companyName}</td>
+                      <td className="leadCompanyCell">{lead.companyName}</td>
                       <td>
                         <span className="stars">{scoreStars(lead.score)}</span>
                       </td>
                       <td>
                         {lead.source} <span className="realBadge">实时</span>
                       </td>
-                      <td>{lead.country}</td>
-                      <td>{lead.tag}</td>
-                      <td>{lead.phone}</td>
-                      <td>{lead.email}</td>
-                      <td>{lead.website}</td>
-                      <td>{lead.social}</td>
+                      <td className="leadSourceCell" title={lead.sourceUrl}>
+                        {lead.sourceUrl ? (
+                          <a
+                            className="leadSourceLink"
+                            href={lead.sourceUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            aria-label={`打开来源页 ${lead.sourceUrl}`}
+                          >
+                            <span>{lead.sourceLabel}</span>
+                            <ExternalLink size={14} aria-hidden="true" />
+                          </a>
+                        ) : (
+                          "-"
+                        )}
+                      </td>
+                      <td title={lead.country}>{lead.country}</td>
+                      <td title={lead.tag}>{lead.tag}</td>
+                      <td title={lead.phone}>{lead.phone}</td>
+                      <td title={lead.email}>{lead.email}</td>
+                      <td title={lead.website}>{lead.website}</td>
+                      <td title={lead.social}>{lead.social}</td>
                       <td>{lead.address}</td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td className="leadEmptyCell" colSpan={11}>
+                    <td className="leadEmptyCell" colSpan={12}>
                       {searching ? "正在搜索并清洗候选客户..." : "暂无候选客户。创建任务后会自动执行本轮全部搜索指令。"}
                     </td>
                   </tr>
@@ -1572,7 +1634,7 @@ function AiWorkerConversation({
                 </td>
                 <td>{leads.length}</td>
                 <td>{sentCount}封/0封</td>
-                <td>中国通信设备工厂产品推荐</td>
+                <td>中国 B2B 工厂产品推荐</td>
                 <td>{currentTask?.status ?? "pending"}</td>
                 <td>
                   <button className="tableSendBtn" type="button" data-open-mail="true" onClick={onOpenMail} disabled={running || !leads.length}>
@@ -1633,6 +1695,7 @@ type AgentSearchActivityProps = {
   executedCount: number;
   resultCount: number;
   leadCount: number;
+  leadQualityCounts: LeadQualityCounts;
   logs: ActivityLog[];
   hasError: boolean;
 };
@@ -1645,6 +1708,7 @@ function AgentSearchActivity({
   executedCount,
   resultCount,
   leadCount,
+  leadQualityCounts,
   logs,
   hasError
 }: AgentSearchActivityProps) {
@@ -1680,15 +1744,19 @@ function AgentSearchActivity({
 
   const headline = active
     ? activeMessages[messageIndex]
-    : resultCount
-      ? `本轮搜索已完成，命中 ${resultCount} 条原始结果`
+    : leadQualityCounts.rawEvidence
+      ? `${leadQualityCounts.rawEvidence} 条原始候选证据，${leadQualityCounts.main} 条主客户`
+      : resultCount
+      ? `本轮搜索已完成，命中 ${resultCount} 条 Brave 原始结果`
       : leadCount
-        ? `已有 ${leadCount} 家候选客户写入列表`
+        ? `已有 ${leadCount} 条主客户写入列表`
         : hasError
           ? "搜索接口失败，任务已保留"
       : "等待搜索任务启动";
   const subline = active
-    ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令，候选客户会在清洗后写入下方表格。`
+    ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令，清洗后会拆分为主客户、待国家复核和拒绝。`
+    : leadQualityCounts.rawEvidence
+      ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；${formatLeadQualitySummary(leadQualityCounts)}。`
     : resultCount
       ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令。`
     : leadCount
@@ -1943,15 +2011,15 @@ function formatTaskProgressStatus(task: LeadTask, result: SearchRunResult) {
   if (isTaskSearching(task)) {
     const queryCount = task.searchQueries?.length ?? 0;
     const runningText = result.runningQueries ? `，${result.runningQueries} 条正在处理` : "";
-    return `后端正在${activeStepLabel(task, searchStepNames) ?? "执行搜索"}：已完成 ${result.executedQueries}/${queryCount || "-"} 条 query${runningText}，已命中 ${result.resultCount} 条原始结果，候选 ${result.createdCandidates} 家。`;
+    return `后端正在${activeStepLabel(task, searchStepNames) ?? "执行搜索"}：已完成 ${result.executedQueries}/${queryCount || "-"} 条 query${runningText}，已命中 ${result.resultCount} 条 Brave 原始结果；${formatLeadQualitySummary(summarizeLeadQualityCounts(task))}。`;
   }
 
   if (task.status === "paused") {
-    return `本轮搜索已完成：执行 ${result.executedQueries} 条 query，命中 ${result.resultCount} 条结果，新增 ${result.createdCandidates} 家候选客户，等待人工审核。`;
+    return `本轮搜索已完成：执行 ${result.executedQueries} 条 query，命中 ${result.resultCount} 条 Brave 原始结果；${formatLeadQualitySummary(summarizeLeadQualityCounts(task))}。`;
   }
 
   if (task.status === "completed") {
-    return `任务已完成：执行 ${result.executedQueries} 条 query，新增 ${result.createdCandidates} 家候选客户。`;
+    return `任务已完成：执行 ${result.executedQueries} 条 query；${formatLeadQualitySummary(summarizeLeadQualityCounts(task))}。`;
   }
 
   return "任务已创建，后端会自动生成搜索指令并执行本轮全部搜索。";
@@ -2118,6 +2186,7 @@ function buildActivitySteps({
   currentTask,
   searchResult,
   leads,
+  leadQualityCounts,
   hasError
 }: {
   creating: boolean;
@@ -2125,6 +2194,7 @@ function buildActivitySteps({
   currentTask: LeadTask | null;
   searchResult: SearchRunResult | null;
   leads: DisplayLead[];
+  leadQualityCounts: LeadQualityCounts;
   hasError: boolean;
 }): ActivityStep[] {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
@@ -2159,9 +2229,9 @@ function buildActivitySteps({
     {
       title: "清洗候选",
       detail: searchResult
-        ? `新增 ${searchResult.createdCandidates} 家，去重/跳过 ${searchResult.skippedCandidates} 条`
+        ? `${leadQualityCounts.rawEvidence} 条证据，${leadQualityCounts.main} 条主客户，${leadQualityCounts.needsCountryReview} 条待国家复核`
         : hasReturnedLeads
-          ? `已有 ${leads.length} 家进入表格`
+          ? `已有 ${leads.length} 条主客户进入表格`
         : searching
           ? "标记社媒/文章/电商风险"
           : hasError
@@ -2171,7 +2241,7 @@ function buildActivitySteps({
     },
     {
       title: "ICP 评分",
-      detail: leads.length ? `已产出 ${leads.length} 家，${qualifiedCount} 家 75+` : searching ? "正在评分和归因" : "等待清洗",
+      detail: leads.length ? `已产出 ${leads.length} 条主客户，${qualifiedCount} 条 75+` : searching ? "正在评分和归因" : "等待清洗",
       state: leads.length ? "done" : searching ? "active" : "pending"
     }
   ];
@@ -2180,11 +2250,13 @@ function buildActivitySteps({
 function buildActivityMetrics({
   currentTask,
   searchResult,
-  leads
+  leads,
+  leadQualityCounts
 }: {
   currentTask: LeadTask | null;
   searchResult: SearchRunResult | null;
   leads: DisplayLead[];
+  leadQualityCounts: LeadQualityCounts;
 }): ActivityMetric[] {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
   const executedCount = currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ?? 0;
@@ -2202,13 +2274,15 @@ function buildActivityMetrics({
       tone: "orange"
     },
     {
-      label: "新增候选",
-      value: searchResult ? String(searchResult.createdCandidates) : String(leads.length),
+      label: "主客户",
+      value: String(leadQualityCounts.main || leads.length),
       tone: "green"
     },
     {
-      label: failedQueries ? "失败指令" : "已跳过",
-      value: searchResult ? String(failedQueries || searchResult.skippedCandidates) : "0",
+      label: failedQueries ? "失败指令" : "待复核/拒绝",
+      value: searchResult
+        ? String(failedQueries || leadQualityCounts.needsCountryReview + leadQualityCounts.rejected)
+        : String(leadQualityCounts.needsCountryReview + leadQualityCounts.rejected),
       tone: failedQueries ? "orange" : "gray"
     }
   ];
@@ -2220,6 +2294,7 @@ function buildActivityLogs({
   currentTask,
   searchResult,
   leads,
+  leadQualityCounts,
   hasError
 }: {
   creating: boolean;
@@ -2227,6 +2302,7 @@ function buildActivityLogs({
   currentTask: LeadTask | null;
   searchResult: SearchRunResult | null;
   leads: DisplayLead[];
+  leadQualityCounts: LeadQualityCounts;
   hasError: boolean;
 }): ActivityLog[] {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
@@ -2267,9 +2343,9 @@ function buildActivityLogs({
     {
       title: "数据搜索完成",
       detail: searchResult
-        ? `新增 ${searchResult.createdCandidates} 家，去重/跳过 ${searchResult.skippedCandidates} 条`
+        ? formatLeadQualitySummary(leadQualityCounts)
         : hasLeads
-          ? `${leads.length} 家候选已写入列表`
+          ? `${leads.length} 条主客户已写入列表`
           : hasError
             ? "本轮未写入候选"
           : "等待候选客户",
@@ -2277,7 +2353,7 @@ function buildActivityLogs({
     },
     {
       title: "检索结果分析",
-      detail: hasLeads ? `${leads.length} 家候选，${qualifiedCount} 家 ICP 75+` : searching ? "正在清洗、去重和评分" : hasError ? "等待重新搜索" : "等待结果分析",
+      detail: hasLeads ? `${leads.length} 条主客户，${qualifiedCount} 条 ICP 75+` : searching ? "正在清洗、去重和评分" : hasError ? "等待重新搜索" : "等待结果分析",
       state: hasLeads ? "done" : searching ? "active" : hasError ? "failed" : "pending"
     }
   ];
@@ -2372,8 +2448,7 @@ function buildDisplayLeads(task: LeadTask | null): DisplayLead[] {
   const targetMarkets = taskTargetMarkets(task);
   return (task?.leadCandidates ?? [])
     .filter((lead) => {
-      const score = lead.icpScore?.score ?? 0;
-      return lead.status !== "rejected" && score >= 50;
+      return isDisplayableLeadCandidate(lead);
     })
     .map((lead) => ({ displayLead: buildDisplayLead(lead), priority: displayLeadPriority(lead, targetMarkets) }))
     .sort((left, right) => {
@@ -2389,29 +2464,194 @@ function buildDisplayLeads(task: LeadTask | null): DisplayLead[] {
     .map(({ displayLead }) => displayLead);
 }
 
+function isMainLeadStatus(status: string | undefined) {
+  return ["review", "qualified", "approved", "contacted", "email_sent"].includes(status ?? "");
+}
+
+function isDisplayableLeadCandidate(lead: LeadCandidate) {
+  const score = lead.icpScore?.score ?? 0;
+  return (
+    isMainLeadStatus(lead.status) &&
+    score >= 50 &&
+    (lead.countryConfidence === "high" || lead.countryConfidence === "medium") &&
+    !lead.countryConflict
+  );
+}
+
+function summarizeLeadQualityCounts(task: LeadTask | null): LeadQualityCounts {
+  const candidates = task?.leadCandidates ?? [];
+  const main = candidates.filter(isDisplayableLeadCandidate).length;
+  const rejected = candidates.filter((lead) => lead.status === "rejected").length;
+  const needsCountryReview = candidates.filter(
+    (lead) =>
+      lead.status !== "rejected" &&
+      !isDisplayableLeadCandidate(lead) &&
+      (lead.status === "needs_country_review" ||
+        lead.status === "country_conflict_review" ||
+        lead.countryConflict ||
+        lead.countryConfidence === "low" ||
+        lead.countryConfidence === "unknown")
+  ).length;
+  const rawEvidence = candidates.length;
+  const other = Math.max(rawEvidence - main - rejected - needsCountryReview, 0);
+
+  return {
+    rawEvidence,
+    main,
+    needsCountryReview,
+    rejected,
+    other
+  };
+}
+
+function formatLeadQualitySummary(counts: LeadQualityCounts) {
+  const parts = [
+    `${counts.rawEvidence} 条原始候选证据`,
+    `${counts.main} 条主客户`,
+    `${counts.needsCountryReview} 条待国家复核`,
+    `${counts.rejected} 条拒绝`
+  ];
+  if (counts.other) {
+    parts.push(`${counts.other} 条其他待处理`);
+  }
+
+  return parts.join("，");
+}
+
 function buildDisplayLead(lead: LeadCandidate): DisplayLead {
-  const email = formatContactValues(lead.contacts?.filter((contact) => contact.type === "email").map((contact) => contact.value));
-  const phone = formatContactValues(lead.contacts?.filter((contact) => contact.type === "phone").map((contact) => contact.value));
-  const social = formatContactValues(lead.contacts?.filter((contact) => contact.type === "social").map((contact) => contact.value));
+  const email = formatEmailContacts(lead.contacts?.filter((contact) => contact.type === "email").map((contact) => contact.value));
+  const phone = formatPhoneContacts(lead.contacts?.filter((contact) => contact.type === "phone").map((contact) => contact.value));
+  const social = formatSocialProfiles(lead.contacts?.filter((contact) => contact.type === "social").map((contact) => contact.value));
+  const storedCountry = formatDisplayCountry(lead.inferredCountry ?? lead.country);
+  const contactCountry = inferCountryFromLeadContacts(lead.contacts);
+  const country = chooseDisplayCountry(storedCountry, contactCountry) || "-";
   const score = lead.icpScore?.score ?? 0;
   const grade = lead.icpScore?.grade ? `${lead.icpScore.grade} ICP` : "待评分";
-  const reason = firstIcpReason(lead.icpScore?.reasons);
+  const sourceUrl = lead.sourceUrl ?? lead.website ?? "";
 
   return {
     id: lead.id,
-    companyName: lead.companyName || "Unknown Company",
+    companyName: displayCompanyName(lead),
     score,
     source: lead.sourceUrl ? "Brave 搜索" : "AI 筛选",
-    country: lead.country ?? "-",
-    tag: reason || grade,
+    sourceUrl,
+    sourceLabel: formatSourceLinkLabel(sourceUrl),
+    country,
+    tag: buildCustomerBrief(lead) || grade,
     phone: phone || "-",
     email: email || "-",
     website: formatWebsite(lead.website ?? lead.sourceUrl),
-    social: social ? social.split(" ; ").map((value) => formatWebsite(value)).join(" ; ") : "-",
-    address: lead.country ?? "-",
+    social: social || "-",
+    address: country,
     stage: displayLeadStage(lead),
     raw: lead
   };
+}
+
+function chooseDisplayCountry(storedCountry: string, contactCountry: string) {
+  if (!storedCountry) {
+    return contactCountry;
+  }
+
+  if (contactCountry && normalizeDisplayMarket(storedCountry) !== normalizeDisplayMarket(contactCountry)) {
+    return contactCountry;
+  }
+
+  return storedCountry;
+}
+
+function displayCompanyName(lead: LeadCandidate) {
+  const currentName = cleanupDisplayCompanyName(lead.companyName);
+  const domainName = companyNameFromUrl(lead.website ?? lead.sourceUrl);
+  const attributedName = extractDisplayAttributedCompanyName(currentName);
+
+  if (attributedName) {
+    return attributedName;
+  }
+
+  if (isLikelyDisplayCompanyName(currentName, domainName)) {
+    return currentName;
+  }
+
+  return domainName || currentName || "Unknown Company";
+}
+
+function extractDisplayAttributedCompanyName(value: string) {
+  const match = value.match(/\bfrom\s+([A-Z0-9][^|:]{2,80})$/i);
+  if (!match?.[1]) {
+    return "";
+  }
+
+  return cleanupDisplayCompanyName(match[1]);
+}
+
+function cleanupDisplayCompanyName(value: string | null | undefined) {
+  return (value ?? "")
+    .replace(/\b(home|official site|website|about us|contact us|logo)\b/gi, "")
+    .replace(/^\s*(?:welcome to|official)\s+/i, "")
+    .replace(/\s+\b(?:homepage|home page)\b$/i, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[|:\\\-\s]+|[|:\\\-\s]+$/g, "")
+    .trim();
+}
+
+function isLikelyDisplayCompanyName(value: string, domainName: string) {
+  const name = cleanupDisplayCompanyName(value);
+  const lower = name.toLowerCase();
+  if (!name || name.length > 72 || looksLikeDisplayProductTitle(name)) {
+    return false;
+  }
+
+  if (domainName && normalizeDisplayCompanyKey(name) === normalizeDisplayCompanyKey(domainName)) {
+    return true;
+  }
+
+  if (displayCompanyEntityTerms.some((term) => lower.includes(term))) {
+    return true;
+  }
+
+  return /^[A-Z0-9][A-Za-z0-9&().' ]{2,48}$/.test(name);
+}
+
+function looksLikeDisplayProductTitle(value: string) {
+  const lower = value.toLowerCase();
+  return (
+    containsAny(lower, displayProductTitleTerms) ||
+    /\b(?:\d{2,5}\s?w|\d{2,5}w|48v|24v|85-300|vac|vdc|sfp\+?|100g|10g)\b/i.test(value) ||
+    (containsAny(lower, displayTelecomBrandTerms) &&
+      containsAny(lower, ["rectifier", "module", "board", "rru", "bbu", "aau", "networking equipment", "hardware repair"]))
+  );
+}
+
+function companyNameFromUrl(value: string | null | undefined) {
+  const domain = domainFromUrl(value);
+  if (!domain || domain === "-") {
+    return "";
+  }
+
+  const label = domain.split(".")[0] ?? domain;
+  return formatDomainLabelAsCompany(label);
+}
+
+function formatDomainLabelAsCompany(label: string) {
+  const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (displayDomainCompanyNameOverrides[normalized]) {
+    return displayDomainCompanyNameOverrides[normalized];
+  }
+
+  return label
+    .replace(/[-_]+/g, " ")
+    .replace(/([a-z])(\d)/g, "$1 $2")
+    .replace(/(\d)([a-z])/g, "$1 $2")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => (displayDomainAcronymTerms.has(part.toLowerCase()) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join(" ");
+}
+
+function normalizeDisplayCompanyKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function taskTargetMarkets(task: LeadTask | null) {
@@ -2569,6 +2809,63 @@ const displaySpecificProductTerms = [
   "eltek"
 ];
 
+const displayProductTitleTerms = [
+  "private 5g",
+  "critical networks",
+  "hardware repair",
+  "repair service",
+  "networking equipment",
+  "telecom networking equipment",
+  "rectifier",
+  "rectifier module",
+  "flatpack",
+  "power module",
+  "baseband",
+  "radio unit",
+  "optical module",
+  "sfp",
+  "datasheet",
+  "price",
+  "buy",
+  "stock",
+  "product",
+  "products"
+];
+
+const displayTelecomBrandTerms = ["huawei", "zte", "ericsson", "nokia", "alcatel-lucent", "eltek"];
+
+const displayCompanyEntityTerms = [
+  "trading",
+  "general trading",
+  "llc",
+  "l.l.c",
+  "fze",
+  "fzc",
+  "co.",
+  "company",
+  "limited",
+  "ltd",
+  "solutions",
+  "technologies",
+  "electronics",
+  "communications",
+  "systems",
+  "services",
+  "networks",
+  "group"
+];
+
+const displayDomainCompanyNameOverrides: Record<string, string> = {
+  ats4solutions: "ATS 4 Solutions",
+  hctgroup: "HCT Group",
+  ispsupplies: "ISP Supplies",
+  mfcomm: "MF Communications",
+  screamerelectronicservices: "Screamer Electronic Services",
+  tempestns: "Tempest"
+};
+
+const displayDomainAcronymTerms = new Set(["isp", "hct", "ats", "mf", "usa", "uk", "uae"]);
+
 const displayDiscoveryTerms = [
   "mcc & mnc",
   "mobile network code",
@@ -2637,6 +2934,101 @@ const displayMacroMarkets = new Set([
   "south america"
 ]);
 
+const countryAcronyms = new Set(["UAE", "USA", "UK", "US", "EU"]);
+
+const countryDisplayAliases = new Map<string, string>([
+  ["UNITED STATES OF AMERICA", "United States"],
+  ["UNITED STATES", "United States"],
+  ["UNITED KINGDOM", "United Kingdom"],
+  ["GREAT BRITAIN", "United Kingdom"],
+  ["BRITAIN", "United Kingdom"]
+]);
+
+const countryLowercaseWords = new Set(["and", "of", "the"]);
+
+const phoneCountryCodes: Array<[string, string]> = [
+  ["971", "UAE"],
+  ["966", "Saudi Arabia"],
+  ["974", "Qatar"],
+  ["968", "Oman"],
+  ["965", "Kuwait"],
+  ["973", "Bahrain"],
+  ["44", "United Kingdom"],
+  ["55", "Brazil"],
+  ["61", "Australia"],
+  ["1", "United States"],
+  ["49", "Germany"],
+  ["33", "France"],
+  ["39", "Italy"],
+  ["34", "Spain"],
+  ["48", "Poland"],
+  ["234", "Nigeria"],
+  ["27", "South Africa"],
+  ["254", "Kenya"],
+  ["20", "Egypt"],
+  ["212", "Morocco"],
+  ["233", "Ghana"],
+  ["91", "India"],
+  ["63", "Philippines"],
+  ["62", "Indonesia"],
+  ["60", "Malaysia"],
+  ["65", "Singapore"],
+  ["66", "Thailand"],
+  ["84", "Vietnam"],
+  ["52", "Mexico"],
+  ["57", "Colombia"],
+  ["56", "Chile"],
+  ["51", "Peru"],
+  ["90", "Turkey"],
+  ["7", "Russia"]
+];
+
+const domainCountrySuffixes: Array<[string, string]> = [
+  [".com.au", "Australia"],
+  [".co.uk", "United Kingdom"],
+  [".ae", "UAE"],
+  [".sa", "Saudi Arabia"],
+  [".qa", "Qatar"],
+  [".om", "Oman"],
+  [".kw", "Kuwait"],
+  [".bh", "Bahrain"],
+  [".br", "Brazil"],
+  [".au", "Australia"],
+  [".ca", "Canada"],
+  [".uk", "United Kingdom"],
+  [".de", "Germany"],
+  [".fr", "France"],
+  [".it", "Italy"],
+  [".es", "Spain"],
+  [".pl", "Poland"],
+  [".ng", "Nigeria"],
+  [".za", "South Africa"],
+  [".ke", "Kenya"],
+  [".eg", "Egypt"],
+  [".ma", "Morocco"],
+  [".gh", "Ghana"],
+  [".in", "India"],
+  [".ph", "Philippines"],
+  [".id", "Indonesia"],
+  [".my", "Malaysia"],
+  [".sg", "Singapore"],
+  [".th", "Thailand"],
+  [".vn", "Vietnam"],
+  [".mx", "Mexico"],
+  [".tr", "Turkey"],
+  [".ru", "Russia"]
+];
+
+const socialProfileLabels: Record<string, string> = {
+  linkedin: "LinkedIn",
+  x: "X",
+  facebook: "Facebook",
+  instagram: "Instagram",
+  whatsapp: "WhatsApp"
+};
+
+const socialProfileOrder = ["linkedin", "x", "facebook", "instagram", "whatsapp"];
+
 function displayLeadStage(lead: LeadCandidate) {
   if (hasSentEmail(lead)) {
     return "已触达";
@@ -2677,12 +3069,109 @@ function formatMailSentStatus(result: MailSendResult) {
   return "邮件已通过 Gmail 发送。";
 }
 
+type IcpReasonPayload = {
+  reasons?: unknown;
+  summary?: unknown;
+  aiEvaluation?: {
+    resultType?: unknown;
+    buyerType?: unknown;
+    matchedSignals?: unknown;
+  } | null;
+};
+
+function buildCustomerBrief(lead: LeadCandidate) {
+  const payload = icpReasonPayload(lead.icpScore?.reasons);
+  const aiBrief = customerBriefFromAi(payload?.aiEvaluation);
+  if (aiBrief) return aiBrief;
+
+  const reasonText = firstIcpReason(lead.icpScore?.reasons);
+  const summary = typeof payload?.summary === "string" ? payload.summary : "";
+  const matchedSignals = Array.isArray(payload?.aiEvaluation?.matchedSignals)
+    ? payload.aiEvaluation.matchedSignals.filter((value): value is string => typeof value === "string")
+    : [];
+  const text = [lead.companyName, lead.website, lead.sourceUrl, summary, reasonText, ...matchedSignals]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (containsAny(text, ["rfq", "request for quotation", "tender", "procurement", "vendor registration", "supplier registration"])) {
+    return "采购/RFQ 线索";
+  }
+  if (containsAny(text, ["factory", "industrial", "machine", "equipment", "component", "parts"]) && !containsAny(text, ["telecom", "base station", "fiber", "olt", "sfp", "tower", "isp", "wisp"])) {
+    return "行业设备客户";
+  }
+  if (containsAny(text, ["telecom power", "rectifier", "dc power", "power system", "cell site power"])) {
+    return "电源/模块维护客户";
+  }
+  if (containsAny(text, ["ftth", "olt", "fiber network", "optical transport", "transmission network", "sfp"])) {
+    return "光纤/FTTH 运维客户";
+  }
+  if (containsAny(text, ["tower maintenance", "towerco", "cell tower", "site maintenance"])) {
+    return "铁塔/站点维护客户";
+  }
+  if (containsAny(text, ["base station", "ran maintenance", "bts", "radio access network", "field maintenance"])) {
+    return "基站/RAN 维护客户";
+  }
+  if (containsAny(text, ["mobile network operator", "telecom operator", "network operator", "isp", "wisp"])) {
+    return "运营商/ISP 客户";
+  }
+  if (containsAny(text, ["system integrator", "integrator", "network contractor", "infrastructure contractor", "engineering contractor"])) {
+    return "工程/系统集成客户";
+  }
+  if (containsAny(text, ["repair", "maintenance service", "field service"])) {
+    return "维修维护服务客户";
+  }
+  if (containsAny(text, ["supplier", "distributor", "reseller", "stockist", "wholesale"])) {
+    return "渠道商待复核";
+  }
+  if (containsAny(text, ["contact page", "official", "company website"])) {
+    return "官网线索";
+  }
+
+  return "潜在客户线索";
+}
+
+function customerBriefFromAi(aiEvaluation: IcpReasonPayload["aiEvaluation"]) {
+  if (!aiEvaluation) return "";
+
+  const resultType = typeof aiEvaluation.resultType === "string" ? aiEvaluation.resultType : "";
+  const buyerType = typeof aiEvaluation.buyerType === "string" ? aiEvaluation.buyerType.toLowerCase() : "";
+
+  if (["directory", "content_article", "job_page", "market_report", "irrelevant"].includes(resultType)) {
+    return "资料页待复核";
+  }
+  if (resultType === "procurement_intelligence") {
+    return "采购情报线索";
+  }
+  if (resultType === "supplier_or_competitor") {
+    return "供应商/竞品待复核";
+  }
+  if (containsAny(buyerType, ["procurement", "rfq", "tender", "buyer"])) return "采购/RFQ 线索";
+  if (containsAny(buyerType, ["power", "rectifier"])) return "电源/模块维护客户";
+  if (containsAny(buyerType, ["ftth", "fiber", "optical", "olt", "sfp"])) return "光纤/FTTH 运维客户";
+  if (containsAny(buyerType, ["tower", "towerco"])) return "铁塔/站点维护客户";
+  if (containsAny(buyerType, ["base station", "ran", "bts", "field service"])) return "基站/RAN 维护客户";
+  if (containsAny(buyerType, ["operator", "isp", "wisp"])) return "运营商/ISP 客户";
+  if (containsAny(buyerType, ["integrator", "contractor", "engineering"])) return "工程/系统集成客户";
+  if (containsAny(buyerType, ["maintenance", "repair", "service"])) return "维修维护服务客户";
+  if (containsAny(buyerType, ["supplier", "distributor", "reseller", "stockist", "wholesale"])) return "渠道商待复核";
+  if (resultType === "target_buyer") return "目标买家客户";
+  if (resultType === "possible_buyer") return "潜在买家客户";
+
+  return "";
+}
+
+function icpReasonPayload(reasons: unknown): IcpReasonPayload | null {
+  return reasons && typeof reasons === "object" ? (reasons as IcpReasonPayload) : null;
+}
+
 function firstIcpReason(reasons: unknown) {
-  if (!reasons || typeof reasons !== "object") {
+  const payload = icpReasonPayload(reasons);
+  if (!payload) {
     return "";
   }
 
-  const list = (reasons as { reasons?: unknown }).reasons;
+  const list = payload.reasons;
   return Array.isArray(list) && typeof list[0] === "string" ? list[0] : "";
 }
 
@@ -2712,6 +3201,7 @@ function buildFlowRows(
     searching: boolean;
     approving: boolean;
     leadCount: number;
+    leadQualityCounts: LeadQualityCounts;
     sentCount: number;
     crmSyncedCount: number;
     pendingFollowupCount: number;
@@ -2736,11 +3226,13 @@ function buildFlowRows(
       description: state.searching
         ? "正在执行搜索并清洗候选客户"
         : state.leadCount
-          ? `已生成 ${state.leadCount} 家候选客户`
+          ? `${state.leadQualityCounts.main} 条主客户，${state.leadQualityCounts.needsCountryReview} 条待国家复核`
           : task
-            ? "搜索指令已就绪，等待返回候选客户"
+            ? state.leadQualityCounts.rawEvidence
+              ? formatLeadQualitySummary(state.leadQualityCounts)
+              : "搜索指令已就绪，等待返回候选客户"
             : "等待任务规划完成",
-      state: state.leadCount ? "done" : task || state.searching ? "active" : "pending"
+      state: state.leadCount || state.leadQualityCounts.rawEvidence ? "done" : task || state.searching ? "active" : "pending"
     },
     {
       title: "邮件触达",
@@ -2785,8 +3277,220 @@ function formatWebsite(value: string | null | undefined) {
   }
 }
 
-function formatContactValues(values: string[] | undefined) {
-  return unique(values ?? []).join(" ; ");
+function formatSourceLinkLabel(value: string | null | undefined) {
+  if (!value) return "-";
+
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./, "");
+    const path = url.pathname.replace(/\/$/, "");
+    if (!path || path === "/") {
+      return host;
+    }
+
+    const joined = `${host}${path}`;
+    return joined.length > 42 ? `${joined.slice(0, 39)}...` : joined;
+  } catch {
+    return formatWebsite(value);
+  }
+}
+
+function formatDisplayCountry(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "-") return "";
+
+  const upper = trimmed.toUpperCase();
+  if (countryAcronyms.has(upper)) return upper;
+  return titleCaseCountry(countryDisplayAliases.get(upper) ?? trimmed);
+}
+
+function inferCountryFromLeadContacts(contacts: LeadContact[] | undefined) {
+  const countries = unique(
+    (contacts ?? [])
+      .map((contact) => inferCountryFromContactValue(contact.value, contact.type))
+      .filter((value): value is string => Boolean(value))
+  );
+
+  return countries.length === 1 ? countries[0] ?? "" : "";
+}
+
+function inferCountryFromContactValue(value: string, type: string) {
+  if (type === "phone") {
+    return inferCountryFromPhoneValue(value);
+  }
+
+  return inferCountryFromDomainValue(value);
+}
+
+function inferCountryFromPhoneValue(phone: string) {
+  const trimmed = phone.trim();
+  const digits = trimmed.replace(/\D/g, "");
+  const internationalDigits = trimmed.startsWith("+") ? digits : digits.startsWith("00") ? digits.slice(2) : "";
+
+  if (internationalDigits) {
+    const match = phoneCountryCodes.find(([code]) => internationalDigits.startsWith(code));
+    return match?.[1] ?? "";
+  }
+
+  if (!digits.startsWith("0") && /^\(?[2-9]\d{2}\)?[\s.-]\d{3}[\s.-]\d{4}$/.test(trimmed)) {
+    return "United States";
+  }
+
+  return "";
+}
+
+function inferCountryFromDomainValue(value: string) {
+  const host = hostFromContactValue(value);
+  if (!host) return "";
+
+  const match = domainCountrySuffixes.find(([suffix]) => host === suffix.slice(1) || host.endsWith(suffix));
+  return match?.[1] ?? "";
+}
+
+function hostFromContactValue(value: string) {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return "";
+
+  if (trimmed.includes("@") && !trimmed.startsWith("http")) {
+    return trimmed.split("@").pop()?.replace(/[),.;:]+$/g, "") ?? "";
+  }
+
+  try {
+    return new URL(trimmed.startsWith("http") ? trimmed : `https://${trimmed}`).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function titleCaseCountry(value: string) {
+  return value
+    .toLowerCase()
+    .split(/\s+/)
+    .map((part) => (countryLowercaseWords.has(part) ? part : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join(" ");
+}
+
+function formatSocialProfiles(values: string[] | undefined) {
+  const profiles: Array<{ key: string; label: string }> = [];
+
+  for (const value of values ?? []) {
+    const key = socialProfileKey(value);
+    if (!key || profiles.some((profile) => profile.key === key)) continue;
+    profiles.push({ key, label: socialProfileLabels[key] ?? formatWebsite(value) });
+  }
+
+  return profiles
+    .sort((left, right) => socialProfilePriority(left.key) - socialProfilePriority(right.key))
+    .slice(0, 2)
+    .map((profile) => profile.label)
+    .join(" ; ");
+}
+
+function socialProfileKey(value: string) {
+  const host = hostFromContactValue(value);
+  if (!host) return "";
+
+  if (host.includes("linkedin.com")) return "linkedin";
+  if (host.includes("twitter.com") || host.includes("x.com")) return "x";
+  if (host.includes("facebook.com")) return "facebook";
+  if (host.includes("instagram.com")) return "instagram";
+  if (host.includes("wa.me") || host.includes("whatsapp.com")) return "whatsapp";
+  return host;
+}
+
+function socialProfilePriority(key: string) {
+  const priority = socialProfileOrder.indexOf(key);
+  return priority === -1 ? socialProfileOrder.length : priority;
+}
+
+function formatPhoneContacts(values: string[] | undefined) {
+  return dedupeDisplayPhones(unique(values ?? []).filter(isDisplayPhoneValue))
+    .slice(0, 4)
+    .join(" ; ");
+}
+
+function dedupeDisplayPhones(values: string[]) {
+  const internationalKeys = values.map(internationalPhoneKey).filter(Boolean);
+  const seen = new Set<string>();
+  const phones: string[] = [];
+
+  for (const value of values) {
+    const key = phoneDisplayKey(value, internationalKeys);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    phones.push(value);
+  }
+
+  return phones;
+}
+
+function phoneDisplayKey(value: string, internationalKeys: string[]) {
+  const trimmed = value.trim();
+  const digits = digitsOnly(trimmed);
+  const internationalKey = internationalPhoneKey(trimmed);
+  if (internationalKey) {
+    return internationalKey;
+  }
+
+  if (digits.startsWith("0") && digits.length >= 9) {
+    const localDigits = digits.slice(1);
+    const matchingInternational = internationalKeys.find((key) => key.endsWith(localDigits));
+    if (matchingInternational) {
+      return matchingInternational;
+    }
+  }
+
+  return digits;
+}
+
+function internationalPhoneKey(value: string) {
+  const trimmed = value.trim();
+  const digits = digitsOnly(trimmed);
+  if (trimmed.startsWith("+")) return digits;
+  if (trimmed.startsWith("00")) return digits.slice(2);
+  return "";
+}
+
+function isDisplayPhoneValue(value: string) {
+  const trimmed = value.trim();
+  const digits = digitsOnly(trimmed);
+  if (digits.length < 8 || digits.length > 16) return false;
+  if (trimmed.startsWith("00") && digits.startsWith("000")) return false;
+  if (hasRepeatedPhoneChunk(trimmed)) return false;
+  if (/^\d{3}[-/.]\d{4}[-/.]\d{3}$/.test(trimmed)) return false;
+  if (/^\d{2,4}\s+\d{9,}$/.test(trimmed)) return false;
+
+  return (
+    trimmed.startsWith("+") ||
+    trimmed.startsWith("00") ||
+    /^\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}$/.test(trimmed) ||
+    /^0\d{2,4}[\s.-]\d{3}[\s.-]\d{4}$/.test(trimmed) ||
+    /^0\d{2,5}[\s.-]\d{5,9}$/.test(trimmed)
+  );
+}
+
+function hasRepeatedPhoneChunk(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  const chunks = normalized.split(" ");
+  return chunks.length > 1 && chunks.some((chunk, index) => chunks.indexOf(chunk) !== index && chunk.replace(/\D/g, "").length >= 4);
+}
+
+function digitsOnly(value: string) {
+  return value.replace(/\D/g, "");
+}
+
+function formatEmailContacts(values: string[] | undefined) {
+  return unique(values ?? [])
+    .sort((left, right) => emailContactPriority(left) - emailContactPriority(right))
+    .slice(0, 1)
+    .join(" ; ");
+}
+
+function emailContactPriority(value: string) {
+  const localPart = value.split("@")[0]?.toLowerCase() ?? "";
+  const priorityTerms = ["sales", "info", "contact", "enquiries", "enquiry", "support", "office"];
+  const index = priorityTerms.findIndex((term) => localPart === term || localPart.startsWith(`${term}.`));
+  return index === -1 ? priorityTerms.length : index;
 }
 
 function formatSourceUrls(values: string[] | undefined) {

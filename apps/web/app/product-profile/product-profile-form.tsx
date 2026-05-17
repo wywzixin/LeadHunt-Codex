@@ -14,10 +14,10 @@ type ProductProfileState = {
 
 const initialState: ProductProfileState = {
   productLinksText: "https://telecorenet.com/\nhttps://telecorenet.com/products",
-  keywords: "RRU, BBU, microwave equipment, base station board, power module",
+  keywords: "product category, core product, spare parts, components, equipment",
   documentUrlsText: "",
   notes:
-    "我们主要做 Huawei / ZTE / Ericsson / Nokia 通信设备，支持整套项目供货，也能单卖 RRU、BBU、板卡、备件和电源模块。部分产品有现货，可支持紧急补货。"
+    "我们主要做某类产品及相关备件，支持整套项目供货，也能单卖核心产品、板卡、备件和模块。部分产品有现货，可支持紧急补货。"
 };
 
 const guideItems = [
@@ -188,7 +188,7 @@ export function ProductProfileForm() {
             <textarea
               value={form.keywords}
               onChange={(event) => updateField("keywords", event.target.value)}
-              placeholder="RRU, BBU, AAU, microwave backhaul, telecom power module"
+              placeholder="核心产品、备件、模块、材料、设备类别"
             />
           </label>
 
@@ -217,7 +217,7 @@ export function ProductProfileForm() {
             <textarea
               value={form.notes}
               onChange={(event) => updateField("notes", event.target.value)}
-              placeholder="例如：我们主要做 Huawei / ZTE / Ericsson / Nokia 通信设备..."
+              placeholder="例如：我们主要做某类产品及备件，支持项目供货、现货补货和定制需求..."
             />
             <small>{form.notes.length} / 4000</small>
           </label>
@@ -236,7 +236,7 @@ export function ProductProfileForm() {
           </button>
         </div>
         <div className="understandingRows">
-          <UnderstandingRow icon="◆" label="核心产品" tags={keywordTags.length ? keywordTags : ["telecom equipment", "RRU", "BBU"]} />
+          <UnderstandingRow icon="◆" label="核心产品" tags={keywordTags.length ? keywordTags : ["equipment", "spare parts", "components"]} />
           <UnderstandingRow icon="◇" label="支持品牌" tags={brandTags} />
           <UnderstandingRow icon="●" label="产品优势" tags={advantageTags} />
         </div>

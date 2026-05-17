@@ -174,7 +174,7 @@ export function AppShell({
             <strong>
               LeadHunt <span>AI</span>
             </strong>
-            <small>{isLetterFrame ? "AI 外贸员工作台" : "通信设备外贸工具"}</small>
+            <small>{isLetterFrame ? "AI 外贸员工作台" : "B2B 外贸获客工具"}</small>
           </div>
         </div>
 
@@ -206,7 +206,7 @@ export function AppShell({
               <div className="avatarImg">{accountInitial}</div>
               <div>
                 <strong>{accountName}</strong>
-                <small>通信设备出口商</small>
+                <small>B2B 出口业务员</small>
               </div>
               <ChevronDown aria-hidden="true" size={16} />
             </button>

@@ -85,6 +85,62 @@ describe("LeadQualificationService", () => {
     expect(candidates[1]?.companyName).toBe("High Cloud");
   });
 
+  it("infers missing candidate country from direct phone contacts", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Rectifier Repair Service - ATS Solutions",
+          url: "https://ats4solutions.com/rectifier-repair-service/",
+          snippet:
+            "Rectifier repair service for telecom power systems. Customer service phone 630-209-8300 and email customerservice@ats4solutions.com.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1" }
+    );
+
+    expect(candidate?.country).toBe("UNITED STATES");
+    expect(candidate?.contacts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "phone", value: "630-209-8300" })])
+    );
+  });
+
+  it("uses official-site company signals instead of product page titles", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const candidates = service.normalizeSearchResults(
+      [
+        {
+          title: "Alcatel-Lucent (Nokia) telecom networking equipment from MF Communications",
+          url: "https://www.mfcomm.co.uk/alcatel-lucent-nokia-telecom-networking-equipment/",
+          snippet: "Telecom networking equipment page.",
+          source: "web"
+        },
+        {
+          title: "Eltek Flatpack S He Rectifier 1000W 48V 20A",
+          url: "https://www.ispsupplies.com/products/eltek-flatpack-s-he-rectifier-1000w-48v",
+          snippet: "Telecom rectifier module product page.",
+          source: "web"
+        },
+        {
+          title: "Rectifier Repair Service",
+          url: "https://ats4solutions.com/rectifier-repair-service/",
+          snippet: "Rectifier repair service for telecom power systems.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1" }
+    );
+
+    expect(candidates.map((candidate) => candidate.companyName)).toEqual([
+      "MF Communications",
+      "ISP Supplies",
+      "ATS 4 Solutions"
+    ]);
+  });
+
   it("scores strong ICP matches and flags risky candidates", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(
@@ -93,7 +149,7 @@ describe("LeadQualificationService", () => {
           title: "Spectrum MEA - Telecom Distributor UAE",
           url: "https://spectrummea.com/",
           snippet:
-            "UAE telecom equipment distributor and system integrator with RRU BBU stock. sales@spectrummea.com",
+            "UAE telecom equipment distributor and system integrator with RRU BBU stock. Phone +971 4 123 4567. sales@spectrummea.com",
           source: "web"
         }
       ],
@@ -106,10 +162,10 @@ describe("LeadQualificationService", () => {
     expect(highScore.status).toBe("qualified");
     expect(highScore.reasons).toEqual(
       expect.arrayContaining([
-        "Matches telecom infrastructure context",
-        "Mentions relevant product keywords",
+        "Matches relevant product, industry, or buyer context",
+        "Mentions relevant product or category keywords",
         "Matches target customer type",
-        "Located in target market"
+        "Target country verified from official evidence: UAE"
       ])
     );
 
@@ -387,7 +443,76 @@ describe("LeadQualificationService", () => {
     expect(prisma.leadCandidate.create).not.toHaveBeenCalled();
   });
 
-  it("uses a specific query country for real company pages without forcing marketplace results through", async () => {
+  it("hard rejects seller storefronts and product catalogs even when they expose sales contacts", async () => {
+    const prisma = createPrismaMock();
+    const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async () => {
+      return new Response(
+        `
+          <html>
+            <body>
+              <nav>Search for products | Login / Register | Cart</nav>
+              <section>Product categories, product catalog, and in stock items.</section>
+              <a href="mailto:sales@fiberolt.com">sales@fiberolt.com</a>
+              <a href="tel:+44 20 1234 5678">+44 20 1234 5678</a>
+            </body>
+          </html>
+        `,
+        {
+          status: 200,
+          headers: { "content-type": "text/html; charset=UTF-8" }
+        }
+      );
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "FiberOLT - Huawei H807GPBD",
+          url: "https://www.fiberolt.com/huawei-h807gpbd.html",
+          snippet: "Huawei H807GPBD optical network terminal.",
+          source: "web"
+        }
+      ],
+      criteria,
+      "UAE"
+    );
+
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(result.createdCount).toBe(0);
+    expect(result.skippedCount).toBe(1);
+    expect(prisma.leadCandidate.create).not.toHaveBeenCalled();
+  });
+
+  it("does not reject a buyer-side service company for mentioning a single storefront signal", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Screamer Electronic Services",
+          url: "https://screamerelectronicservices.com/contact",
+          snippet:
+            "Telecom equipment repair, reverse logistics and spare parts support. Product catalog available. sales@screamerelectronicservices.com +27 87 940 6666",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["South Africa"]
+      },
+      "South Africa"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(result.skippedCount).toBe(0);
+    expect(prisma.leadCandidate.create).toHaveBeenCalled();
+  });
+
+  it("stores query country separately and requires official evidence before assigning a lead country", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -409,7 +534,9 @@ describe("LeadQualificationService", () => {
       { taskId: "task-1", defaultCountry: "Saudi Arabia" }
     );
 
-    expect(company?.country).toBe("SAUDI ARABIA");
+    expect(company?.queryCountry).toBe("SAUDI ARABIA");
+    expect(company?.country).toBeNull();
+    expect(company?.countryConfidence).toBe("unknown");
     expect(marketplace?.country).toBeNull();
 
     const result = await service.saveCandidates(
@@ -418,7 +545,8 @@ describe("LeadQualificationService", () => {
         {
           title: "Riyadh Radio Systems - Telecom Equipment Stockist",
           url: "https://riyadhradiosystems.com/contact",
-          snippet: "Telecom equipment stockist and system integrator with RRU BBU spare parts. sales@riyadhradiosystems.com",
+          snippet:
+            "Telecom equipment stockist and system integrator with RRU BBU spare parts. Riyadh office Saudi Arabia. Phone +966 11 123 4567. sales@riyadhradiosystems.com",
           source: "web"
         }
       ],
@@ -434,13 +562,17 @@ describe("LeadQualificationService", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           companyName: "Riyadh Radio Systems",
-          country: "SAUDI ARABIA"
+          queryCountry: "SAUDI ARABIA",
+          country: "SAUDI ARABIA",
+          inferredCountry: "SAUDI ARABIA",
+          countryConfidence: "high",
+          countryConflict: false
         })
       })
     );
   });
 
-  it("uses manually selected countries while keeping known off-target country domains for ICP review", async () => {
+  it("uses manually selected countries while keeping known off-target country domains as rejected evidence", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -450,13 +582,15 @@ describe("LeadQualificationService", () => {
         {
           title: "Poznan Radio Systems - Telecom Equipment Stockist",
           url: "https://poznanradiosystems.com/contact",
-          snippet: "Telecom equipment stockist and system integrator with RRU BBU spare parts. sales@poznanradiosystems.com",
+          snippet:
+            "Poland office. Telecom equipment stockist and system integrator with RRU BBU spare parts. Phone +48 61 123 4567. sales@poznanradiosystems.com",
           source: "web"
         },
         {
           title: "Berlin Radio Systems - Telecom Equipment Stockist",
           url: "https://berlinradio.de/contact",
-          snippet: "Telecom equipment stockist and system integrator with RRU BBU spare parts. sales@berlinradio.de",
+          snippet:
+            "Germany office. Telecom equipment stockist and system integrator with RRU BBU spare parts. Phone +49 30 123456. sales@berlinradio.de",
           source: "web"
         }
       ],
@@ -482,10 +616,123 @@ describe("LeadQualificationService", () => {
         data: expect.objectContaining({
           companyName: "Berlin Radio Systems",
           country: "GERMANY",
-          status: "review"
+          queryCountry: "POLAND",
+          countryConflict: true,
+          status: "country_conflict_review"
         })
       })
     );
+  });
+
+  it("flags official non-target countries instead of letting the query country disguise them", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Tempest Network Solutions - DAS and Wireless Services",
+          url: "https://tempestns.com/services",
+          snippet:
+            "United States office. Wireless infrastructure contractor for DAS and private networks. Phone +1 630 209 8300. contact@tempestns.com",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Kenya"],
+        customerTypeKeywords: ["DAS integrator", "wireless infrastructure contractor", "network maintenance"]
+      },
+      "Kenya"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          companyName: "Tempest Network Solutions",
+          queryCountry: "KENYA",
+          country: "UNITED STATES",
+          inferredCountry: "UNITED STATES",
+          countryConflict: true,
+          status: "country_conflict_review"
+        })
+      })
+    );
+    const reasons = prisma.leadCandidate.create.mock.calls[0]?.[0].data.icpScore.create.reasons;
+    expect(reasons).toEqual(
+      expect.objectContaining({
+        countryValidation: expect.objectContaining({
+          queryCountry: "KENYA",
+          inferredCountry: "UNITED STATES",
+          countryConflict: true
+        })
+      })
+    );
+  });
+
+  it("matches macro target regions by member countries instead of treating them as global", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const macroCriteria = {
+      ...criteria,
+      targetRegions: ["Middle East", "Africa", "Brazil", "Saudi Arabia"]
+    };
+    const baseCandidate = {
+      taskId: "task-1",
+      website: "https://example.com",
+      sourceUrl: "https://example.com/contact",
+      contacts: [{ type: "email" as const, value: "sales@example.com", sourceUrl: "https://example.com/contact" }]
+    };
+
+    const uaeScore = service.scoreCandidate(
+      {
+        ...baseCandidate,
+        companyName: "Dubai DAS Integrator",
+        country: "UAE",
+        inferredCountry: "UAE",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [{ type: "phone", country: "UAE", value: "+971 4 123 4567", sourceUrl: "https://example.com", confidence: "high" }],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      macroCriteria
+    );
+    const southAfricaScore = service.scoreCandidate(
+      {
+        ...baseCandidate,
+        companyName: "Johannesburg Telecom Maintenance",
+        country: "SOUTH AFRICA",
+        inferredCountry: "SOUTH AFRICA",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          { type: "phone", country: "SOUTH AFRICA", value: "+27 11 123 4567", sourceUrl: "https://example.com", confidence: "high" }
+        ],
+        summary: "Telecom field maintenance contractor for base station RRU BBU and power systems."
+      },
+      macroCriteria
+    );
+    const usScore = service.scoreCandidate(
+      {
+        ...baseCandidate,
+        companyName: "US DAS Integrator",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          { type: "phone", country: "UNITED STATES", value: "+1 630 209 8300", sourceUrl: "https://example.com", confidence: "high" }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      macroCriteria
+    );
+
+    expect(uaeScore.status).not.toBe("rejected");
+    expect(southAfricaScore.status).not.toBe("rejected");
+    expect(usScore.status).toBe("country_conflict_review");
+    expect(usScore.risks).toContain("Verified candidate country is outside the selected target markets; kept for country-conflict review");
   });
 
   it("skips tender portals while keeping direct company evidence", async () => {
@@ -558,6 +805,107 @@ describe("LeadQualificationService", () => {
         })
       })
     );
+  });
+
+  it("skips the user's own product website as a lead source", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Huawei UPBA0 Board - TeleCoreNet",
+          url: "https://telecorenet.com/product/huawei-upba0-board/",
+          snippet: "Telecom equipment RRU BBU spare parts. xiaokangze@gmail.com +8617610361038",
+          source: "web"
+        },
+        {
+          title: "STS Specialized Telecom Service LLC",
+          url: "https://www.sts-ae.com/",
+          snippet: "Telecom service and network maintenance company. info@sts-ae.com +9712 6352826",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        ownDomains: ["telecorenet.com"]
+      },
+      "UAE"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(result.skippedCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          companyName: "STS Specialized Telecom Service LLC"
+        })
+      })
+    );
+  });
+
+  it("skips third-party company profile pages instead of qualifying the profile host", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Maroc Telecom SA Company Profile",
+          url: "https://www.globaldata.com/company-profile/maroc-telecom-sa/",
+          snippet: "Company profile, executives, locations and telecom procurement signals. +212 53 7719000",
+          source: "web"
+        },
+        {
+          title: "MedTech Network and Telecom Solutions Integration",
+          url: "https://medtech.ma/en/network-and-telecom-solutions-integration-2/",
+          snippet: "Morocco telecom system integrator and network maintenance company. contact@medtech.ma",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Morocco"]
+      },
+      "Morocco"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(result.skippedCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          companyName: "MedTech Network and Telecom Solutions Integration"
+        })
+      })
+    );
+  });
+
+  it("keeps brand OEM sites out of the buyer review list by default", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Ericsson - Enabling the full value of connectivity",
+          url: "https://www.ericsson.com/en",
+          snippet: "Ericsson telecom equipment, radio access network, RRU, BBU, 5G and contact info@ericsson.com.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "Turkey" }
+    );
+
+    const score = service.scoreCandidate(candidate!, {
+      ...criteria,
+      targetRegions: ["Turkey"],
+      brandTerms: ["Ericsson", "Huawei", "Nokia", "ZTE"]
+    });
+
+    expect(score.score).toBeLessThan(50);
+    expect(score.status).toBe("rejected");
+    expect(score.risks).toContain("Brand or OEM official site is usually supplier/competitor evidence, not a buyer lead");
   });
 
   it("skips index and indicator pages as discovery noise", async () => {
@@ -638,7 +986,7 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("allows brochure-style PDFs and off-target companies into the candidate pool for ICP review", async () => {
+  it("keeps procurement PDFs but skips brochure-style PDFs", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -653,9 +1001,10 @@ describe("LeadQualificationService", () => {
           source: "web"
         },
         {
-          title: "Lagos Radio Systems - Telecom Equipment Stockist Nigeria",
-          url: "https://lagosradio.ng/contact",
-          snippet: "Nigeria telecom equipment stockist with RRU BBU parts. sales@lagosradio.ng",
+          title: "UAE Telecom RRU BBU Spare Parts RFQ",
+          url: "https://procurement.gov/telecom-rfq.pdf",
+          snippet:
+            "Request for quotation RFQ for telecom equipment, RRU BBU spare parts, vendor registration and procurement contact procurement@uae.gov",
           source: "web"
         },
         {
@@ -672,12 +1021,13 @@ describe("LeadQualificationService", () => {
       "UAE"
     );
 
-    expect(result.createdCount).toBe(3);
-    expect(result.skippedCount).toBe(0);
+    expect(result.createdCount).toBe(2);
+    expect(result.skippedCount).toBe(1);
     expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          website: "https://alphastonecontracting.com/company-profile.pdf"
+          website: "https://procurement.gov/telecom-rfq.pdf",
+          status: "review"
         })
       })
     );
@@ -783,6 +1133,76 @@ describe("LeadQualificationService", () => {
     expect(score.risks).toContain("No usable email or phone found yet");
   });
 
+  it("keeps small ISP and WISP operators for review without requiring explicit spare-parts demand", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Wisp Internet - Internet banda larga em Cacapava-SP",
+          url: "http://wispinternet.com.br/",
+          snippet:
+            "Internet banda larga provider in Cacapava-SP Brazil. Local WISP broadband internet service. Email luiz@wispinternet.com.br",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1" }
+    );
+
+    const score = service.scoreCandidate(candidate!, {
+      ...criteria,
+      targetRegions: ["Brazil"],
+      customerTypeKeywords: ["ISP", "WISP", "internet service provider", "broadband provider"]
+    });
+
+    expect(score.score).toBeGreaterThanOrEqual(50);
+    expect(score.status).toBe("review");
+    expect(score.risks).not.toContain("No clear telecom equipment buyer, distributor, integrator, or maintenance signal");
+  });
+
+  it("keeps DAS, small-cell, private-network, and tower engineering firms for review", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const candidates = service.normalizeSearchResults(
+      [
+        {
+          title: "Communication Technology Services - DAS Small Cell Solutions",
+          url: "https://www.cts1.com/das-small-cell-solutions",
+          snippet:
+            "National in-building cellular DAS and small cell system integrator. Public Safety DAS, Private LTE/5G, CBRS, Wi-Fi, Optical LAN, design, build, monitoring and maintenance. Contact 800-834-5838.",
+          source: "web"
+        },
+        {
+          title: "Engineering Wireless Services - DAS, CBRS, Public Safety and Tower Construction",
+          url: "https://engineeringwireless.com/das-small-cell-3/",
+          snippet:
+            "United States office. Wireless communications engineering firm providing DAS, CBRS, public safety, tower construction, turnkey design/build, maintenance and upgrade services. Phone +1 630 209 8300. sales@engineeringwireless.com",
+          source: "web"
+        },
+        {
+          title: "Crown Castle - WISP and Telecommunications Infrastructure",
+          url: "https://www.crowncastle.com/industries/wisp-and-telecommunications",
+          snippet:
+            "Communications infrastructure company with cell towers, small cells and fiber network assets serving United States wireless carriers, WISPs and telecommunications networks.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1" }
+    );
+
+    const scores = candidates.map((candidate) =>
+      service.scoreCandidate(candidate, {
+        ...criteria,
+        targetRegions: ["United States"],
+        customerTypeKeywords: ["DAS integrator", "wireless infrastructure contractor", "tower company", "WISP"]
+      })
+    );
+
+    expect(scores.map((score) => score.status)).toEqual(["review", "review", "review"]);
+    scores.forEach((score) => {
+      expect(score.score).toBeGreaterThanOrEqual(50);
+      expect(score.risks).not.toContain("Third-party, directory, or content page is kept as evidence but needs manual validation");
+    });
+  });
+
   it("does not qualify generic IT service companies without telecom equipment signals", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(
@@ -803,7 +1223,7 @@ describe("LeadQualificationService", () => {
     expect(score.score).toBeLessThan(75);
     expect(score.status).toBe("rejected");
     expect(score.risks).toEqual(
-      expect.arrayContaining(["Only generic IT/network service signal; no explicit telecom equipment signal"])
+      expect.arrayContaining(["Only generic IT/service signal; no explicit product or buyer context"])
     );
   });
 
@@ -896,6 +1316,31 @@ describe("LeadQualificationService", () => {
     ]);
   });
 
+  it("does not treat rectifier model and part numbers as phone contacts", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Rectifier Repair Service - Advanced Technical Services",
+          url: "https://ats4solutions.com/rectifier-repair/",
+          snippet:
+            "We repair a comprehensive list of DC plant switchmode rectifier models including 300-0669-903, 300-0710-901, 9155100120, 50 486534000 and 23413019-000-0. Contact our customer service team. Phone 630-209-8300. customerservice@ats4solutions.com",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1" }
+    );
+
+    const phones = candidate?.contacts.filter((contact) => contact.type === "phone").map((contact) => contact.value);
+
+    expect(phones).toEqual(["630-209-8300"]);
+    expect(candidate?.contacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "email", value: "customerservice@ats4solutions.com" })
+      ])
+    );
+  });
+
   it("follows WordPress contact pages when enriching company contacts", async () => {
     const prisma = createPrismaMock();
     const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
@@ -963,6 +1408,133 @@ describe("LeadQualificationService", () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+
+  it("finds contacts from homepage navigation, contact html pages, and get-in-touch pages", async () => {
+    const prisma = createPrismaMock();
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      let html = `
+        <html><body>
+          <a href="/contact.html">Contact</a>
+          <a href="/en/get-in-touch-customers">Get in touch</a>
+          Telecom system integrator and network maintenance company.
+        </body></html>
+      `;
+
+      if (url.endsWith("/contact.html")) {
+        html = `
+          <html><body>
+            <a href="mailto:info@qilantelecom.com">Email us</a>
+            <span>Phone: 0086-13735565568</span>
+          </body></html>
+        `;
+      }
+
+      if (url.endsWith("/en/get-in-touch-customers")) {
+        html = `
+          <html><body>
+            Sales: sales@qilantelecom.com
+          </body></html>
+        `;
+      }
+
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Qilan Telecom - Telecom Infrastructure",
+          url: "https://www.qilantelecom.com/",
+          snippet: "Ghana telecom system integrator and network maintenance company.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Ghana"]
+      },
+      "Ghana"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "info@qilantelecom.com" }),
+              expect.objectContaining({ type: "email", value: "sales@qilantelecom.com" }),
+              expect.objectContaining({ type: "phone", value: "0086-13735565568" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("trims contact labels that are glued to email addresses in compressed page text", async () => {
+    const prisma = createPrismaMock();
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        `
+          <html><body>
+            info@tejasnetworks.commarketing sales_northamerica@tejasnetworks.comemail
+            you@company.com
+          </body></html>
+        `,
+        {
+          status: 200,
+          headers: { "content-type": "text/html; charset=UTF-8" }
+        }
+      )
+    );
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Tejas Networks",
+          url: "https://www.tejasnetworks.com/",
+          snippet: "Telecom equipment company and network infrastructure supplier.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["India"]
+      },
+      "India"
+    );
+
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "info@tejasnetworks.com" }),
+              expect.objectContaining({ type: "email", value: "sales_northamerica@tejasnetworks.com" })
+            ])
+          }
+        })
+      })
+    );
+    expect(prisma.leadCandidate.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([expect.objectContaining({ value: "you@company.com" })])
+          }
+        })
+      })
+    );
   });
 
   it("enriches missing contacts on existing duplicate candidates instead of only skipping them", async () => {

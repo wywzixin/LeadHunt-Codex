@@ -27,9 +27,9 @@ type CustomerProfileState = {
 
 const initialState: CustomerProfileState = {
   targetRegions: INITIAL_TARGET_MARKETS,
-  industryKeywords: "通信设备、微波通信、网络设备",
+  industryKeywords: "行业关键词、产品应用场景、目标客户行业",
   referenceCustomerUrlsText: "https://spectrummea.com/\nhttps://highcloud.ae/",
-  notes: "我想找通信设备经销商、现货商、系统集成商和站点运维服务商，优先有项目交付、备件补货、微波回传或电源维护需求。"
+  notes: "我想找会使用、维护、安装、集成、采购或运营这类产品的客户，优先有项目交付、备件补货、维护运维或采购需求。"
 };
 
 const guideItems = [
@@ -215,7 +215,7 @@ export function CustomerProfileForm() {
             <textarea
               value={form.industryKeywords}
               onChange={(event) => updateField("industryKeywords", event.target.value)}
-              placeholder="例如：通信设备、微波通信、网络设备"
+              placeholder="例如：行业关键词、产品应用场景、目标客户行业"
             />
           </label>
 
@@ -241,7 +241,7 @@ export function CustomerProfileForm() {
               maxLength={300}
               value={form.notes}
               onChange={(event) => updateField("notes", event.target.value)}
-              placeholder="例如：我想找通信设备经销商、现货商、系统集成商和站点运维服务商，优先有项目交付、备件补货、微波回传或电源维护需求。"
+              placeholder="例如：我想找会使用、维护、安装、集成、采购或运营这类产品的客户，优先有项目交付、备件补货、维护运维或采购需求。"
             />
             <small>{form.notes.length} / 300</small>
           </label>
@@ -261,7 +261,7 @@ export function CustomerProfileForm() {
         </div>
         <div className="understandingRows">
           <UnderstandingRow icon="♙" label="目标国家/地区" tags={targetRegionLabels.length ? targetRegionLabels : ["全球"]} />
-          <UnderstandingRow icon="◇" label="行业关键词" tags={industryTags.length ? industryTags : ["通信设备", "微波通信"]} />
+          <UnderstandingRow icon="◇" label="行业关键词" tags={industryTags.length ? industryTags : ["行业关键词", "应用场景"]} />
           <UnderstandingRow icon="♧" label="客户类型（根据补充说明提供）" tags={customerTypeTags} />
         </div>
       </section>

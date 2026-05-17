@@ -186,22 +186,27 @@ model SearchResult {
 }
 
 model LeadCandidate {
-  id             String           @id @default(uuid()) @db.Uuid
-  taskId         String           @map("task_id") @db.Uuid
-  companyName    String           @map("company_name")
-  website        String?          @db.Text
-  country        String?
-  sourceUrl      String?          @map("source_url") @db.Text
-  status         String           @default("new")
-  createdAt      DateTime         @default(now()) @map("created_at")
-  updatedAt      DateTime         @updatedAt @map("updated_at")
-  task           LeadTask         @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  contacts       LeadContact[]
-  icpScore       IcpScore?
-  outreachDrafts OutreachDraft[]
-  crmLead        CrmLead?
-  followupTasks  FollowupTask[]
-  stageEvents    LeadStageEvent[]
+  id                String           @id @default(uuid()) @db.Uuid
+  taskId            String           @map("task_id") @db.Uuid
+  companyName       String           @map("company_name")
+  website           String?          @db.Text
+  country           String?
+  queryCountry      String?          @map("query_country")
+  inferredCountry   String?          @map("inferred_country")
+  countryEvidence   Json?            @map("country_evidence")
+  countryConfidence String?          @map("country_confidence")
+  countryConflict   Boolean          @default(false) @map("country_conflict")
+  sourceUrl         String?          @map("source_url") @db.Text
+  status            String           @default("new")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+  task              LeadTask         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  contacts          LeadContact[]
+  icpScore          IcpScore?
+  outreachDrafts    OutreachDraft[]
+  crmLead           CrmLead?
+  followupTasks     FollowupTask[]
+  stageEvents       LeadStageEvent[]
 
   @@index([taskId, status])
   @@index([companyName])

@@ -6,7 +6,7 @@ import {
 } from "./search-strategy.js";
 
 describe("search strategy library", () => {
-  it("generates at least fifteen telecom lead queries", () => {
+  it("generates at least fifteen buyer-led B2B lead queries", () => {
     const queries = generateSearchQueries({
       targetMarkets: ["UAE", "Saudi Arabia"],
       minQueryCount: 15
@@ -14,7 +14,7 @@ describe("search strategy library", () => {
 
     expect(queries).toHaveLength(15);
     expect(
-      queries.every((item) => /telecom|RRU|BBU|Huawei|ZTE|network|5G|maintenance|base station/i.test(item.query))
+      queries.every((item) => /equipment|component|spare parts|network|maintenance|contractor|integrator|operator|procurement|RFQ|telecom|RRU|BBU|5G/i.test(item.query))
     ).toBe(true);
     expect(new Set(queries.map((item) => item.country))).not.toContain("Nigeria");
     expect(queries[0]?.templateId).toBe("maintenance_company_contact");
@@ -26,6 +26,49 @@ describe("search strategy library", () => {
     expect(queries.map((item) => item.query).join("\n")).not.toMatch(/\binpage:|\bloc:|\blang:/);
     expect(queries.map((item) => item.query).join("\n")).not.toMatch(/\bsite:/);
     expect(queries.map((item) => item.query).join("\n")).not.toMatch(/\{exclude(?:_terms)?\}/);
+    expect(queries[0]?.keywordGroups.customerIntentTerms.join(" ")).not.toMatch(
+      /\b(supplier|distributor|stockist|reseller|wholesale)\b/i
+    );
+  });
+
+  it("keeps channel-customer templates out of the default buyer-led query mix", () => {
+    const queries = generateSearchQueries({
+      taskText: "Find 5G telecom equipment customers",
+      targetMarkets: ["UAE"],
+      minQueryCount: 20
+    });
+    const templateIds = new Set(queries.map((query) => query.templateId));
+
+    expect(templateIds.has("direct_distributor_country")).toBe(false);
+    expect(templateIds.has("distributor_exact_scenario")).toBe(false);
+    expect(queries[0]?.keywordGroups.customerIntentTerms).toEqual(
+      expect.arrayContaining([
+        "network maintenance company",
+        "telecom system integrator",
+        "mobile network operator",
+        "ISP network operations",
+        "FTTH operator",
+        "procurement"
+      ])
+    );
+    expect(queries[0]?.keywordGroups.customerIntentTerms.join(" ")).not.toMatch(
+      /\b(supplier|distributor|stockist|reseller|wholesale)\b/i
+    );
+  });
+
+  it("enables channel-customer templates only when the task explicitly asks for channels", () => {
+    const queries = generateSearchQueries({
+      taskText: "Find telecom distributors and stockists in UAE",
+      targetMarkets: ["UAE"],
+      minQueryCount: 20
+    });
+    const templateIds = new Set(queries.map((query) => query.templateId));
+
+    expect(templateIds.has("direct_distributor_country")).toBe(true);
+    expect(templateIds.has("distributor_exact_scenario")).toBe(true);
+    expect(queries[0]?.keywordGroups.customerIntentTerms).toEqual(
+      expect.arrayContaining(["distributor", "stockist"])
+    );
   });
 
   it("uses product and reference customer profile URLs to create similar-customer queries", () => {
@@ -160,12 +203,18 @@ describe("search strategy library", () => {
         strategyTemplate: expect.any(String),
         keywordGroups: expect.objectContaining({
           productTerms: expect.arrayContaining(["telecom equipment"]),
-        customerIntentTerms: expect.arrayContaining(["distributor"]),
-        excludeTerms: expect.arrayContaining(["job", "directory", "yellow pages"])
-      }),
-      effectivenessScore: expect.any(Number)
-    })
-  );
+          customerIntentTerms: expect.arrayContaining([
+            "network maintenance company",
+            "telecom system integrator",
+            "mobile network operator",
+            "ISP network operations",
+            "procurement"
+          ]),
+          excludeTerms: expect.arrayContaining(["job", "directory", "yellow pages"])
+        }),
+        effectivenessScore: expect.any(Number)
+      })
+    );
     expect(query?.query).toContain("-job");
     expect(query?.query).toContain("-directory");
   });

@@ -101,8 +101,8 @@ describe("LeadHuntAiService", () => {
     expect(result.exclusionTerms).toContain("job");
   });
 
-  it("parses search strategy plans with at least 15 queries", async () => {
-    const queries = Array.from({ length: 15 }, (_, index) => ({
+  it("parses search strategy plans with at least 30 queries", async () => {
+    const queries = Array.from({ length: 30 }, (_, index) => ({
       query: `"telecom equipment" "distributor" UAE ${index}`,
       country: "ae",
       language: "en",
@@ -128,7 +128,7 @@ describe("LeadHuntAiService", () => {
       operatorLibrary: {}
     });
 
-    expect(result.queries).toHaveLength(15);
+    expect(result.queries).toHaveLength(30);
   });
 
   it("parses ICP scoring output", async () => {

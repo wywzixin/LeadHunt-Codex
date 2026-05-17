@@ -70,13 +70,13 @@ export default function TemplatesPage() {
   function openCreate() {
     setEditingTemplate(null);
     setDraft({
-      name: "UAE 经销商跟进模板",
-      subject: "Telecom spare parts availability for your team",
+    name: "UAE 经销商跟进模板",
+    subject: "Product availability for your team",
       summary: "适用于自建经销商或现货商跟进邮件。",
       body: [
         "Dear Team,",
         "",
-        "Telecorenet can support RRU, BBU, power modules, boards and spare parts for your telecom equipment sourcing needs.",
+        "We can support products, modules, boards and spare parts for your sourcing needs.",
         "",
         "If you are checking availability for upcoming projects, please share the model list and quantity. We will reply with stock status and delivery options.",
         "",

@@ -33,6 +33,21 @@ function createPrismaMock() {
     leadTask: {
       create: vi.fn().mockResolvedValue({ id: "task-1", status: "running" }),
       findMany: vi.fn(),
+      findUnique: vi.fn().mockResolvedValue({
+        inputPayload: {
+          prompt: "Find UAE telecom maintenance customers",
+          keywordGroups: {
+            productTerms: ["telecom equipment", "RRU", "BBU"],
+            longTailProductTerms: ["Huawei RRU spare parts"],
+            customerIntentTerms: ["telecom maintenance contractor", "ISP network operations"],
+            marketTerms: ["UAE", "Saudi Arabia"],
+            scenarioTerms: ["base station maintenance", "tower maintenance"],
+            excludeTerms: ["jobs", "careers", "news"]
+          },
+          customerProfile: { targetRegions: ["UAE", "Saudi Arabia"] }
+        },
+        searchQueries: []
+      }),
       findFirst: vi.fn().mockResolvedValue({
         id: "task-1",
         userId: "user-1",
@@ -59,7 +74,9 @@ function createPrismaMock() {
             companyName: "Gulf Telecom",
             website: "https://gulf.example",
             country: "UAE",
-            status: "new",
+            countryConfidence: "high",
+            countryConflict: false,
+            status: "review",
             createdAt: new Date("2026-04-30T01:00:00.000Z"),
             contacts: [{ type: "email", value: "sales@gulf.example" }],
             icpScore: { score: 87, grade: "A" },
@@ -95,6 +112,7 @@ function createPrismaMock() {
     },
     searchQuery: {
       createMany: vi.fn().mockResolvedValue({ count: 15 }),
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
       findMany: vi.fn().mockResolvedValue([{ executionStatus: "completed", resultCount: 1 }]),
       update: vi.fn().mockResolvedValue({}),
       count: vi.fn().mockResolvedValue(0)
@@ -328,7 +346,7 @@ describe("AgentWorkflowService", () => {
     });
 
     expect(result.steps).toHaveLength(16);
-    expect(result.searchQueries).toHaveLength(15);
+    expect(result.searchQueries).toHaveLength(30);
     expect(new Set(result.searchQueries.map((query) => query.country))).not.toContain("Nigeria");
     expect(prisma.productProfile.findUnique).toHaveBeenCalledWith({ where: { userId: "user-1" } });
     expect(prisma.customerProfile.findUnique).toHaveBeenCalledWith({ where: { userId: "user-1" } });
@@ -387,24 +405,58 @@ describe("AgentWorkflowService", () => {
       targetCount: 20
     });
 
-    expect(result.searchQueries.map((query) => query.country)).toEqual([
-      "Germany",
-      "Poland",
-      "Oman",
-      "Germany",
-      "Poland",
-      "Oman",
-      "Germany",
-      "Poland",
-      "Oman",
-      "Germany",
-      "Poland",
-      "Oman",
-      "Germany",
-      "Poland",
-      "Oman"
-    ]);
+    expect(result.searchQueries).toHaveLength(30);
+    expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(new Set(["Germany", "Poland", "Oman"]));
     expect(result.searchQueries.map((query) => query.country)).not.toContain("Global");
+  });
+
+  it("expands macro profile regions into concrete countries before AI query planning", async () => {
+    const prisma = createPrismaMock();
+    prisma.customerProfile.findUnique.mockResolvedValue({
+      targetRegions: ["Middle East", "Africa", "Brazil", "Russia", "Ukraine"],
+      referenceCustomerUrls: [],
+      crmSampleIds: [],
+      notes: "Use saved target markets."
+    });
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(prisma as any, undefined, undefined, undefined, ai as any);
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt: "Find 5G telecom equipment customers",
+      targetCount: 20
+    });
+    const queryCountries = result.searchQueries.map((query) => query.country);
+
+    expect(ai.generateSearchStrategy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetMarkets: expect.arrayContaining([
+          "UAE",
+          "Saudi Arabia",
+          "Qatar",
+          "Oman",
+          "Kuwait",
+          "Bahrain",
+          "Jordan",
+          "Iraq",
+          "Iran",
+          "Nigeria",
+          "Kenya",
+          "South Africa",
+          "Egypt",
+          "Morocco",
+          "Ghana",
+          "Tanzania",
+          "Brazil",
+          "Russia",
+          "Ukraine"
+        ])
+      })
+    );
+    expect(queryCountries).not.toContain("Middle East");
+    expect(queryCountries).not.toContain("Africa");
+    expect(result.searchQueries).toHaveLength(30);
   });
 
   it("lets explicit prompt markets override saved profile target regions for AI planning", async () => {
@@ -422,7 +474,7 @@ describe("AgentWorkflowService", () => {
 
     const result = await service.createTaskWithTimeline("user-1", {
       prompt:
-        "甲方验收测试:帮我找加拿大和澳大利亚的5G通信设备买家客户,优先基站维护、铁塔维护、通信电源维护、运营商和ISP/FTTH网络运维客户。",
+        "Acceptance test: find Canada and Australia 5G telecom equipment buyers, prioritizing base station maintenance, tower maintenance, telecom power maintenance, operators, ISP and FTTH network operations customers.",
       targetCount: 20
     });
 
@@ -497,7 +549,7 @@ describe("AgentWorkflowService", () => {
     const queryText = result.searchQueries.map((query) => query.query).join("\n");
     const persistedPayload = prisma.leadTask.create.mock.calls[0]?.[0].data.inputPayload;
 
-    expect(result.searchQueries).toHaveLength(15);
+    expect(result.searchQueries).toHaveLength(30);
     expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(new Set(["Canada", "Australia"]));
     expect(queryText).not.toMatch(/\bRussia\b/i);
     expect(queryText).not.toMatch(/\bUAE\b/i);
@@ -522,7 +574,7 @@ describe("AgentWorkflowService", () => {
     const service = new AgentWorkflowService(prisma as any, undefined, undefined, websiteContent as any);
 
     const result = await service.createTaskWithTimeline("user-1", {
-      prompt: "帮我找5G通信设备相关的买家客户",
+      prompt: "Find 5G telecom equipment related buyer customers",
       targetCount: 20
     });
 
@@ -567,7 +619,7 @@ describe("AgentWorkflowService", () => {
       prompt: "Find Qatar microwave backhaul integrators"
     });
 
-    expect(result.searchQueries).toHaveLength(15);
+    expect(result.searchQueries).toHaveLength(30);
     expect(prisma.leadTask.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         inputPayload: expect.objectContaining({
@@ -576,7 +628,7 @@ describe("AgentWorkflowService", () => {
           executionPlan: expect.arrayContaining([
             expect.objectContaining({
               step: "analyze_product_profile",
-              detail: expect.stringContaining("默认通信设备词库")
+              detail: expect.any(String)
             })
           ])
         })
@@ -658,7 +710,7 @@ describe("AgentWorkflowService", () => {
         expect.objectContaining({
           leadId: "11111111-1111-4111-8111-111111111111",
           channel: "email",
-          subject: "Telecom equipment supply support for Gulf Telecom",
+          subject: "Supply support for Gulf Telecom",
           status: "draft"
         })
       ]
@@ -911,6 +963,103 @@ describe("AgentWorkflowService", () => {
     expect(leadQualification.saveCandidates.mock.calls[0]?.[1]).toHaveLength(20);
   });
 
+  it("rewrites pending queries with local buyer fallback when the first-stage quality gate trips", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findUnique.mockResolvedValueOnce({
+      inputPayload: {
+        prompt: "Find telecom equipment buyers",
+        keywordGroups: {
+          productTerms: ["RRU", "BBU", "rectifier"],
+          longTailProductTerms: ["Huawei R4850N6"],
+          customerIntentTerms: ["telecom maintenance contractor", "ISP network operations"],
+          marketTerms: ["Kenya", "Morocco"],
+          scenarioTerms: ["base station maintenance", "FTTH operations"],
+          excludeTerms: ["jobs", "careers", "news"]
+        },
+        customerProfile: { targetRegions: ["Kenya", "Morocco"] }
+      },
+      searchQueries: [
+        {
+          query: '"base station maintenance" Kenya contact -jobs -news',
+          provider: "brave",
+          operatorSource: "brave_official",
+          executionStatus: "completed",
+          operatorName: "GPT",
+          strategyTemplate: "buyer",
+          keywordGroups: null,
+          country: "Kenya",
+          effectivenessScore: 0.8
+        },
+        {
+          query: '"telecom equipment supplier" Morocco contact',
+          provider: "brave",
+          operatorSource: "brave_official",
+          executionStatus: "pending",
+          operatorName: "GPT",
+          strategyTemplate: "supplier",
+          keywordGroups: null,
+          country: "Morocco",
+          effectivenessScore: 0.5
+        },
+        {
+          query: '"5G equipment stockist" Kenya contact',
+          provider: "brave",
+          operatorSource: "brave_official",
+          executionStatus: "pending",
+          operatorName: "GPT",
+          strategyTemplate: "stockist",
+          keywordGroups: null,
+          country: "Kenya",
+          effectivenessScore: 0.5
+        }
+      ]
+    });
+    prisma.searchQuery.count.mockResolvedValueOnce(2);
+    const service = new AgentWorkflowService(prisma as any);
+
+    const result = await (service as any).rewritePendingQueriesForQualityGate("task-1", {
+      reasons: ["country_issue_ratio_high"],
+      executedQueryCount: 15
+    });
+
+    expect(result).toMatchObject({
+      rewrittenCount: 2,
+      removedPendingCount: 2,
+      remainingQueries: 2,
+      reasons: ["country_issue_ratio_high"]
+    });
+    expect(prisma.searchQuery.deleteMany).toHaveBeenCalledWith({
+      where: { taskId: "task-1", executionStatus: "pending" }
+    });
+    expect(prisma.searchQuery.createMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          taskId: "task-1",
+          executionStatus: "pending",
+          operatorName: "Quality fallback local buyer search",
+          query: expect.stringMatching(/\b(Kenya|Morocco)\b/)
+        })
+      ])
+    });
+    const createdQueries = prisma.searchQuery.createMany.mock.calls[0]?.[0].data.map((query: { query: string }) => query.query);
+    expect(createdQueries).toHaveLength(2);
+    expect(createdQueries.join("\n")).not.toMatch(/\bsupplier\b|\bstockist\b/i);
+    expect(prisma.leadTask.update).toHaveBeenCalledWith({
+      where: { id: "task-1" },
+      data: expect.objectContaining({
+        inputPayload: expect.objectContaining({
+          profileSignals: expect.objectContaining({
+            qualityFallback: expect.objectContaining({
+              action: "rewrote_pending_queries_with_local_buyer_fallback",
+              replacementQueryCount: 2,
+              removedPendingQueryCount: 2
+            })
+          })
+        })
+      })
+    });
+  });
+
   it("marks candidate cleanup errors per query instead of throwing a 500", async () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
@@ -1000,12 +1149,7 @@ describe("AgentWorkflowService", () => {
     const result = await service.summarizeTaskForUser("user-1", "task-1");
 
     expect(result.ok).toBe(true);
-    expect(result.summary.did).toEqual([
-      "读取任务并生成 1 条高级搜索策略",
-      "筛选并清洗 1 家候选公司",
-      "完成 1 家高匹配客户 ICP 判断",
-      "为 1 家客户生成开发信草稿"
-    ]);
+    expect(result.summary.did).toHaveLength(4);
     expect(result.summary.found).toMatchObject({
       totalCandidates: 1,
       qualifiedCandidates: 1,

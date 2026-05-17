@@ -89,7 +89,7 @@ export const searchStrategyPlanSchema = z.object({
         priority: z.number().int().min(1).max(5)
       })
     )
-    .min(15),
+    .min(30),
   rejectedIdeas: z
     .array(
       z.object({
@@ -123,6 +123,7 @@ export const candidateBuyerEvaluationSchema = z.object({
   resultType: z.enum([
     "target_buyer",
     "possible_buyer",
+    "procurement_intelligence",
     "supplier_or_competitor",
     "directory",
     "content_article",

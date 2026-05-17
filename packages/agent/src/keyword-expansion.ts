@@ -24,9 +24,15 @@ export type ExpandedKeywords = {
 
 type ProfileHints = Partial<ExpandedKeywords>;
 
-const defaultMainProducts = ["telecom equipment", "telecom spare parts"];
+const defaultMainProducts = ["equipment", "components", "spare parts", "industrial equipment", "telecom equipment"];
 
 const defaultRelatedProducts = [
+  "maintenance parts",
+  "replacement parts",
+  "field service parts",
+  "spare parts",
+  "industrial components",
+  "network equipment",
   "5G telecom equipment",
   "5G base station equipment",
   "radio access network equipment",
@@ -43,6 +49,10 @@ const defaultRelatedProducts = [
 ];
 
 const defaultLongTailProducts = [
+  "equipment spare parts replacement",
+  "field service replacement parts",
+  "maintenance spare parts",
+  "industrial equipment replacement",
   "base station spare parts replacement",
   "Huawei ZTE spare parts",
   "Huawei RRU spare parts",
@@ -54,6 +64,9 @@ const defaultLongTailProducts = [
 ];
 
 const defaultUpstreamDownstreamTerms = [
+  "system integration",
+  "engineering services",
+  "maintenance services",
   "power module",
   "RF module",
   "antenna feeder",
@@ -62,12 +75,16 @@ const defaultUpstreamDownstreamTerms = [
   "equipment refurbishment"
 ];
 
-const defaultCustomerIntentTerms = [
+const primaryCustomerIntentTerms = [
+  "maintenance company",
   "network maintenance company",
   "base station maintenance company",
   "RAN maintenance",
   "cell site maintenance",
   "telecom field services",
+  "field service company",
+  "service provider",
+  "operations company",
   "tower maintenance company",
   "tower company",
   "wireless infrastructure contractor",
@@ -86,16 +103,28 @@ const defaultCustomerIntentTerms = [
   "project procurement",
   "purchasing",
   "procurement",
-  "telecom equipment distributor",
-  "stockist",
-  "distributor",
   "turnkey contractor",
+  "engineering contractor",
   "tower contractor",
-  "telecom importer",
   "project supply"
 ];
 
+const channelCustomerIntentTerms = [
+  "supplier",
+  "telecom equipment distributor",
+  "stockist",
+  "distributor",
+  "reseller",
+  "dealer",
+  "wholesaler",
+  "telecom importer"
+];
+
 const defaultScenarioTerms = [
+  "B2B buyer scenario",
+  "equipment replacement",
+  "maintenance service",
+  "project procurement",
   "telecom infrastructure",
   "5G network rollout",
   "network rollout",
@@ -253,8 +282,9 @@ const marketMatchers: Array<{ terms: string[]; patterns: RegExp[] }> = [
 
 export function expandLeadKeywords(input: KeywordExpansionInput = {}): ExpandedKeywords {
   const profileHints = deriveProfileHints(input);
+  const taskText = input.taskText ?? "";
   const sourceText = [
-    input.taskText,
+    taskText,
     ...(input.productProfileUrls ?? []),
     input.productProfileNotes,
     ...(input.referenceCustomerUrls ?? []),
@@ -271,6 +301,16 @@ export function expandLeadKeywords(input: KeywordExpansionInput = {}): ExpandedK
   const detectedMarketTerms = explicitMarketTerms.length
     ? explicitMarketTerms
     : unique([...detectMarketTerms(sourceText), ...(profileHints.marketTerms ?? [])]);
+  const customerIntentTerms = prioritizeCustomerIntentTerms(
+    [
+      ...detectCustomerIntentTerms(sourceText),
+      ...(profileHints.customerIntentTerms ?? []),
+      ...(input.customerIntentTerms ?? []),
+      ...primaryCustomerIntentTerms,
+      ...(isChannelCustomerRequest(taskText) ? channelCustomerIntentTerms : [])
+    ],
+    isChannelCustomerRequest(taskText)
+  );
 
   return {
     mainProductTerms: unique([
@@ -289,12 +329,7 @@ export function expandLeadKeywords(input: KeywordExpansionInput = {}): ExpandedK
       ...(profileHints.upstreamDownstreamTerms ?? []),
       ...defaultUpstreamDownstreamTerms
     ]),
-    customerIntentTerms: unique([
-      ...detectCustomerIntentTerms(sourceText),
-      ...(profileHints.customerIntentTerms ?? []),
-      ...(input.customerIntentTerms ?? []),
-      ...defaultCustomerIntentTerms
-    ]),
+    customerIntentTerms,
     marketTerms: detectedMarketTerms.length ? detectedMarketTerms : unique(defaultMarketTerms),
     scenarioTerms: unique([
       ...detectScenarioTerms(sourceText),
@@ -355,10 +390,10 @@ function detectCustomerIntentTerms(sourceText: string) {
     terms.push("procurement", "purchasing", "RFQ", "tender");
   }
   if (/operator|carrier|service provider/i.test(sourceText)) {
-    terms.push("telecom operator procurement", "mobile network operator");
+    terms.push("operator procurement", "service provider", "telecom operator procurement", "mobile network operator");
   }
   if (/\u7ef4\u62a4|maintenance|o&m|operations/i.test(sourceText)) {
-    terms.push("network maintenance company", "base station maintenance company", "telecom field services");
+    terms.push("maintenance company", "field service company", "network maintenance company", "base station maintenance company", "telecom field services");
   }
   if (/base station|bts|enodeb|gnodeb|\u57fa\u7ad9|ran/i.test(sourceText)) {
     terms.push("RAN maintenance", "cell site maintenance");
@@ -373,7 +408,7 @@ function detectCustomerIntentTerms(sourceText: string) {
     terms.push("ISP network operations", "WISP", "FTTH operator");
   }
   if (/\u7ecf\u9500|distributor/i.test(sourceText)) {
-    terms.push("distributor", "telecom equipment distributor");
+    terms.push("distributor", "dealer", "telecom equipment distributor");
   }
   if (/\u73b0\u8d27|stock/i.test(sourceText)) {
     terms.push("stockist");
@@ -382,12 +417,40 @@ function detectCustomerIntentTerms(sourceText: string) {
     terms.push("system integrator", "telecom system integrator");
   }
   if (/\u5de5\u7a0b|\u627f\u5305|contractor/i.test(sourceText)) {
-    terms.push("telecom contractor", "tower contractor", "turnkey contractor");
+    terms.push("engineering contractor", "turnkey contractor", "telecom contractor", "tower contractor");
   }
   if (/\u8fdb\u53e3|import/i.test(sourceText)) {
     terms.push("telecom importer");
   }
   return terms;
+}
+
+function isChannelCustomerRequest(sourceText: string) {
+  return /\b(channels?|channel partners?|suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b|经销|分销|渠道|库存商|代理商|进口商|批发/i.test(
+    sourceText
+  );
+}
+
+function prioritizeCustomerIntentTerms(terms: string[], promoteChannel: boolean) {
+  const uniqueTerms = unique(terms);
+  if (promoteChannel) {
+    return uniqueTerms;
+  }
+
+  const primary: string[] = [];
+  for (const term of uniqueTerms) {
+    if (!isChannelCustomerTerm(term)) {
+      primary.push(term);
+    }
+  }
+
+  return primary;
+}
+
+function isChannelCustomerTerm(term: string) {
+  return /\b(distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?|suppliers?)\b|经销|分销|渠道|库存商|代理商|进口商|批发/i.test(
+    term
+  );
 }
 
 function detectMarketTerms(sourceText: string) {

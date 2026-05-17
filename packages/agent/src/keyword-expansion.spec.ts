@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { expandLeadKeywords, generateSearchQueries } from "./index.js";
 
 describe("keyword expansion", () => {
-  it("expands a UAE telecom distributor task into product, customer, market, and exclude terms", () => {
-    const keywords = expandLeadKeywords({ taskText: "找 UAE 通信设备经销商" });
+  it("expands an explicit UAE telecom distributor task into optional channel terms", () => {
+    const keywords = expandLeadKeywords({ taskText: "Find UAE telecom equipment distributors and stockists" });
 
     expect(keywords.mainProductTerms).toContain("telecom equipment");
-    expect(keywords.customerIntentTerms).toEqual(expect.arrayContaining(["distributor"]));
+    expect(keywords.customerIntentTerms).toEqual(expect.arrayContaining(["distributor", "stockist"]));
     expect(keywords.marketTerms).toEqual(expect.arrayContaining(["UAE", "Dubai"]));
     expect(keywords.marketTerms).not.toEqual(expect.arrayContaining(["Nigeria", "South Africa", "Indonesia", "Brazil"]));
     expect(keywords.excludeTerms).toEqual(
@@ -14,6 +14,24 @@ describe("keyword expansion", () => {
     );
     expect(keywords.excludeTerms).toEqual(expect.arrayContaining(["directory", "yellow pages"]));
     expect(keywords.excludeTerms).not.toContain("phone");
+  });
+
+  it("keeps buyer-side customer intents ahead of channel terms by default", () => {
+    const keywords = expandLeadKeywords({ taskText: "Find 5G equipment customers" });
+
+    expect(keywords.customerIntentTerms).toEqual(
+      expect.arrayContaining([
+        "network maintenance company",
+        "telecom system integrator",
+        "mobile network operator",
+        "ISP network operations",
+        "FTTH operator",
+        "procurement"
+      ])
+    );
+    expect(keywords.customerIntentTerms.join(" ")).not.toMatch(
+      /\b(supplier|distributor|stockist|reseller|wholesale)\b/i
+    );
   });
 
   it("includes telecom default related and long-tail product dictionaries", () => {
@@ -45,7 +63,7 @@ describe("keyword expansion", () => {
 
   it("feeds expanded keywords into Brave query generation", () => {
     const queries = generateSearchQueries({
-      taskText: "找 UAE 通信设备经销商",
+      taskText: "Find UAE telecom equipment distributors and stockists",
       minQueryCount: 15
     });
 
@@ -69,7 +87,7 @@ describe("keyword expansion", () => {
 
   it("expands selected macro regions into concrete search countries", () => {
     const queries = generateSearchQueries({
-      targetMarkets: ["中亚"],
+      targetMarkets: ["\u4e2d\u4e9a"],
       minQueryCount: 5
     });
 

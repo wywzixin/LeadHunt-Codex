@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "LeadHunt AI",
-  description: "AI outbound workflow for telecom equipment exporters"
+  description: "AI outbound workflow for B2B exporters"
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
