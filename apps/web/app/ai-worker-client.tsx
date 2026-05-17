@@ -44,31 +44,35 @@ const landingExamples = [
     title: "找 B2B 买家客户",
     description:
       "读取已保存的产品画像和客户画像，搜索维护商、工程商、运营商、采购方和运维客户，并筛选可做首轮触达的目标。",
-    prompt:
-      "帮我找某类产品的买家客户，优先找维护公司、工程商、运营商、采购方和网络运维客户。"
+    prompt: "帮我找某类产品的买家客户，优先找维护公司、工程商、运营商、采购方和网络运维客户。"
   },
   {
     icon: UsersRound,
     title: "按客户画像找同类客户",
     description:
       "使用已保存的参考客户画像，提炼客户类型、关键词、采购场景与地域特征，用于搜索同类客户。",
-    prompt:
-      "按已保存的客户画像，帮我找同类型买家客户。"
+    prompt: "按已保存的客户画像，帮我找同类型买家客户。"
   },
   {
     icon: Mail,
     title: "生成开发信并同步 CRM",
     description:
       "面向高相关客户生成首封英文开发信，确认发送后自动写入 CRM，并设置 3 天后二次跟进提醒。",
-    prompt:
-      "面向高相关客户生成首封英文开发信，确认发送后自动写入 CRM，并设置 3 天后二次跟进提醒。"
+    prompt: "面向高相关客户生成首封英文开发信，确认发送后自动写入 CRM，并设置 3 天后二次跟进提醒。"
   }
 ];
 
 const fallbackKeywordRows: KeywordRow[] = [
   {
     label: "产品扩展词",
-    values: ["product category", "core product", "spare parts", "components", "equipment", "materials"]
+    values: [
+      "product category",
+      "core product",
+      "spare parts",
+      "components",
+      "equipment",
+      "materials"
+    ]
   },
   {
     label: "客户类型词",
@@ -83,7 +87,13 @@ const fallbackKeywordRows: KeywordRow[] = [
   },
   {
     label: "品牌/型号词",
-    values: ["brand + model", "model replacement", "SKU RFQ", "product group maintenance", "key spare parts"]
+    values: [
+      "brand + model",
+      "model replacement",
+      "SKU RFQ",
+      "product group maintenance",
+      "key spare parts"
+    ]
   },
   {
     label: "场景/市场词",
@@ -114,7 +124,7 @@ const fallbackMailLead: MailConfirmationLead = {
 const leadPageSize = 10;
 const crmPageSize = 3;
 const taskPollIntervalMs = 2500;
-const maxTaskPollAttempts = 240;
+const maxTaskPollAttempts = 720;
 
 type ViewState = "landing" | "conversation";
 type StepState = "done" | "active" | "pending" | "failed";
@@ -138,6 +148,7 @@ type ProfileSignals = {
   crmSampleCount?: number;
   marketSelection?: {
     targetMarkets?: string[];
+    secondaryMarkets?: string[];
     promptMarkets?: string[];
     profileMarkets?: string[];
     marketSource?: "prompt" | "profile" | "merged" | "none" | string;
@@ -145,6 +156,25 @@ type ProfileSignals = {
   aiPlanning?: {
     rejectedQueryCount?: number;
     rejectedQueries?: Array<{ query?: string; country?: string; reason?: string }>;
+  };
+  qualityGate?: {
+    action?: string;
+    reasons?: string[];
+    executedQueryCount?: number;
+    pendingQueryCount?: number;
+    remainingQueries?: number;
+    samplePendingQueries?: Array<{
+      query?: string;
+      country?: string | null;
+      strategyTemplate?: string | null;
+      operatorName?: string | null;
+    }>;
+  };
+  qualityFallbackSuggestion?: {
+    action?: string;
+    status?: string;
+    queryCount?: number;
+    sampleQueries?: Array<{ query?: string; country?: string | null; batchType?: string }>;
   };
 };
 
@@ -353,6 +383,8 @@ type LeadQualityCounts = {
   rawEvidence: number;
   main: number;
   needsCountryReview: number;
+  intelligenceReview: number;
+  evidenceReview: number;
   rejected: number;
   other: number;
 };
@@ -413,14 +445,23 @@ export function AiWorkerClient() {
   const [mailLead, setMailLead] = useState<MailConfirmationLead | null>(null);
 
   const displayLeads = useMemo(() => buildDisplayLeads(currentTask), [currentTask]);
-  const sentCount = useMemo(() => displayLeads.filter((lead) => hasSentEmail(lead.raw)).length, [displayLeads]);
-  const crmSyncedCount = useMemo(() => displayLeads.filter((lead) => Boolean(lead.raw.crmLead)).length, [displayLeads]);
+  const sentCount = useMemo(
+    () => displayLeads.filter((lead) => hasSentEmail(lead.raw)).length,
+    [displayLeads]
+  );
+  const crmSyncedCount = useMemo(
+    () => displayLeads.filter((lead) => Boolean(lead.raw.crmLead)).length,
+    [displayLeads]
+  );
   const pendingFollowupCount = useMemo(
     () => displayLeads.reduce((total, lead) => total + pendingFollowups(lead.raw).length, 0),
     [displayLeads]
   );
   const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
-  const keywordRows = useMemo(() => buildKeywordRows(currentTask, view !== "landing"), [currentTask, view]);
+  const keywordRows = useMemo(
+    () => buildKeywordRows(currentTask, view !== "landing"),
+    [currentTask, view]
+  );
   const profileSourceRows = useMemo(() => buildProfileSourceRows(currentTask), [currentTask]);
   const flowRows = useMemo(
     () =>
@@ -451,7 +492,8 @@ export function AiWorkerClient() {
   const crmPageRows = crmRows.slice((crmPage - 1) * crmPageSize, crmPage * crmPageSize);
   const selectedDisplayLead =
     displayLeads.find((lead) => lead.id === selectedLeadId) ?? displayLeads[0] ?? null;
-  const modalLead = mailLead ?? (selectedDisplayLead ? toMailLead(selectedDisplayLead) : fallbackMailLead);
+  const modalLead =
+    mailLead ?? (selectedDisplayLead ? toMailLead(selectedDisplayLead) : fallbackMailLead);
   const modalRecipients = useMemo<MailConfirmationRecipient[]>(() => {
     return displayLeads
       .map((lead) => {
@@ -555,7 +597,8 @@ export function AiWorkerClient() {
       const refreshed = await apiRequest<LeadTask>(`/api/lead-tasks/${taskId}`);
       setCurrentTask(refreshed);
       const payload = refreshed.inputPayload as { prompt?: string } | null;
-      const restoredPrompt = typeof payload?.prompt === "string" ? payload.prompt : defaultTaskPrompt;
+      const restoredPrompt =
+        typeof payload?.prompt === "string" ? payload.prompt : defaultTaskPrompt;
       setTaskPrompt(restoredPrompt);
       applyTaskProgress(refreshed);
       if ((refreshed.leadCandidates?.length ?? 0) > 0) {
@@ -622,7 +665,9 @@ export function AiWorkerClient() {
 
   function applyTaskProgress(task: LeadTask) {
     const result = summarizeSearchResultFromTask(task);
-    const hasSearchData = Boolean((task.searchQueries?.length ?? 0) || (task.leadCandidates?.length ?? 0));
+    const hasSearchData = Boolean(
+      (task.searchQueries?.length ?? 0) || (task.leadCandidates?.length ?? 0)
+    );
     const failedMessage = firstFailedStepError(task);
 
     setCreating(isTaskPlanning(task));
@@ -670,12 +715,15 @@ export function AiWorkerClient() {
       });
       const refreshed = await refreshTask(currentTask.id);
       const approvedLead =
-        refreshed.leadCandidates?.find((candidate) => candidate.id === result.approvedLeadIds[0]) ?? lead.raw;
+        refreshed.leadCandidates?.find((candidate) => candidate.id === result.approvedLeadIds[0]) ??
+        lead.raw;
       const modalCandidate = buildDisplayLead(approvedLead);
       setSelectedLeadId(approvedLead.id);
       setMailLead(toMailLead(modalCandidate));
       setMailOpen(true);
-      setStatus(`已审批 ${result.approvedCount} 家客户，并生成 ${result.draftCount} 封开发信草稿。`);
+      setStatus(
+        `已审批 ${result.approvedCount} 家客户，并生成 ${result.draftCount} 封开发信草稿。`
+      );
     } catch (requestError) {
       const message = errorMessage(requestError);
       setError(message);
@@ -794,13 +842,23 @@ export function AiWorkerClient() {
 
         {crmOpen ? (
           <div className="crmDataBackdrop" role="presentation">
-            <section className="crmDataModal" role="dialog" aria-modal="true" aria-labelledby="crm-data-title">
+            <section
+              className="crmDataModal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="crm-data-title"
+            >
               <header className="crmDataHeader">
                 <div>
                   <span>CRM 数据</span>
                   <h2 id="crm-data-title">本次同步客户</h2>
                 </div>
-                <button className="crmDataClose" type="button" aria-label="关闭 CRM 数据弹窗" onClick={() => setCrmOpen(false)}>
+                <button
+                  className="crmDataClose"
+                  type="button"
+                  aria-label="关闭 CRM 数据弹窗"
+                  onClick={() => setCrmOpen(false)}
+                >
                   <X size={20} aria-hidden="true" />
                 </button>
               </header>
@@ -862,7 +920,9 @@ export function AiWorkerClient() {
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={10}>暂无可同步客户，先执行 AI 搜索后会在这里预览 CRM 字段。</td>
+                        <td colSpan={10}>
+                          暂无可同步客户，先执行 AI 搜索后会在这里预览 CRM 字段。
+                        </td>
                       </tr>
                     )}
                   </tbody>
@@ -874,7 +934,12 @@ export function AiWorkerClient() {
                   第 {crmPage} / {crmPageCount} 页，已整理 {crmRows.length} 条同步记录
                 </span>
                 <div className="crmDataPager">
-                  <button type="button" aria-label="上一页" disabled={crmPage === 1} onClick={() => changeCrmPage(crmPage - 1)}>
+                  <button
+                    type="button"
+                    aria-label="上一页"
+                    disabled={crmPage === 1}
+                    onClick={() => changeCrmPage(crmPage - 1)}
+                  >
                     <ChevronLeft size={18} aria-hidden="true" />
                   </button>
                   {Array.from({ length: crmPageCount }, (_, index) => index + 1).map((page) => (
@@ -947,7 +1012,10 @@ function AiWorkerLanding({
   const filteredHistory = useMemo(() => {
     const keyword = taskSearch.trim().toLowerCase();
     if (!keyword) return taskHistory;
-    return taskHistory.filter((task) => task.title.toLowerCase().includes(keyword) || task.prompt.toLowerCase().includes(keyword));
+    return taskHistory.filter(
+      (task) =>
+        task.title.toLowerCase().includes(keyword) || task.prompt.toLowerCase().includes(keyword)
+    );
   }, [taskHistory, taskSearch]);
   function pickExample(text: string) {
     onPromptChange(text);
@@ -986,7 +1054,9 @@ function AiWorkerLanding({
         </label>
         <div className="aiLandingTaskTitle">
           历史任务
-          <span className="aiLandingTaskCount">{historyLoading ? "..." : `${filteredHistory.length}`}</span>
+          <span className="aiLandingTaskCount">
+            {historyLoading ? "..." : `${filteredHistory.length}`}
+          </span>
         </div>
         {filteredHistory.length === 0 ? (
           <div className="aiLandingTaskEmpty">
@@ -1005,7 +1075,8 @@ function AiWorkerLanding({
                 >
                   <strong>{task.title || "未命名任务"}</strong>
                   <small>
-                    {formatHistoryDate(task.createdAt)} · 主客户 {task.leadCount} · 指令 {task.queryCount}
+                    {formatHistoryDate(task.createdAt)} · 主客户 {task.leadCount} · 指令{" "}
+                    {task.queryCount}
                   </small>
                   <span className={`aiLandingTaskStatus status-${task.status}`}>{task.status}</span>
                 </button>
@@ -1019,7 +1090,8 @@ function AiWorkerLanding({
         <div className="aiLandingHeroInner">
           <h1 className="aiLandingTitle">外贸获客 寻找下一个客户</h1>
           <p className="aiLandingSubtitle">
-            你的 AI 外贸员 7×24 小时工作，先理解产品与客户画像，再自动搜索潜在客户、判断 ICP、生成开发信，并同步 CRM 跟进。
+            你的 AI 外贸员 7×24 小时工作，先理解产品与客户画像，再自动搜索潜在客户、判断
+            ICP、生成开发信，并同步 CRM 跟进。
           </p>
 
           <div className="aiLandingComposer">
@@ -1060,7 +1132,11 @@ function AiWorkerLanding({
           </div>
 
           {hostingDialogOpen ? (
-            <div className="hostingModeBackdrop" role="presentation" onClick={() => setHostingDialogOpen(false)}>
+            <div
+              className="hostingModeBackdrop"
+              role="presentation"
+              onClick={() => setHostingDialogOpen(false)}
+            >
               <section
                 className="hostingModeDialog"
                 role="dialog"
@@ -1077,7 +1153,9 @@ function AiWorkerLanding({
                   <X size={16} aria-hidden="true" />
                 </button>
                 <button
-                  className={draftHostingMode === "semi" ? "hostingModeOption active" : "hostingModeOption"}
+                  className={
+                    draftHostingMode === "semi" ? "hostingModeOption active" : "hostingModeOption"
+                  }
                   type="button"
                   onClick={() => setDraftHostingMode("semi")}
                 >
@@ -1094,7 +1172,9 @@ function AiWorkerLanding({
                   <em>运行中</em>
                 </button>
                 <button
-                  className={draftHostingMode === "full" ? "hostingModeOption active" : "hostingModeOption"}
+                  className={
+                    draftHostingMode === "full" ? "hostingModeOption active" : "hostingModeOption"
+                  }
                   type="button"
                   onClick={() => setDraftHostingMode("full")}
                 >
@@ -1208,10 +1288,13 @@ function AiWorkerConversation({
   onBack
 }: ConversationProps) {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount = currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ?? 0;
+  const executedCount =
+    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
+    0;
   const rawSearchResults = useMemo(() => buildDisplaySearchResults(currentTask), [currentTask]);
   const rawResultCount =
-    currentTask?.searchQueries?.reduce((total, query) => total + (query.resultCount ?? 0), 0) ?? rawSearchResults.length;
+    currentTask?.searchQueries?.reduce((total, query) => total + (query.resultCount ?? 0), 0) ??
+    rawSearchResults.length;
   const qualifiedCount = leads.filter((lead) => lead.score >= 75).length;
   const running = creating || searching || approving;
   const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
@@ -1224,7 +1307,12 @@ function AiWorkerConversation({
     leadQualityCounts,
     hasError: Boolean(error)
   });
-  const activityMetrics = buildActivityMetrics({ currentTask, searchResult, leads, leadQualityCounts });
+  const activityMetrics = buildActivityMetrics({
+    currentTask,
+    searchResult,
+    leads,
+    leadQualityCounts
+  });
   const activityLogs = buildActivityLogs({
     creating,
     searching,
@@ -1326,9 +1414,7 @@ function AiWorkerConversation({
                 根据产品画像、参考客户官网和目标市场自动扩展，并组合成首批搜索指令。
               </div>
             </div>
-            <span className="keywordStatusPill">
-              已同步
-            </span>
+            <span className="keywordStatusPill">已同步</span>
           </div>
           {profileSourceRows.length ? (
             <div className="profileSourceGrid">
@@ -1358,7 +1444,8 @@ function AiWorkerConversation({
           ))}
           <div className="keywordActions">
             <span className="keywordMeta">
-              搜索指令会一次性执行完本轮全部 query；目录站、B2B 平台和内容页会降权，主候选表优先展示可触达客户
+              搜索指令会一次性执行完本轮全部 query；目录站、B2B
+              平台和内容页会降权，主候选表优先展示可触达客户
             </span>
           </div>
         </section>
@@ -1374,17 +1461,19 @@ function AiWorkerConversation({
             <div className="flowDot">✓</div>
             <div>
               <strong>筛选目标客户</strong>
-              <span>{searching ? "正在调用 Brave 搜索" : queryCount ? "搜索指令已就绪" : "等待任务创建"}</span>
+              <span>
+                {searching ? "正在调用 Brave 搜索" : queryCount ? "搜索指令已就绪" : "等待任务创建"}
+              </span>
             </div>
           </div>
           <div className={leadQualityCounts.rawEvidence ? "flowRow active" : "flowRow pending"}>
-            <div className={leadQualityCounts.rawEvidence ? "flowDot" : "flowDot pending"}>{leadQualityCounts.rawEvidence ? "✓" : "2"}</div>
+            <div className={leadQualityCounts.rawEvidence ? "flowDot" : "flowDot pending"}>
+              {leadQualityCounts.rawEvidence ? "✓" : "2"}
+            </div>
             <div>
               <strong>线索清洗结果</strong>
               <span>
-                {searchResult
-                  ? formatLeadQualitySummary(leadQualityCounts)
-                  : "等待首轮搜索结果"}
+                {searchResult ? formatLeadQualitySummary(leadQualityCounts) : "等待首轮搜索结果"}
               </span>
             </div>
           </div>
@@ -1425,7 +1514,9 @@ function AiWorkerConversation({
                     <tr key={result.id}>
                       <td className="rawResultTitle">{result.title}</td>
                       <td>{result.domain}</td>
-                      <td title="仅代表这条搜索指令的目标国家，不代表客户官网真实国家。">{result.country}</td>
+                      <td title="仅代表这条搜索指令的目标国家，不代表客户官网真实国家。">
+                        {result.country}
+                      </td>
                       <td className="rawResultQuery">{result.query}</td>
                       <td>{result.status}</td>
                     </tr>
@@ -1469,7 +1560,11 @@ function AiWorkerConversation({
                     <tr key={lead.id}>
                       <td>
                         <button
-                          className={lead.id === selectedLeadId ? "leadCheckButton active" : "leadCheckButton"}
+                          className={
+                            lead.id === selectedLeadId
+                              ? "leadCheckButton active"
+                              : "leadCheckButton"
+                          }
                           type="button"
                           aria-label={`选择 ${lead.companyName}`}
                           onClick={() => onSelectLead(lead.id)}
@@ -1510,7 +1605,9 @@ function AiWorkerConversation({
                 ) : (
                   <tr>
                     <td className="leadEmptyCell" colSpan={12}>
-                      {searching ? "正在搜索并清洗候选客户..." : "暂无候选客户。创建任务后会自动执行本轮全部搜索指令。"}
+                      {searching
+                        ? "正在搜索并清洗候选客户..."
+                        : "暂无候选客户。创建任务后会自动执行本轮全部搜索指令。"}
                     </td>
                   </tr>
                 )}
@@ -1519,7 +1616,13 @@ function AiWorkerConversation({
           </div>
           <div className="leadActionBar">
             <div className="leadTools">
-              <button className="leadAction" type="button" data-open-mail="true" onClick={onOpenMail} disabled={running || !leads.length}>
+              <button
+                className="leadAction"
+                type="button"
+                data-open-mail="true"
+                onClick={onOpenMail}
+                disabled={running || !leads.length}
+              >
                 ✉ 发邮件
               </button>
               <button className="leadAction" type="button" data-open-crm="true" onClick={onOpenCrm}>
@@ -1531,11 +1634,21 @@ function AiWorkerConversation({
                 已找到 {leads.length} 条，ICP 75+ {qualifiedCount} 条
                 {leads.length ? ` · 当前 ${leadRangeStart}-${leadRangeEnd}` : ""}
               </span>
-              <button type="button" onClick={() => changeLeadPage(leadPage - 1)} disabled={leadPage <= 1 || !leads.length}>
+              <button
+                type="button"
+                onClick={() => changeLeadPage(leadPage - 1)}
+                disabled={leadPage <= 1 || !leads.length}
+              >
                 上一页
               </button>
-              <strong>{leadPage} / {leadPageCount}</strong>
-              <button type="button" onClick={() => changeLeadPage(leadPage + 1)} disabled={leadPage >= leadPageCount || !leads.length}>
+              <strong>
+                {leadPage} / {leadPageCount}
+              </strong>
+              <button
+                type="button"
+                onClick={() => changeLeadPage(leadPage + 1)}
+                disabled={leadPage >= leadPageCount || !leads.length}
+              >
                 下一页
               </button>
             </div>
@@ -1552,7 +1665,12 @@ function AiWorkerConversation({
                   : `本次将同步 ${crmRows.length} 家客户，字段已按 CRM 客户库整理。`}
               </strong>
             </div>
-            <button className="crmSyncOpen" type="button" data-open-crm-preview="true" onClick={onOpenCrm}>
+            <button
+              className="crmSyncOpen"
+              type="button"
+              data-open-crm-preview="true"
+              onClick={onOpenCrm}
+            >
               查看 CRM 数据 <ExternalLink size={15} aria-hidden="true" />
             </button>
           </div>
@@ -1609,8 +1727,8 @@ function AiWorkerConversation({
           {sentCount
             ? `已完成 ${sentCount} 封 Gmail 发送，${crmSyncedCount} 家客户已同步 CRM，${pendingFollowupCount} 个 3 天后跟进提醒已创建。`
             : leads.length
-            ? `我已为您找到 ${leads.length} 家候选公司，其中 ${qualifiedCount} 家达到 ICP 75 分以上。下一步可以选择客户进入邮件触达。`
-            : "任务创建后，系统会先生成搜索策略，再调用搜索接口清洗候选客户。当前页面已经接入真实任务链路，等待首批候选客户返回。"}
+              ? `我已为您找到 ${leads.length} 家候选公司，其中 ${qualifiedCount} 家达到 ICP 75 分以上。下一步可以选择客户进入邮件触达。`
+              : "任务创建后，系统会先生成搜索策略，再调用搜索接口清洗候选客户。当前页面已经接入真实任务链路，等待首批候选客户返回。"}
         </p>
 
         <section className="projectCard resultCard">
@@ -1630,14 +1748,22 @@ function AiWorkerConversation({
               <tr>
                 <td>{currentTask?.id ? currentTask.id.slice(0, 8).toUpperCase() : "待创建"}</td>
                 <td>
-                  <span className="statusTag">{sentCount ? "已发送" : leads.length ? "待确认" : "待搜索"}</span>
+                  <span className="statusTag">
+                    {sentCount ? "已发送" : leads.length ? "待确认" : "待搜索"}
+                  </span>
                 </td>
                 <td>{leads.length}</td>
                 <td>{sentCount}封/0封</td>
                 <td>中国 B2B 工厂产品推荐</td>
                 <td>{currentTask?.status ?? "pending"}</td>
                 <td>
-                  <button className="tableSendBtn" type="button" data-open-mail="true" onClick={onOpenMail} disabled={running || !leads.length}>
+                  <button
+                    className="tableSendBtn"
+                    type="button"
+                    data-open-mail="true"
+                    onClick={onOpenMail}
+                    disabled={running || !leads.length}
+                  >
                     发送
                   </button>
                 </td>
@@ -1674,11 +1800,21 @@ function AiWorkerConversation({
           <label className="srOnly" htmlFor="project-hosting-mode">
             托管模式
           </label>
-          <select aria-label="托管模式" defaultValue="semi" id="project-hosting-mode" name="hostingMode">
+          <select
+            aria-label="托管模式"
+            defaultValue="semi"
+            id="project-hosting-mode"
+            name="hostingMode"
+          >
             <option value="semi">半托管</option>
             <option value="full">全托管</option>
           </select>
-          <button className="sendCircle" type="button" onClick={onSendCommand} disabled={running || command.trim().length === 0}>
+          <button
+            className="sendCircle"
+            type="button"
+            onClick={onSendCommand}
+            disabled={running || command.trim().length === 0}
+          >
             ↑
           </button>
         </div>
@@ -1747,32 +1883,32 @@ function AgentSearchActivity({
     : leadQualityCounts.rawEvidence
       ? `${leadQualityCounts.rawEvidence} 条原始候选证据，${leadQualityCounts.main} 条主客户`
       : resultCount
-      ? `本轮搜索已完成，命中 ${resultCount} 条 Brave 原始结果`
-      : leadCount
-        ? `已有 ${leadCount} 条主客户写入列表`
-        : hasError
-          ? "搜索接口失败，任务已保留"
-      : "等待搜索任务启动";
+        ? `本轮搜索已完成，命中 ${resultCount} 条 Brave 原始结果`
+        : leadCount
+          ? `已有 ${leadCount} 条主客户写入列表`
+          : hasError
+            ? "搜索接口失败，任务已保留"
+            : "等待搜索任务启动";
   const subline = active
     ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令，清洗后会拆分为主客户、待国家复核和拒绝。`
     : leadQualityCounts.rawEvidence
       ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；${formatLeadQualitySummary(leadQualityCounts)}。`
-    : resultCount
-      ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令。`
-    : leadCount
-      ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；接口失败时会保留已返回候选，可重新执行搜索补齐。`
-    : hasError
-      ? `已保留 ${queryCount || "-"} 条搜索指令，修复配置或网络后可重新执行搜索。`
-    : queryCount
-      ? `已生成 ${queryCount} 条搜索指令，将一次性执行本轮全部 query。`
-      : "创建任务后会自动生成搜索指令并开始执行。";
+      : resultCount
+        ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令。`
+        : leadCount
+          ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；接口失败时会保留已返回候选，可重新执行搜索补齐。`
+          : hasError
+            ? `已保留 ${queryCount || "-"} 条搜索指令，修复配置或网络后可重新执行搜索。`
+            : queryCount
+              ? `已生成 ${queryCount} 条搜索指令，将一次性执行本轮全部 query。`
+              : "创建任务后会自动生成搜索指令并开始执行。";
   const workText = active
     ? headline
     : resultCount || leadCount
       ? "搜索记录已生成"
       : hasError
         ? "搜索失败，可重新执行"
-      : "等待分配搜索任务";
+        : "等待分配搜索任务";
 
   return (
     <section
@@ -1804,7 +1940,9 @@ function AgentSearchActivity({
       <div className="agentActivityRail">
         {steps.map((step, index) => (
           <div className={`agentActivityStep ${step.state}`} key={step.title}>
-            <span className="agentStepDot">{step.state === "done" ? "✓" : step.state === "failed" ? "!" : index + 1}</span>
+            <span className="agentStepDot">
+              {step.state === "done" ? "✓" : step.state === "failed" ? "!" : index + 1}
+            </span>
             <strong>{step.title}</strong>
             <small>{step.detail}</small>
           </div>
@@ -1832,7 +1970,15 @@ function AgentSearchActivity({
         <span>正在工作:</span>
         <strong>{workText}</strong>
         <b>{active ? formatElapsedTime(elapsedSeconds) : "--:--"}</b>
-        <em>{active ? "AI正在任务执行" : resultCount || leadCount ? "AI任务已记录" : hasError ? "执行失败" : "等待启动"}</em>
+        <em>
+          {active
+            ? "AI正在任务执行"
+            : resultCount || leadCount
+              ? "AI任务已记录"
+              : hasError
+                ? "执行失败"
+                : "等待启动"}
+        </em>
       </div>
 
       <div className="agentActivityLogs" aria-label="AI 执行日志">
@@ -1928,7 +2074,13 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "未知错误";
 }
 
-const planningStepNames = ["load_task", "analyze_product_profile", "analyze_customer_profile", "expand_keywords", "plan_search_queries"];
+const planningStepNames = [
+  "load_task",
+  "analyze_product_profile",
+  "analyze_customer_profile",
+  "expand_keywords",
+  "plan_search_queries"
+];
 const searchStepNames = ["brave_search", "normalize_leads", "extract_contacts", "score_icp"];
 
 function isBackendTaskActive(task: LeadTask) {
@@ -1958,10 +2110,17 @@ function isTaskSearching(task: LeadTask) {
   }
 
   const scoreStep = findStep(task, "score_icp");
-  const pendingQueries = task.searchQueries?.filter((query) => query.executionStatus === "pending").length ?? 0;
-  const runningQueries = task.searchQueries?.filter((query) => query.executionStatus === "running").length ?? 0;
+  const pendingQueries =
+    task.searchQueries?.filter((query) => query.executionStatus === "pending").length ?? 0;
+  const runningQueries =
+    task.searchQueries?.filter((query) => query.executionStatus === "running").length ?? 0;
 
-  return pendingQueries > 0 || runningQueries > 0 || scoreStep?.status === "running" || scoreStep?.status === "pending";
+  return (
+    pendingQueries > 0 ||
+    runningQueries > 0 ||
+    scoreStep?.status === "running" ||
+    scoreStep?.status === "pending"
+  );
 }
 
 function firstFailedStepError(task: LeadTask) {
@@ -1989,12 +2148,16 @@ function stepLabel(nodeName: string) {
 }
 
 function activeStepLabel(task: LeadTask, names: string[]) {
-  const running = task.agentSteps?.find((step) => names.includes(step.nodeName) && step.status === "running");
+  const running = task.agentSteps?.find(
+    (step) => names.includes(step.nodeName) && step.status === "running"
+  );
   if (running) {
     return stepLabel(running.nodeName);
   }
 
-  const pending = task.agentSteps?.find((step) => names.includes(step.nodeName) && step.status === "pending");
+  const pending = task.agentSteps?.find(
+    (step) => names.includes(step.nodeName) && step.status === "pending"
+  );
   return pending ? stepLabel(pending.nodeName) : null;
 }
 
@@ -2046,7 +2209,9 @@ function buildKeywordRows(task: LeadTask | null, taskSurfaceActive = false): Key
   );
 
   if (!task) {
-    return taskSurfaceActive ? [...pendingRows, searchInstructionRow] : [...fallbackKeywordRows, searchInstructionRow];
+    return taskSurfaceActive
+      ? [...pendingRows, searchInstructionRow]
+      : [...fallbackKeywordRows, searchInstructionRow];
   }
 
   const groups = task.inputPayload?.keywordGroups ?? firstKeywordGroups(task.searchQueries) ?? {};
@@ -2085,10 +2250,16 @@ function buildProfileSourceRows(task: LeadTask | null): ProfileSourceRow[] {
     : formatSourceUrls(signals?.referenceCustomerUrlsUsed);
 
   if (productSources.length) {
-    rows.push({ label: siteEvidence?.productSites?.length ? "产品网页证据" : "产品画像URL", values: productSources });
+    rows.push({
+      label: siteEvidence?.productSites?.length ? "产品网页证据" : "产品画像URL",
+      values: productSources
+    });
   }
   if (referenceSources.length) {
-    rows.push({ label: siteEvidence?.referenceCustomerSites?.length ? "客户网页证据" : "客户画像URL", values: referenceSources });
+    rows.push({
+      label: siteEvidence?.referenceCustomerSites?.length ? "客户网页证据" : "客户画像URL",
+      values: referenceSources
+    });
   }
   if (siteEvidence?.summary?.attempted) {
     rows.push({
@@ -2101,15 +2272,42 @@ function buildProfileSourceRows(task: LeadTask | null): ProfileSourceRow[] {
   }
   if (signals?.marketSelection) {
     const selectedMarkets = signals.marketSelection.targetMarkets ?? [];
+    const secondaryMarkets = signals.marketSelection.secondaryMarkets ?? [];
     const promptMarkets = signals.marketSelection.promptMarkets ?? [];
     const profileMarkets = signals.marketSelection.profileMarkets ?? [];
     rows.push({
       label: "目标市场来源",
       values: [
-        `本轮采用：${selectedMarkets.length ? selectedMarkets.join(", ") : "-"}`,
+        `主市场：${selectedMarkets.length ? selectedMarkets.join(", ") : "-"}`,
+        `次级池：${secondaryMarkets.length ? secondaryMarkets.join(", ") : "-"}`,
         `用户输入：${promptMarkets.length ? promptMarkets.join(", ") : "-"}`,
         `画像保存：${profileMarkets.length ? profileMarkets.join(", ") : "-"}`,
         `来源：${formatMarketSource(signals.marketSelection.marketSource)}`
+      ]
+    });
+  }
+  if (signals?.qualityGate) {
+    rows.push({
+      label: "质量门禁",
+      values: [
+        `动作：${formatQualityGateAction(signals.qualityGate.action)}`,
+        `已执行：${signals.qualityGate.executedQueryCount ?? 0} 条`,
+        `暂停 pending：${signals.qualityGate.pendingQueryCount ?? 0} 条`,
+        `剩余自动执行：${signals.qualityGate.remainingQueries ?? 0} 条`,
+        ...(signals.qualityGate.reasons?.length
+          ? [`原因：${signals.qualityGate.reasons.join(", ")}`]
+          : []),
+        ...formatPausedPendingSamples(signals.qualityGate.samplePendingQueries)
+      ]
+    });
+  }
+  if (signals?.qualityFallbackSuggestion?.queryCount) {
+    rows.push({
+      label: "Fallback 建议",
+      values: [
+        `状态：${signals.qualityFallbackSuggestion.status === "suggestion_only" ? "仅建议，未改写 pending" : (signals.qualityFallbackSuggestion.status ?? "-")}`,
+        `建议追加：${signals.qualityFallbackSuggestion.queryCount} 条`,
+        ...formatFallbackSuggestionSamples(signals.qualityFallbackSuggestion.sampleQueries)
       ]
     });
   }
@@ -2133,10 +2331,41 @@ function formatMarketSource(source: string | undefined) {
     merged: "合并",
     none: "未识别"
   };
-  return source ? labels[source] ?? source : "-";
+  return source ? (labels[source] ?? source) : "-";
 }
 
-function keywordRow(label: string, values: string[] | undefined, fallback: string[] = []): KeywordRow {
+function formatQualityGateAction(action: string | undefined) {
+  const labels: Record<string, string> = {
+    paused_pending_queries_for_review: "暂停待复核，保留原 pending",
+    quality_fallback_suggestion: "生成 fallback 建议"
+  };
+  return action ? (labels[action] ?? action) : "-";
+}
+
+function formatFallbackSuggestionSamples(
+  samples: NonNullable<ProfileSignals["qualityFallbackSuggestion"]>["sampleQueries"]
+) {
+  return (samples ?? [])
+    .slice(0, 2)
+    .map((item) => `建议：${[item.country, item.query].filter(Boolean).join(" | ")}`);
+}
+
+function formatPausedPendingSamples(
+  samples: NonNullable<ProfileSignals["qualityGate"]>["samplePendingQueries"]
+) {
+  return (samples ?? [])
+    .slice(0, 2)
+    .map(
+      (item) =>
+        `保留：${[item.country, item.strategyTemplate, item.query].filter(Boolean).join(" | ")}`
+    );
+}
+
+function keywordRow(
+  label: string,
+  values: string[] | undefined,
+  fallback: string[] = []
+): KeywordRow {
   return {
     label,
     values: (values?.length ? values : fallback).slice(0, label === "搜索指令" ? 8 : 6)
@@ -2146,7 +2375,10 @@ function keywordRow(label: string, values: string[] | undefined, fallback: strin
 function collectSearchQueries(task: LeadTask | null): SearchQuery[] {
   const merged = new Map<string, SearchQuery>();
 
-  for (const query of [...(task?.inputPayload?.searchQueries ?? []), ...(task?.searchQueries ?? [])]) {
+  for (const query of [
+    ...(task?.inputPayload?.searchQueries ?? []),
+    ...(task?.searchQueries ?? [])
+  ]) {
     if (!query.query?.trim()) {
       continue;
     }
@@ -2198,7 +2430,9 @@ function buildActivitySteps({
   hasError: boolean;
 }): ActivityStep[] {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount = currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ?? 0;
+  const executedCount =
+    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
+    0;
   const qualifiedCount = leads.filter((lead) => lead.score >= 75).length;
   const hasReturnedLeads = leads.length > 0;
 
@@ -2223,25 +2457,41 @@ function buildActivitySteps({
             ? `已执行 ${executedCount} 条，候选已回写`
             : hasError
               ? "接口失败，可重新执行"
-          : "等待搜索",
-      state: searching ? "active" : searchResult || executedCount ? "done" : hasError ? "failed" : "pending"
+              : "等待搜索",
+      state: searching
+        ? "active"
+        : searchResult || executedCount
+          ? "done"
+          : hasError
+            ? "failed"
+            : "pending"
     },
     {
       title: "清洗候选",
       detail: searchResult
-        ? `${leadQualityCounts.rawEvidence} 条证据，${leadQualityCounts.main} 条主客户，${leadQualityCounts.needsCountryReview} 条待国家复核`
+        ? formatLeadQualitySummary(leadQualityCounts)
         : hasReturnedLeads
           ? `已有 ${leads.length} 条主客户进入表格`
-        : searching
-          ? "标记社媒/文章/电商风险"
+          : searching
+            ? "标记社媒/文章/电商风险"
+            : hasError
+              ? "未返回候选，等待重试"
+              : "等待结果",
+      state: searching
+        ? "active"
+        : searchResult || hasReturnedLeads
+          ? "done"
           : hasError
-            ? "未返回候选，等待重试"
-          : "等待结果",
-      state: searching ? "active" : searchResult || hasReturnedLeads ? "done" : hasError ? "failed" : "pending"
+            ? "failed"
+            : "pending"
     },
     {
       title: "ICP 评分",
-      detail: leads.length ? `已产出 ${leads.length} 条主客户，${qualifiedCount} 条 75+` : searching ? "正在评分和归因" : "等待清洗",
+      detail: leads.length
+        ? `已产出 ${leads.length} 条主客户，${qualifiedCount} 条 75+`
+        : searching
+          ? "正在评分和归因"
+          : "等待清洗",
       state: leads.length ? "done" : searching ? "active" : "pending"
     }
   ];
@@ -2259,8 +2509,15 @@ function buildActivityMetrics({
   leadQualityCounts: LeadQualityCounts;
 }): ActivityMetric[] {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount = currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ?? 0;
+  const executedCount =
+    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
+    0;
   const failedQueries = searchResult?.failedQueries ?? 0;
+  const reviewOrRejectedCount =
+    leadQualityCounts.needsCountryReview +
+    leadQualityCounts.intelligenceReview +
+    leadQualityCounts.evidenceReview +
+    leadQualityCounts.rejected;
 
   return [
     {
@@ -2270,7 +2527,11 @@ function buildActivityMetrics({
     },
     {
       label: "Brave 命中",
-      value: searchResult ? String(searchResult.resultCount) : executedCount ? `已执行 ${executedCount}` : "等待",
+      value: searchResult
+        ? String(searchResult.resultCount)
+        : executedCount
+          ? `已执行 ${executedCount}`
+          : "等待",
       tone: "orange"
     },
     {
@@ -2281,8 +2542,8 @@ function buildActivityMetrics({
     {
       label: failedQueries ? "失败指令" : "待复核/拒绝",
       value: searchResult
-        ? String(failedQueries || leadQualityCounts.needsCountryReview + leadQualityCounts.rejected)
-        : String(leadQualityCounts.needsCountryReview + leadQualityCounts.rejected),
+        ? String(failedQueries || reviewOrRejectedCount)
+        : String(reviewOrRejectedCount),
       tone: failedQueries ? "orange" : "gray"
     }
   ];
@@ -2306,7 +2567,9 @@ function buildActivityLogs({
   hasError: boolean;
 }): ActivityLog[] {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount = currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ?? 0;
+  const executedCount =
+    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
+    0;
   const qualifiedCount = leads.filter((lead) => lead.score >= 75).length;
   const hasTask = Boolean(currentTask);
   const hasLeads = leads.length > 0;
@@ -2314,7 +2577,11 @@ function buildActivityLogs({
   return [
     {
       title: "LLM思考中",
-      detail: creating ? "正在理解任务、产品画像和目标市场" : hasTask ? "任务理解完成" : "等待用户输入",
+      detail: creating
+        ? "正在理解任务、产品画像和目标市场"
+        : hasTask
+          ? "任务理解完成"
+          : "等待用户输入",
       state: creating ? "active" : hasTask ? "done" : "pending"
     },
     {
@@ -2324,7 +2591,11 @@ function buildActivityLogs({
     },
     {
       title: "任务规划中",
-      detail: queryCount ? `已生成 ${queryCount} 条搜索指令` : creating ? "正在生成执行步骤" : "等待画像读取",
+      detail: queryCount
+        ? `已生成 ${queryCount} 条搜索指令`
+        : creating
+          ? "正在生成执行步骤"
+          : "等待画像读取",
       state: queryCount ? "done" : creating ? "active" : "pending"
     },
     {
@@ -2337,8 +2608,14 @@ function buildActivityLogs({
             ? `已执行 ${executedCount} 条 query`
             : hasError
               ? "搜索接口失败，可重试"
-            : "等待搜索接口",
-      state: searching ? "active" : searchResult || executedCount ? "done" : hasError ? "failed" : "pending"
+              : "等待搜索接口",
+      state: searching
+        ? "active"
+        : searchResult || executedCount
+          ? "done"
+          : hasError
+            ? "failed"
+            : "pending"
     },
     {
       title: "数据搜索完成",
@@ -2348,12 +2625,19 @@ function buildActivityLogs({
           ? `${leads.length} 条主客户已写入列表`
           : hasError
             ? "本轮未写入候选"
-          : "等待候选客户",
-      state: searchResult || hasLeads ? "done" : searching ? "active" : hasError ? "failed" : "pending"
+            : "等待候选客户",
+      state:
+        searchResult || hasLeads ? "done" : searching ? "active" : hasError ? "failed" : "pending"
     },
     {
       title: "检索结果分析",
-      detail: hasLeads ? `${leads.length} 条主客户，${qualifiedCount} 条 ICP 75+` : searching ? "正在清洗、去重和评分" : hasError ? "等待重新搜索" : "等待结果分析",
+      detail: hasLeads
+        ? `${leads.length} 条主客户，${qualifiedCount} 条 ICP 75+`
+        : searching
+          ? "正在清洗、去重和评分"
+          : hasError
+            ? "等待重新搜索"
+            : "等待结果分析",
       state: hasLeads ? "done" : searching ? "active" : hasError ? "failed" : "pending"
     }
   ];
@@ -2385,11 +2669,18 @@ function firstKeywordGroups(queries: SearchQuery[] | undefined) {
 }
 
 function summarizeSearchResultFromTask(task: LeadTask): SearchRunResult {
-  const completedQueries = task.searchQueries?.filter((query) => query.executionStatus === "completed") ?? [];
-  const failedQueries = task.searchQueries?.filter((query) => query.executionStatus === "failed") ?? [];
-  const pendingQueries = task.searchQueries?.filter((query) => query.executionStatus === "pending") ?? [];
-  const runningQueries = task.searchQueries?.filter((query) => query.executionStatus === "running") ?? [];
-  const resultCount = (task.searchQueries ?? []).reduce((sum, query) => sum + (query.resultCount ?? 0), 0);
+  const completedQueries =
+    task.searchQueries?.filter((query) => query.executionStatus === "completed") ?? [];
+  const failedQueries =
+    task.searchQueries?.filter((query) => query.executionStatus === "failed") ?? [];
+  const pendingQueries =
+    task.searchQueries?.filter((query) => query.executionStatus === "pending") ?? [];
+  const runningQueries =
+    task.searchQueries?.filter((query) => query.executionStatus === "running") ?? [];
+  const resultCount = (task.searchQueries ?? []).reduce(
+    (sum, query) => sum + (query.resultCount ?? 0),
+    0
+  );
   const createdCandidates = task.leadCandidates?.length ?? 0;
   const skippedCandidates = completedQueries.reduce(
     (sum, query) => sum + Math.max((query.resultCount ?? 0) - (query.qualifiedCount ?? 0), 0),
@@ -2450,7 +2741,10 @@ function buildDisplayLeads(task: LeadTask | null): DisplayLead[] {
     .filter((lead) => {
       return isDisplayableLeadCandidate(lead);
     })
-    .map((lead) => ({ displayLead: buildDisplayLead(lead), priority: displayLeadPriority(lead, targetMarkets) }))
+    .map((lead) => ({
+      displayLead: buildDisplayLead(lead),
+      priority: displayLeadPriority(lead, targetMarkets)
+    }))
     .sort((left, right) => {
       const adjustedDelta =
         right.displayLead.score + right.priority - (left.displayLead.score + left.priority);
@@ -2472,9 +2766,22 @@ function isDisplayableLeadCandidate(lead: LeadCandidate) {
   const score = lead.icpScore?.score ?? 0;
   return (
     isMainLeadStatus(lead.status) &&
+    !hasEvidenceLeadType(lead) &&
     score >= 50 &&
     (lead.countryConfidence === "high" || lead.countryConfidence === "medium") &&
     !lead.countryConflict
+  );
+}
+
+function hasEvidenceLeadType(lead: LeadCandidate) {
+  const payload = icpReasonPayload(lead.icpScore?.reasons);
+  const leadType = typeof payload?.leadType === "string" ? payload.leadType : "";
+  return (
+    lead.status === "intelligence_review" ||
+    lead.status === "evidence_review" ||
+    leadType === "intelligence" ||
+    leadType === "content_evidence" ||
+    leadType === "government_information"
   );
 }
 
@@ -2482,9 +2789,15 @@ function summarizeLeadQualityCounts(task: LeadTask | null): LeadQualityCounts {
   const candidates = task?.leadCandidates ?? [];
   const main = candidates.filter(isDisplayableLeadCandidate).length;
   const rejected = candidates.filter((lead) => lead.status === "rejected").length;
+  const intelligenceReview = candidates.filter(
+    (lead) => lead.status === "intelligence_review"
+  ).length;
+  const evidenceReview = candidates.filter((lead) => lead.status === "evidence_review").length;
   const needsCountryReview = candidates.filter(
     (lead) =>
       lead.status !== "rejected" &&
+      lead.status !== "intelligence_review" &&
+      lead.status !== "evidence_review" &&
       !isDisplayableLeadCandidate(lead) &&
       (lead.status === "needs_country_review" ||
         lead.status === "country_conflict_review" ||
@@ -2493,12 +2806,17 @@ function summarizeLeadQualityCounts(task: LeadTask | null): LeadQualityCounts {
         lead.countryConfidence === "unknown")
   ).length;
   const rawEvidence = candidates.length;
-  const other = Math.max(rawEvidence - main - rejected - needsCountryReview, 0);
+  const other = Math.max(
+    rawEvidence - main - rejected - needsCountryReview - intelligenceReview - evidenceReview,
+    0
+  );
 
   return {
     rawEvidence,
     main,
     needsCountryReview,
+    intelligenceReview,
+    evidenceReview,
     rejected,
     other
   };
@@ -2511,6 +2829,12 @@ function formatLeadQualitySummary(counts: LeadQualityCounts) {
     `${counts.needsCountryReview} 条待国家复核`,
     `${counts.rejected} 条拒绝`
   ];
+  if (counts.intelligenceReview) {
+    parts.push(`${counts.intelligenceReview} 条采购情报线索`);
+  }
+  if (counts.evidenceReview) {
+    parts.push(`${counts.evidenceReview} 条证据待复核`);
+  }
   if (counts.other) {
     parts.push(`${counts.other} 条其他待处理`);
   }
@@ -2519,9 +2843,16 @@ function formatLeadQualitySummary(counts: LeadQualityCounts) {
 }
 
 function buildDisplayLead(lead: LeadCandidate): DisplayLead {
-  const email = formatEmailContacts(lead.contacts?.filter((contact) => contact.type === "email").map((contact) => contact.value));
-  const phone = formatPhoneContacts(lead.contacts?.filter((contact) => contact.type === "phone").map((contact) => contact.value));
-  const social = formatSocialProfiles(lead.contacts?.filter((contact) => contact.type === "social").map((contact) => contact.value));
+  const email = formatEmailContacts(
+    lead.contacts?.filter((contact) => contact.type === "email").map((contact) => contact.value),
+    lead.website ?? lead.sourceUrl
+  );
+  const phone = formatPhoneContacts(
+    lead.contacts?.filter((contact) => contact.type === "phone").map((contact) => contact.value)
+  );
+  const social = formatSocialProfiles(
+    lead.contacts?.filter((contact) => contact.type === "social").map((contact) => contact.value)
+  );
   const storedCountry = formatDisplayCountry(lead.inferredCountry ?? lead.country);
   const contactCountry = inferCountryFromLeadContacts(lead.contacts);
   const country = chooseDisplayCountry(storedCountry, contactCountry) || "-";
@@ -2553,7 +2884,10 @@ function chooseDisplayCountry(storedCountry: string, contactCountry: string) {
     return contactCountry;
   }
 
-  if (contactCountry && normalizeDisplayMarket(storedCountry) !== normalizeDisplayMarket(contactCountry)) {
+  if (
+    contactCountry &&
+    normalizeDisplayMarket(storedCountry) !== normalizeDisplayMarket(contactCountry)
+  ) {
     return contactCountry;
   }
 
@@ -2587,7 +2921,7 @@ function extractDisplayAttributedCompanyName(value: string) {
 
 function cleanupDisplayCompanyName(value: string | null | undefined) {
   return (value ?? "")
-    .replace(/\b(home|official site|website|about us|contact us|logo)\b/gi, "")
+    .replace(/\b(home|official site|website|about us|contact us|logo|tagline|awesome image|pdf)\b/gi, "")
     .replace(/^\s*(?:welcome to|official)\s+/i, "")
     .replace(/\s+\b(?:homepage|home page)\b$/i, "")
     .replace(/\s+/g, " ")
@@ -2598,7 +2932,7 @@ function cleanupDisplayCompanyName(value: string | null | undefined) {
 function isLikelyDisplayCompanyName(value: string, domainName: string) {
   const name = cleanupDisplayCompanyName(value);
   const lower = name.toLowerCase();
-  if (!name || name.length > 72 || looksLikeDisplayProductTitle(name)) {
+  if (!name || name.length > 72 || isForbiddenDisplayCompanyName(value) || looksLikeDisplayProductTitle(name)) {
     return false;
   }
 
@@ -2613,13 +2947,32 @@ function isLikelyDisplayCompanyName(value: string, domainName: string) {
   return /^[A-Z0-9][A-Za-z0-9&().' ]{2,48}$/.test(name);
 }
 
+function isForbiddenDisplayCompanyName(value: string) {
+  const normalized = (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return (
+    !normalized ||
+    displayForbiddenCompanyNameTerms.has(normalized) ||
+    /^by\s+[a-z0-9 .'-]{2,60}$/i.test(value.trim()) ||
+    /\b(?:tagline|awesome image|blog category|article author|pdf)\b/i.test(value)
+  );
+}
+
 function looksLikeDisplayProductTitle(value: string) {
   const lower = value.toLowerCase();
   return (
     containsAny(lower, displayProductTitleTerms) ||
     /\b(?:\d{2,5}\s?w|\d{2,5}w|48v|24v|85-300|vac|vdc|sfp\+?|100g|10g)\b/i.test(value) ||
     (containsAny(lower, displayTelecomBrandTerms) &&
-      containsAny(lower, ["rectifier", "module", "board", "rru", "bbu", "aau", "networking equipment", "hardware repair"]))
+      containsAny(lower, [
+        "rectifier",
+        "module",
+        "board",
+        "rru",
+        "bbu",
+        "aau",
+        "networking equipment",
+        "hardware repair"
+      ]))
   );
 }
 
@@ -2646,7 +2999,11 @@ function formatDomainLabelAsCompany(label: string) {
     .trim()
     .split(/\s+/)
     .filter(Boolean)
-    .map((part) => (displayDomainAcronymTerms.has(part.toLowerCase()) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1)))
+    .map((part) =>
+      displayDomainAcronymTerms.has(part.toLowerCase())
+        ? part.toUpperCase()
+        : part.charAt(0).toUpperCase() + part.slice(1)
+    )
     .join(" ");
 }
 
@@ -2678,7 +3035,8 @@ function displayLeadPriority(lead: LeadCandidate, targetMarkets: string[]) {
     .toLowerCase();
   let priority = 0;
 
-  if (contacts.some((contact) => contact.type === "email" || contact.type === "phone")) priority += 4;
+  if (contacts.some((contact) => contact.type === "email" || contact.type === "phone"))
+    priority += 4;
   if (containsAny(text, displayBuyerTerms)) priority += 4;
   if (containsAny(text, displaySpecificProductTerms)) priority += 3;
   if (lead.country) priority += 1;
@@ -2687,7 +3045,12 @@ function displayLeadPriority(lead: LeadCandidate, targetMarkets: string[]) {
     priority += matchesDisplayMarket(lead.country, explicitMarkets) ? 12 : -18;
   }
   if (domain && !isDiscoveryDomain(domain) && looksLikeOfficialPath(path)) priority += 3;
-  if (isDiscoveryDomain(domain) || isDiscoveryPath(path) || containsAny(text, displayDiscoveryTerms)) priority -= 8;
+  if (
+    isDiscoveryDomain(domain) ||
+    isDiscoveryPath(path) ||
+    containsAny(text, displayDiscoveryTerms)
+  )
+    priority -= 8;
 
   return priority;
 }
@@ -2726,16 +3089,26 @@ function explicitDisplayMarkets(targetMarkets: string[]) {
 }
 
 function normalizeDisplayMarket(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function looksLikeOfficialPath(path: string) {
   return (
     !path ||
     path === "/" ||
-    ["/about", "/contact", "/company", "/products", "/solutions", "/services", "/telecom", "/network"].some((term) =>
-      path.includes(term)
-    )
+    [
+      "/about",
+      "/contact",
+      "/company",
+      "/products",
+      "/solutions",
+      "/services",
+      "/telecom",
+      "/network"
+    ].some((term) => path.includes(term))
   );
 }
 
@@ -2857,14 +3230,33 @@ const displayCompanyEntityTerms = [
 
 const displayDomainCompanyNameOverrides: Record<string, string> = {
   ats4solutions: "ATS 4 Solutions",
+  greenportsuppliers: "Greenport Suppliers",
   hctgroup: "HCT Group",
   ispsupplies: "ISP Supplies",
   mfcomm: "MF Communications",
+  rtesqatar: "RTES Qatar",
   screamerelectronicservices: "Screamer Electronic Services",
   tempestns: "Tempest"
 };
 
-const displayDomainAcronymTerms = new Set(["isp", "hct", "ats", "mf", "usa", "uk", "uae"]);
+const displayDomainAcronymTerms = new Set(["isp", "hct", "ats", "mf", "rtes", "usa", "uk", "uae"]);
+
+const displayForbiddenCompanyNameTerms = new Set([
+  "about",
+  "about us",
+  "article author",
+  "awesome image",
+  "blog category",
+  "by",
+  "category",
+  "contact",
+  "contact us",
+  "home",
+  "homepage",
+  "pdf",
+  "tagline",
+  "welcome"
+]);
 
 const displayDiscoveryTerms = [
   "mcc & mnc",
@@ -3036,6 +3428,12 @@ function displayLeadStage(lead: LeadCandidate) {
   if (lead.crmLead) {
     return "已同步 CRM";
   }
+  if (lead.status === "intelligence_review") {
+    return "采购情报待复核";
+  }
+  if (lead.status === "evidence_review") {
+    return "证据待复核";
+  }
   if (lead.status === "approved") {
     return "已进入开发信";
   }
@@ -3049,7 +3447,9 @@ function displayLeadStage(lead: LeadCandidate) {
 function hasSentEmail(lead: LeadCandidate) {
   return (
     lead.outreachDrafts?.some((draft) =>
-      draft.sendLogs?.some((log) => Boolean(log.sentAt) || ["sent", "delivered"].includes(log.status))
+      draft.sendLogs?.some(
+        (log) => Boolean(log.sentAt) || ["sent", "delivered"].includes(log.status)
+      )
     ) ?? false
   );
 }
@@ -3072,6 +3472,10 @@ function formatMailSentStatus(result: MailSendResult) {
 type IcpReasonPayload = {
   reasons?: unknown;
   summary?: unknown;
+  leadType?: unknown;
+  intelligenceType?: unknown;
+  reviewLabels?: unknown;
+  extractableCompanies?: unknown;
   aiEvaluation?: {
     resultType?: unknown;
     buyerType?: unknown;
@@ -3080,6 +3484,19 @@ type IcpReasonPayload = {
 };
 
 function buildCustomerBrief(lead: LeadCandidate) {
+  const evidenceBrief = evidenceBriefFromPayload(
+    lead.status,
+    icpReasonPayload(lead.icpScore?.reasons)
+  );
+  if (evidenceBrief) return evidenceBrief;
+
+  if (lead.status === "intelligence_review") {
+    return "采购情报线索";
+  }
+  if (lead.status === "evidence_review") {
+    return "证据待复核";
+  }
+
   const payload = icpReasonPayload(lead.icpScore?.reasons);
   const aiBrief = customerBriefFromAi(payload?.aiEvaluation);
   if (aiBrief) return aiBrief;
@@ -3087,35 +3504,91 @@ function buildCustomerBrief(lead: LeadCandidate) {
   const reasonText = firstIcpReason(lead.icpScore?.reasons);
   const summary = typeof payload?.summary === "string" ? payload.summary : "";
   const matchedSignals = Array.isArray(payload?.aiEvaluation?.matchedSignals)
-    ? payload.aiEvaluation.matchedSignals.filter((value): value is string => typeof value === "string")
+    ? payload.aiEvaluation.matchedSignals.filter(
+        (value): value is string => typeof value === "string"
+      )
     : [];
-  const text = [lead.companyName, lead.website, lead.sourceUrl, summary, reasonText, ...matchedSignals]
+  const text = [
+    lead.companyName,
+    lead.website,
+    lead.sourceUrl,
+    summary,
+    reasonText,
+    ...matchedSignals
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
 
-  if (containsAny(text, ["rfq", "request for quotation", "tender", "procurement", "vendor registration", "supplier registration"])) {
+  if (
+    containsAny(text, [
+      "rfq",
+      "request for quotation",
+      "tender",
+      "procurement",
+      "vendor registration",
+      "supplier registration"
+    ])
+  ) {
     return "采购/RFQ 线索";
   }
-  if (containsAny(text, ["factory", "industrial", "machine", "equipment", "component", "parts"]) && !containsAny(text, ["telecom", "base station", "fiber", "olt", "sfp", "tower", "isp", "wisp"])) {
+  if (
+    containsAny(text, ["factory", "industrial", "machine", "equipment", "component", "parts"]) &&
+    !containsAny(text, ["telecom", "base station", "fiber", "olt", "sfp", "tower", "isp", "wisp"])
+  ) {
     return "行业设备客户";
   }
-  if (containsAny(text, ["telecom power", "rectifier", "dc power", "power system", "cell site power"])) {
+  if (
+    containsAny(text, ["telecom power", "rectifier", "dc power", "power system", "cell site power"])
+  ) {
     return "电源/模块维护客户";
   }
-  if (containsAny(text, ["ftth", "olt", "fiber network", "optical transport", "transmission network", "sfp"])) {
+  if (
+    containsAny(text, [
+      "ftth",
+      "olt",
+      "fiber network",
+      "optical transport",
+      "transmission network",
+      "sfp"
+    ])
+  ) {
     return "光纤/FTTH 运维客户";
   }
   if (containsAny(text, ["tower maintenance", "towerco", "cell tower", "site maintenance"])) {
     return "铁塔/站点维护客户";
   }
-  if (containsAny(text, ["base station", "ran maintenance", "bts", "radio access network", "field maintenance"])) {
+  if (
+    containsAny(text, [
+      "base station",
+      "ran maintenance",
+      "bts",
+      "radio access network",
+      "field maintenance"
+    ])
+  ) {
     return "基站/RAN 维护客户";
   }
-  if (containsAny(text, ["mobile network operator", "telecom operator", "network operator", "isp", "wisp"])) {
+  if (
+    containsAny(text, [
+      "mobile network operator",
+      "telecom operator",
+      "network operator",
+      "isp",
+      "wisp"
+    ])
+  ) {
     return "运营商/ISP 客户";
   }
-  if (containsAny(text, ["system integrator", "integrator", "network contractor", "infrastructure contractor", "engineering contractor"])) {
+  if (
+    containsAny(text, [
+      "system integrator",
+      "integrator",
+      "network contractor",
+      "infrastructure contractor",
+      "engineering contractor"
+    ])
+  ) {
     return "工程/系统集成客户";
   }
   if (containsAny(text, ["repair", "maintenance service", "field service"])) {
@@ -3131,13 +3604,56 @@ function buildCustomerBrief(lead: LeadCandidate) {
   return "潜在客户线索";
 }
 
+function evidenceBriefFromPayload(status: string | undefined, payload: IcpReasonPayload | null) {
+  const leadType = typeof payload?.leadType === "string" ? payload.leadType : "";
+  const intelligenceType =
+    typeof payload?.intelligenceType === "string" ? payload.intelligenceType : "";
+  const extractableCompanies = Array.isArray(payload?.extractableCompanies)
+    ? payload.extractableCompanies.filter((value): value is string => typeof value === "string")
+    : [];
+  const suffix = extractableCompanies.length ? " \u00b7 \u53ef\u63d0\u53d6\u5ba2\u6237" : "";
+
+  if (leadType === "content_evidence") {
+    return "\u5185\u5bb9\u8bc1\u636e";
+  }
+  if (leadType === "government_information") {
+    return "\u653f\u5e9c\u4fe1\u606f\u7ebf\u7d22";
+  }
+  if (leadType === "intelligence" || status === "intelligence_review") {
+    if (intelligenceType === "government_tender") {
+      return "\u653f\u5e9c\u62db\u6807\u60c5\u62a5" + suffix;
+    }
+    if (intelligenceType === "rfq_notice") {
+      return "\u91c7\u8d2d\u516c\u544a/RFQ" + suffix;
+    }
+    if (intelligenceType === "exhibition_pdf") {
+      return "\u5c55\u4f1a\u540d\u5f55/PDF\u540d\u5355" + suffix;
+    }
+    if (intelligenceType === "project_news") {
+      return "\u9879\u76ee\u65b0\u95fb\u60c5\u62a5" + suffix;
+    }
+    if (intelligenceType === "company_directory") {
+      return "\u540d\u5f55\u60c5\u62a5/\u53ef\u63d0\u53d6\u5ba2\u6237";
+    }
+    return "\u60c5\u62a5\u7ebf\u7d22" + suffix;
+  }
+  if (status === "evidence_review") {
+    return "\u8bc1\u636e\u5f85\u590d\u6838";
+  }
+
+  return "";
+}
+
 function customerBriefFromAi(aiEvaluation: IcpReasonPayload["aiEvaluation"]) {
   if (!aiEvaluation) return "";
 
   const resultType = typeof aiEvaluation.resultType === "string" ? aiEvaluation.resultType : "";
-  const buyerType = typeof aiEvaluation.buyerType === "string" ? aiEvaluation.buyerType.toLowerCase() : "";
+  const buyerType =
+    typeof aiEvaluation.buyerType === "string" ? aiEvaluation.buyerType.toLowerCase() : "";
 
-  if (["directory", "content_article", "job_page", "market_report", "irrelevant"].includes(resultType)) {
+  if (
+    ["directory", "content_article", "job_page", "market_report", "irrelevant"].includes(resultType)
+  ) {
     return "资料页待复核";
   }
   if (resultType === "procurement_intelligence") {
@@ -3148,13 +3664,17 @@ function customerBriefFromAi(aiEvaluation: IcpReasonPayload["aiEvaluation"]) {
   }
   if (containsAny(buyerType, ["procurement", "rfq", "tender", "buyer"])) return "采购/RFQ 线索";
   if (containsAny(buyerType, ["power", "rectifier"])) return "电源/模块维护客户";
-  if (containsAny(buyerType, ["ftth", "fiber", "optical", "olt", "sfp"])) return "光纤/FTTH 运维客户";
+  if (containsAny(buyerType, ["ftth", "fiber", "optical", "olt", "sfp"]))
+    return "光纤/FTTH 运维客户";
   if (containsAny(buyerType, ["tower", "towerco"])) return "铁塔/站点维护客户";
-  if (containsAny(buyerType, ["base station", "ran", "bts", "field service"])) return "基站/RAN 维护客户";
+  if (containsAny(buyerType, ["base station", "ran", "bts", "field service"]))
+    return "基站/RAN 维护客户";
   if (containsAny(buyerType, ["operator", "isp", "wisp"])) return "运营商/ISP 客户";
-  if (containsAny(buyerType, ["integrator", "contractor", "engineering"])) return "工程/系统集成客户";
+  if (containsAny(buyerType, ["integrator", "contractor", "engineering"]))
+    return "工程/系统集成客户";
   if (containsAny(buyerType, ["maintenance", "repair", "service"])) return "维修维护服务客户";
-  if (containsAny(buyerType, ["supplier", "distributor", "reseller", "stockist", "wholesale"])) return "渠道商待复核";
+  if (containsAny(buyerType, ["supplier", "distributor", "reseller", "stockist", "wholesale"]))
+    return "渠道商待复核";
   if (resultType === "target_buyer") return "目标买家客户";
   if (resultType === "possible_buyer") return "潜在买家客户";
 
@@ -3208,7 +3728,8 @@ function buildFlowRows(
   }
 ): FlowRow[] {
   const queryCount = task?.searchQueries?.length ?? 0;
-  const approvedCount = task?.leadCandidates?.filter((lead) => lead.status === "approved").length ?? 0;
+  const approvedCount =
+    task?.leadCandidates?.filter((lead) => lead.status === "approved").length ?? 0;
   const hasError = task?.agentSteps?.some((step) => step.status === "failed") ?? false;
 
   return [
@@ -3226,13 +3747,18 @@ function buildFlowRows(
       description: state.searching
         ? "正在执行搜索并清洗候选客户"
         : state.leadCount
-          ? `${state.leadQualityCounts.main} 条主客户，${state.leadQualityCounts.needsCountryReview} 条待国家复核`
+          ? formatLeadQualitySummary(state.leadQualityCounts)
           : task
             ? state.leadQualityCounts.rawEvidence
               ? formatLeadQualitySummary(state.leadQualityCounts)
               : "搜索指令已就绪，等待返回候选客户"
             : "等待任务规划完成",
-      state: state.leadCount || state.leadQualityCounts.rawEvidence ? "done" : task || state.searching ? "active" : "pending"
+      state:
+        state.leadCount || state.leadQualityCounts.rawEvidence
+          ? "done"
+          : task || state.searching
+            ? "active"
+            : "pending"
     },
     {
       title: "邮件触达",
@@ -3241,11 +3767,16 @@ function buildFlowRows(
         : state.sentCount
           ? `已发送 ${state.sentCount} 封 Gmail 开发信`
           : approvedCount
-          ? `已审批 ${approvedCount} 家客户，等待邮件确认`
-          : state.leadCount
-            ? "选择客户后生成可确认发送的开发信"
-            : "等待候选客户确认",
-      state: state.sentCount || approvedCount ? "done" : state.leadCount || state.approving ? "active" : "pending"
+            ? `已审批 ${approvedCount} 家客户，等待邮件确认`
+            : state.leadCount
+              ? "选择客户后生成可确认发送的开发信"
+              : "等待候选客户确认",
+      state:
+        state.sentCount || approvedCount
+          ? "done"
+          : state.leadCount || state.approving
+            ? "active"
+            : "pending"
     },
     {
       title: "同步 CRM 并标记",
@@ -3311,7 +3842,7 @@ function inferCountryFromLeadContacts(contacts: LeadContact[] | undefined) {
       .filter((value): value is string => Boolean(value))
   );
 
-  return countries.length === 1 ? countries[0] ?? "" : "";
+  return countries.length === 1 ? (countries[0] ?? "") : "";
 }
 
 function inferCountryFromContactValue(value: string, type: string) {
@@ -3325,7 +3856,11 @@ function inferCountryFromContactValue(value: string, type: string) {
 function inferCountryFromPhoneValue(phone: string) {
   const trimmed = phone.trim();
   const digits = trimmed.replace(/\D/g, "");
-  const internationalDigits = trimmed.startsWith("+") ? digits : digits.startsWith("00") ? digits.slice(2) : "";
+  const internationalDigits = trimmed.startsWith("+")
+    ? digits
+    : digits.startsWith("00")
+      ? digits.slice(2)
+      : "";
 
   if (internationalDigits) {
     const match = phoneCountryCodes.find(([code]) => internationalDigits.startsWith(code));
@@ -3343,7 +3878,9 @@ function inferCountryFromDomainValue(value: string) {
   const host = hostFromContactValue(value);
   if (!host) return "";
 
-  const match = domainCountrySuffixes.find(([suffix]) => host === suffix.slice(1) || host.endsWith(suffix));
+  const match = domainCountrySuffixes.find(
+    ([suffix]) => host === suffix.slice(1) || host.endsWith(suffix)
+  );
   return match?.[1] ?? "";
 }
 
@@ -3352,11 +3889,19 @@ function hostFromContactValue(value: string) {
   if (!trimmed) return "";
 
   if (trimmed.includes("@") && !trimmed.startsWith("http")) {
-    return trimmed.split("@").pop()?.replace(/[),.;:]+$/g, "") ?? "";
+    return (
+      trimmed
+        .split("@")
+        .pop()
+        ?.replace(/[),.;:]+$/g, "") ?? ""
+    );
   }
 
   try {
-    return new URL(trimmed.startsWith("http") ? trimmed : `https://${trimmed}`).hostname.replace(/^www\./, "");
+    return new URL(trimmed.startsWith("http") ? trimmed : `https://${trimmed}`).hostname.replace(
+      /^www\./,
+      ""
+    );
   } catch {
     return "";
   }
@@ -3366,7 +3911,9 @@ function titleCaseCountry(value: string) {
   return value
     .toLowerCase()
     .split(/\s+/)
-    .map((part) => (countryLowercaseWords.has(part) ? part : part.charAt(0).toUpperCase() + part.slice(1)))
+    .map((part) =>
+      countryLowercaseWords.has(part) ? part : part.charAt(0).toUpperCase() + part.slice(1)
+    )
     .join(" ");
 }
 
@@ -3472,29 +4019,49 @@ function isDisplayPhoneValue(value: string) {
 function hasRepeatedPhoneChunk(value: string) {
   const normalized = value.replace(/\s+/g, " ").trim();
   const chunks = normalized.split(" ");
-  return chunks.length > 1 && chunks.some((chunk, index) => chunks.indexOf(chunk) !== index && chunk.replace(/\D/g, "").length >= 4);
+  return (
+    chunks.length > 1 &&
+    chunks.some(
+      (chunk, index) => chunks.indexOf(chunk) !== index && chunk.replace(/\D/g, "").length >= 4
+    )
+  );
 }
 
 function digitsOnly(value: string) {
   return value.replace(/\D/g, "");
 }
 
-function formatEmailContacts(values: string[] | undefined) {
+function formatEmailContacts(values: string[] | undefined, companyUrl?: string | null) {
+  const companyDomain = domainFromUrl(companyUrl);
   return unique(values ?? [])
-    .sort((left, right) => emailContactPriority(left) - emailContactPriority(right))
+    .sort((left, right) => emailContactPriority(left, companyDomain) - emailContactPriority(right, companyDomain))
     .slice(0, 1)
     .join(" ; ");
 }
 
-function emailContactPriority(value: string) {
-  const localPart = value.split("@")[0]?.toLowerCase() ?? "";
+function emailContactPriority(value: string, companyDomain?: string) {
+  const [localPart = "", emailDomain = ""] = value.toLowerCase().split("@");
   const priorityTerms = ["sales", "info", "contact", "enquiries", "enquiry", "support", "office"];
-  const index = priorityTerms.findIndex((term) => localPart === term || localPart.startsWith(`${term}.`));
-  return index === -1 ? priorityTerms.length : index;
+  const index = priorityTerms.findIndex(
+    (term) => localPart === term || localPart.startsWith(`${term}.`)
+  );
+  const sameDomain = companyDomain && domainsMatch(emailDomain, companyDomain) ? 0 : 20;
+  return sameDomain + (index === -1 ? priorityTerms.length : index);
+}
+
+function domainsMatch(emailDomain: string, companyDomain: string) {
+  const normalizedEmailDomain = emailDomain.replace(/^www\./, "");
+  const normalizedCompanyDomain = companyDomain.replace(/^www\./, "");
+  return (
+    normalizedEmailDomain === normalizedCompanyDomain ||
+    normalizedEmailDomain.endsWith(`.${normalizedCompanyDomain}`)
+  );
 }
 
 function formatSourceUrls(values: string[] | undefined) {
-  return unique((values ?? []).map((value) => formatWebsite(value)).filter((value) => value !== "-")).slice(0, 4);
+  return unique(
+    (values ?? []).map((value) => formatWebsite(value)).filter((value) => value !== "-")
+  ).slice(0, 4);
 }
 
 function formatSiteEvidenceValues(values: SiteEvidenceRow[] | undefined) {

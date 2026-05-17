@@ -3,15 +3,23 @@ import { expandLeadKeywords, generateSearchQueries } from "./index.js";
 
 describe("keyword expansion", () => {
   it("expands an explicit UAE telecom distributor task into optional channel terms", () => {
-    const keywords = expandLeadKeywords({ taskText: "Find UAE telecom equipment distributors and stockists" });
+    const keywords = expandLeadKeywords({
+      taskText: "Find UAE telecom equipment distributors and stockists"
+    });
 
     expect(keywords.mainProductTerms).toContain("telecom equipment");
-    expect(keywords.customerIntentTerms).toEqual(expect.arrayContaining(["distributor", "stockist"]));
-    expect(keywords.marketTerms).toEqual(expect.arrayContaining(["UAE", "Dubai"]));
-    expect(keywords.marketTerms).not.toEqual(expect.arrayContaining(["Nigeria", "South Africa", "Indonesia", "Brazil"]));
-    expect(keywords.excludeTerms).toEqual(
-      expect.arrayContaining(["job", "news", "training", "consumer phone", "course", "forum"])
+    expect(keywords.customerIntentTerms).toEqual(
+      expect.arrayContaining(["distributor", "stockist"])
     );
+    expect(keywords.marketTerms).toEqual(expect.arrayContaining(["UAE", "Dubai"]));
+    expect(keywords.marketTerms).not.toEqual(
+      expect.arrayContaining(["Nigeria", "South Africa", "Indonesia", "Brazil"])
+    );
+    expect(keywords.excludeTerms).toEqual(
+      expect.arrayContaining(["job", "training", "consumer phone", "course", "forum"])
+    );
+    expect(keywords.excludeTerms).not.toContain("news");
+    expect(keywords.excludeTerms).not.toContain("blog");
     expect(keywords.excludeTerms).toEqual(expect.arrayContaining(["directory", "yellow pages"]));
     expect(keywords.excludeTerms).not.toContain("phone");
   });
@@ -31,6 +39,23 @@ describe("keyword expansion", () => {
     );
     expect(keywords.customerIntentTerms.join(" ")).not.toMatch(
       /\b(supplier|distributor|stockist|reseller|wholesale)\b/i
+    );
+  });
+
+  it("only expands Chinese channel words when the user explicitly asks for channel customers", () => {
+    const buyerKeywords = expandLeadKeywords({
+      taskText: "\u5e2e\u6211\u627e5G\u901a\u4fe1\u8bbe\u5907\u76f8\u5173\u7684\u5ba2\u6237"
+    });
+    const channelKeywords = expandLeadKeywords({
+      taskText:
+        "\u5e2e\u6211\u627e5G\u901a\u4fe1\u8bbe\u5907\u7ecf\u9500\u5546\u548c\u5e93\u5b58\u5546"
+    });
+
+    expect(buyerKeywords.customerIntentTerms.join(" ")).not.toMatch(
+      /\b(supplier|distributor|stockist|reseller|wholesale)\b/i
+    );
+    expect(channelKeywords.customerIntentTerms).toEqual(
+      expect.arrayContaining(["distributor", "stockist"])
     );
   });
 

@@ -115,6 +115,7 @@ function createPrismaMock() {
       deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
       findMany: vi.fn().mockResolvedValue([{ executionStatus: "completed", resultCount: 1 }]),
       update: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
       count: vi.fn().mockResolvedValue(0)
     },
     agentStep: {
@@ -166,8 +167,11 @@ function createWebsiteContentMock() {
           status: "read",
           title: "Telecore products",
           wordCount: 120,
-          textSample: "Ericsson AIR radio units, Huawei WBBP, ZTE R8882 RRU and Eltek rectifier modules.",
-          evidenceSnippets: ["Ericsson AIR radio units, Huawei WBBP, ZTE R8882 RRU and Eltek rectifier modules."],
+          textSample:
+            "Ericsson AIR radio units, Huawei WBBP, ZTE R8882 RRU and Eltek rectifier modules.",
+          evidenceSnippets: [
+            "Ericsson AIR radio units, Huawei WBBP, ZTE R8882 RRU and Eltek rectifier modules."
+          ],
           extractedTerms: {
             productTerms: ["Ericsson AIR", "Huawei WBBP", "ZTE R8882", "Eltek rectifier"],
             customerIntentTerms: [],
@@ -187,7 +191,9 @@ function createWebsiteContentMock() {
           title: "Spectrum MEA",
           wordCount: 90,
           textSample: "Telecom system integrator for microwave backhaul and managed services.",
-          evidenceSnippets: ["Telecom system integrator for microwave backhaul and managed services."],
+          evidenceSnippets: [
+            "Telecom system integrator for microwave backhaul and managed services."
+          ],
           extractedTerms: {
             productTerms: ["microwave backhaul"],
             customerIntentTerms: ["telecom system integrator", "managed service provider"],
@@ -221,9 +227,7 @@ function createWebsiteContentMock() {
 }
 
 function createLeadHuntAiMock(
-  generateSearchStrategy: (input: {
-    targetMarkets: string[];
-  }) => Promise<{
+  generateSearchStrategy: (input: { targetMarkets: string[] }) => Promise<{
     queries: Array<{
       query: string;
       country: string;
@@ -265,7 +269,11 @@ function createLeadHuntAiMock(
       relatedProducts: ["RRU", "BBU", "rectifier module"],
       longTailProducts: ["Huawei RRU spare parts", "Eltek rectifier module"],
       upstreamDownstreamTerms: ["base station maintenance", "tower maintenance", "FTTH operations"],
-      purchaseIntentTerms: ["telecom maintenance contractor", "ISP network operations", "tower maintenance company"],
+      purchaseIntentTerms: [
+        "telecom maintenance contractor",
+        "ISP network operations",
+        "tower maintenance company"
+      ],
       targetMarketTerms: ["UAE", "Saudi Arabia"],
       industryScenarioTerms: ["5G network maintenance", "cell site power maintenance"],
       exclusionTerms: ["jobs", "careers", "news"]
@@ -289,7 +297,12 @@ function aiSearchQuery(query: string, country: string, priority: number) {
 function simpleAiQueriesForMarkets(markets: string[]) {
   return Array.from({ length: 15 }, (_, index) => {
     const country = markets[index % markets.length] ?? "Canada";
-    const buyerTerm = index % 3 === 0 ? "base station maintenance" : index % 3 === 1 ? "ISP network operations" : "tower maintenance";
+    const buyerTerm =
+      index % 3 === 0
+        ? "base station maintenance"
+        : index % 3 === 1
+          ? "ISP network operations"
+          : "tower maintenance";
     return aiSearchQuery(`"${buyerTerm}" ${country} telecom -jobs -news`, country, index + 1);
   });
 }
@@ -406,11 +419,13 @@ describe("AgentWorkflowService", () => {
     });
 
     expect(result.searchQueries).toHaveLength(30);
-    expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(new Set(["Germany", "Poland", "Oman"]));
+    expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(
+      new Set(["Germany", "Poland", "Oman"])
+    );
     expect(result.searchQueries.map((query) => query.country)).not.toContain("Global");
   });
 
-  it("expands macro profile regions into concrete countries before AI query planning", async () => {
+  it("keeps macro profile regions auditable while planning only the primary market pool first", async () => {
     const prisma = createPrismaMock();
     prisma.customerProfile.findUnique.mockResolvedValue({
       targetRegions: ["Middle East", "Africa", "Brazil", "Russia", "Ukraine"],
@@ -421,7 +436,13 @@ describe("AgentWorkflowService", () => {
     const ai = createLeadHuntAiMock(async (input) => ({
       queries: simpleAiQueriesForMarkets(input.targetMarkets)
     }));
-    const service = new AgentWorkflowService(prisma as any, undefined, undefined, undefined, ai as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
 
     const result = await service.createTaskWithTimeline("user-1", {
       prompt: "Find 5G telecom equipment customers",
@@ -429,34 +450,42 @@ describe("AgentWorkflowService", () => {
     });
     const queryCountries = result.searchQueries.map((query) => query.country);
 
-    expect(ai.generateSearchStrategy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        targetMarkets: expect.arrayContaining([
-          "UAE",
-          "Saudi Arabia",
-          "Qatar",
-          "Oman",
-          "Kuwait",
-          "Bahrain",
-          "Jordan",
-          "Iraq",
-          "Iran",
-          "Nigeria",
-          "Kenya",
-          "South Africa",
-          "Egypt",
-          "Morocco",
-          "Ghana",
-          "Tanzania",
-          "Brazil",
-          "Russia",
-          "Ukraine"
-        ])
-      })
-    );
+    const aiInput = ai.generateSearchStrategy.mock.calls[0]?.[0];
+    expect(aiInput?.targetMarkets).toEqual(["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"]);
     expect(queryCountries).not.toContain("Middle East");
     expect(queryCountries).not.toContain("Africa");
+    expect(new Set(queryCountries)).toEqual(
+      new Set(["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"])
+    );
     expect(result.searchQueries).toHaveLength(30);
+    expect(prisma.leadTask.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        inputPayload: expect.objectContaining({
+          profileSignals: expect.objectContaining({
+            marketSelection: expect.objectContaining({
+              targetMarkets: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"],
+              secondaryMarkets: expect.arrayContaining([
+                "Bahrain",
+                "Jordan",
+                "Iraq",
+                "Iran",
+                "Nigeria",
+                "Kenya",
+                "South Africa",
+                "Egypt",
+                "Morocco",
+                "Ghana",
+                "Tanzania",
+                "Brazil",
+                "Russia",
+                "Ukraine"
+              ]),
+              marketSource: "profile"
+            })
+          })
+        })
+      })
+    });
   });
 
   it("lets explicit prompt markets override saved profile target regions for AI planning", async () => {
@@ -470,7 +499,13 @@ describe("AgentWorkflowService", () => {
     const ai = createLeadHuntAiMock(async (input) => ({
       queries: simpleAiQueriesForMarkets(input.targetMarkets)
     }));
-    const service = new AgentWorkflowService(prisma as any, undefined, undefined, undefined, ai as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
 
     const result = await service.createTaskWithTimeline("user-1", {
       prompt:
@@ -499,7 +534,8 @@ describe("AgentWorkflowService", () => {
             marketSelection: expect.objectContaining({
               targetMarkets: ["Canada", "Australia"],
               promptMarkets: ["Canada", "Australia"],
-              profileMarkets: expect.arrayContaining(["UAE", "Iran", "Russia", "Saudi Arabia"]),
+              profileMarkets: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"],
+              secondaryMarkets: [],
               marketSource: "prompt"
             })
           })
@@ -533,14 +569,24 @@ describe("AgentWorkflowService", () => {
           "Iran",
           3
         ),
-        aiSearchQuery('("Huawei MA5800" OR "Huawei MA5608T") Canada OLT supplier price datasheet -jobs -news', "Canada", 4),
+        aiSearchQuery(
+          '("Huawei MA5800" OR "Huawei MA5608T") Canada OLT supplier price datasheet -jobs -news',
+          "Canada",
+          4
+        ),
         ...simpleAiQueriesForMarkets(input.targetMarkets).map((query, index) => ({
           ...query,
           priority: index + 5
         }))
       ]
     }));
-    const service = new AgentWorkflowService(prisma as any, undefined, undefined, undefined, ai as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
 
     const result = await service.createTaskWithTimeline("user-1", {
       prompt: "Find Canada and Australia 5G telecom maintenance buyers",
@@ -550,7 +596,9 @@ describe("AgentWorkflowService", () => {
     const persistedPayload = prisma.leadTask.create.mock.calls[0]?.[0].data.inputPayload;
 
     expect(result.searchQueries).toHaveLength(30);
-    expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(new Set(["Canada", "Australia"]));
+    expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(
+      new Set(["Canada", "Australia"])
+    );
     expect(queryText).not.toMatch(/\bRussia\b/i);
     expect(queryText).not.toMatch(/\bUAE\b/i);
     expect(queryText).not.toMatch(/\bUkraine\b/i);
@@ -558,6 +606,7 @@ describe("AgentWorkflowService", () => {
     expect(queryText).not.toContain("site:.ru");
     expect(queryText).not.toContain('"Australia telecom tower maintenance"');
     expect(queryText).not.toContain("supplier price datasheet");
+    expect(queryText).not.toMatch(/-(?:pdf|news|blog|report)\b/i);
     expect(persistedPayload.profileSignals.aiPlanning.rejectedQueryCount).toBeGreaterThan(0);
     expect(persistedPayload.profileSignals.aiPlanning.rejectedQueries).toEqual(
       expect.arrayContaining([
@@ -571,7 +620,12 @@ describe("AgentWorkflowService", () => {
   it("reads profile websites and stores evidence-based analysis in the task payload", async () => {
     const prisma = createPrismaMock();
     const websiteContent = createWebsiteContentMock();
-    const service = new AgentWorkflowService(prisma as any, undefined, undefined, websiteContent as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      websiteContent as any
+    );
 
     const result = await service.createTaskWithTimeline("user-1", {
       prompt: "Find 5G telecom equipment related buyer customers",
@@ -579,10 +633,16 @@ describe("AgentWorkflowService", () => {
     });
 
     expect(websiteContent.readProfileSites).toHaveBeenCalledWith({
-      productUrls: ["https://telecorenet.com/", "https://telecorenet.com/products", "https://telecorenet.com/catalog.pdf"],
+      productUrls: [
+        "https://telecorenet.com/",
+        "https://telecorenet.com/products",
+        "https://telecorenet.com/catalog.pdf"
+      ],
       referenceCustomerUrls: ["https://spectrummea.com/", "http://highcloud.ae/"]
     });
-    expect(result.searchQueries[0]?.keywordGroups.productTerms).toEqual(expect.arrayContaining(["Ericsson AIR", "Huawei WBBP"]));
+    expect(result.searchQueries[0]?.keywordGroups.productTerms).toEqual(
+      expect.arrayContaining(["Ericsson AIR", "Huawei WBBP"])
+    );
     expect(result.searchQueries[0]?.keywordGroups.customerIntentTerms).toEqual(
       expect.arrayContaining(["telecom system integrator", "managed service provider"])
     );
@@ -747,7 +807,11 @@ describe("AgentWorkflowService", () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
     const leadQualification = createLeadQualificationMock();
-    const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
 
     await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
     const result = await service.approveCandidatesForUser("user-1", "task-1", {
@@ -788,7 +852,11 @@ describe("AgentWorkflowService", () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
     const leadQualification = createLeadQualificationMock();
-    const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
 
     const result = await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
 
@@ -824,11 +892,11 @@ describe("AgentWorkflowService", () => {
     expect(prisma.searchQuery.update).toHaveBeenCalledWith({
       where: { id: "query-1" },
       data: {
-          executionStatus: "completed",
-          resultCount: 1,
-          qualifiedCount: 1
-        }
-      });
+        executionStatus: "completed",
+        resultCount: 1,
+        qualifiedCount: 1
+      }
+    });
     expect(prisma.agentStep.updateMany).toHaveBeenCalledWith({
       where: { taskId: "task-1", nodeName: "brave_search" },
       data: expect.objectContaining({
@@ -856,7 +924,11 @@ describe("AgentWorkflowService", () => {
     braveSearch.searchAndSaveResults
       .mockRejectedValueOnce(new Error("Brave HTTPS request timed out"))
       .mockRejectedValueOnce(new Error("Brave HTTPS request timed out"));
-    const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
 
     const result = await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
 
@@ -895,8 +967,14 @@ describe("AgentWorkflowService", () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
     const leadQualification = createLeadQualificationMock();
-    braveSearch.searchAndSaveResults.mockRejectedValueOnce(new Error("Brave country parameter failed"));
-    const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
+    braveSearch.searchAndSaveResults.mockRejectedValueOnce(
+      new Error("Brave country parameter failed")
+    );
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
 
     const result = await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
 
@@ -922,7 +1000,11 @@ describe("AgentWorkflowService", () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
     const leadQualification = createLeadQualificationMock();
-    const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
 
     await service.executeBraveSearchForTask("user-1", "task-1");
 
@@ -950,7 +1032,11 @@ describe("AgentWorkflowService", () => {
         source: "web" as const
       }))
     });
-    const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
 
     await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
 
@@ -963,7 +1049,7 @@ describe("AgentWorkflowService", () => {
     expect(leadQualification.saveCandidates.mock.calls[0]?.[1]).toHaveLength(20);
   });
 
-  it("rewrites pending queries with local buyer fallback when the first-stage quality gate trips", async () => {
+  it("preserves pending queries and records fallback suggestions when the first-stage quality gate trips", async () => {
     const prisma = createPrismaMock();
     prisma.leadTask.findUnique.mockResolvedValueOnce({
       inputPayload: {
@@ -1017,42 +1103,48 @@ describe("AgentWorkflowService", () => {
     prisma.searchQuery.count.mockResolvedValueOnce(2);
     const service = new AgentWorkflowService(prisma as any);
 
-    const result = await (service as any).rewritePendingQueriesForQualityGate("task-1", {
+    const result = await (service as any).preservePendingQueriesAfterQualityGate("task-1", {
       reasons: ["country_issue_ratio_high"],
       executedQueryCount: 15
     });
 
     expect(result).toMatchObject({
-      rewrittenCount: 2,
-      removedPendingCount: 2,
+      action: "preserved_pending_queries_after_quality_gate",
+      rewrittenCount: 0,
+      removedPendingCount: 0,
+      preservedPendingCount: 2,
       remainingQueries: 2,
       reasons: ["country_issue_ratio_high"]
     });
-    expect(prisma.searchQuery.deleteMany).toHaveBeenCalledWith({
-      where: { taskId: "task-1", executionStatus: "pending" }
-    });
-    expect(prisma.searchQuery.createMany).toHaveBeenCalledWith({
-      data: expect.arrayContaining([
+    expect(result.suggestedFallbackQueryCount).toBeGreaterThan(0);
+    expect(result.suggestedFallbackQueries).toEqual(
+      expect.arrayContaining([
         expect.objectContaining({
-          taskId: "task-1",
-          executionStatus: "pending",
-          operatorName: "Quality fallback local buyer search",
+          batchType: "quality_fallback_suggestion",
           query: expect.stringMatching(/\b(Kenya|Morocco)\b/)
         })
       ])
-    });
-    const createdQueries = prisma.searchQuery.createMany.mock.calls[0]?.[0].data.map((query: { query: string }) => query.query);
-    expect(createdQueries).toHaveLength(2);
-    expect(createdQueries.join("\n")).not.toMatch(/\bsupplier\b|\bstockist\b/i);
+    );
+    expect(prisma.searchQuery.updateMany).not.toHaveBeenCalled();
+    expect(prisma.searchQuery.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
     expect(prisma.leadTask.update).toHaveBeenCalledWith({
       where: { id: "task-1" },
       data: expect.objectContaining({
         inputPayload: expect.objectContaining({
           profileSignals: expect.objectContaining({
-            qualityFallback: expect.objectContaining({
-              action: "rewrote_pending_queries_with_local_buyer_fallback",
-              replacementQueryCount: 2,
-              removedPendingQueryCount: 2
+            qualityGate: expect.objectContaining({
+              action: "preserved_pending_queries_after_quality_gate",
+              pendingQueryCount: 2,
+              remainingQueries: 2
+            }),
+            qualityFallbackSuggestion: expect.objectContaining({
+              action: "quality_fallback_suggestion",
+              status: "suggestion_only",
+              queryCount: expect.any(Number),
+              sampleQueries: expect.arrayContaining([
+                expect.objectContaining({ batchType: "quality_fallback_suggestion" })
+              ])
             })
           })
         })
@@ -1064,8 +1156,14 @@ describe("AgentWorkflowService", () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
     const leadQualification = createLeadQualificationMock();
-    leadQualification.saveCandidates.mockRejectedValueOnce(new Error("candidate enrichment failed"));
-    const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
+    leadQualification.saveCandidates.mockRejectedValueOnce(
+      new Error("candidate enrichment failed")
+    );
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
 
     const result = await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
 
@@ -1102,7 +1200,11 @@ describe("AgentWorkflowService", () => {
     braveSearch.searchAndSaveResults
       .mockRejectedValueOnce(new Error("network timeout"))
       .mockRejectedValueOnce(new Error("network timeout"));
-    const service = new AgentWorkflowService(prisma as any, braveSearch as any, leadQualification as any);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
 
     try {
       const result = await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });

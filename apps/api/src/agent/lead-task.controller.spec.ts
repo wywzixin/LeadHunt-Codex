@@ -30,7 +30,9 @@ function createController() {
     getTaskLeadsForUser: vi.fn().mockResolvedValue([]),
     executeBraveSearchForTask: vi.fn().mockResolvedValue({ ok: true, executedQueries: 1 }),
     summarizeTaskForUser: vi.fn().mockResolvedValue({ ok: true, summary: { did: [] } }),
-    approveCandidatesForUser: vi.fn().mockResolvedValue({ ok: true, approvedCount: 1, draftCount: 1 }),
+    approveCandidatesForUser: vi
+      .fn()
+      .mockResolvedValue({ ok: true, approvedCount: 1, draftCount: 1 }),
     updateTaskStatusForUser: vi.fn().mockResolvedValue({ id: "task-1", status: "paused" })
   };
 
@@ -83,7 +85,9 @@ describe("LeadTaskController", () => {
     expect(workflowService.getTaskForUser).toHaveBeenCalledWith("user-1", "task-1");
     expect(workflowService.getTaskEventsForUser).toHaveBeenCalledWith("user-1", "task-1");
     expect(workflowService.getTaskLeadsForUser).toHaveBeenCalledWith("user-1", "task-1");
-    expect(workflowService.executeBraveSearchForTask).toHaveBeenCalledWith("user-1", "task-1", { limit: 1 });
+    expect(workflowService.executeBraveSearchForTask).toHaveBeenCalledWith("user-1", "task-1", {
+      limit: 1
+    });
     expect(workflowService.summarizeTaskForUser).toHaveBeenCalledWith("user-1", "task-1");
     expect(workflowService.approveCandidatesForUser).toHaveBeenCalledWith("user-1", "task-1", {
       leadIds: ["11111111-1111-4111-8111-111111111111"]
@@ -98,16 +102,18 @@ describe("LeadTaskController", () => {
   it("rejects invalid candidate approval payloads", async () => {
     const { controller, workflowService } = createController();
 
-    await expect(controller.approve(requestWithCookie(), "task-1", { leadIds: ["not-a-uuid"] })).rejects.toThrow(
-      BadRequestException
-    );
+    await expect(
+      controller.approve(requestWithCookie(), "task-1", { leadIds: ["not-a-uuid"] })
+    ).rejects.toThrow(BadRequestException);
     expect(workflowService.approveCandidatesForUser).not.toHaveBeenCalled();
   });
 
   it("rejects invalid search execution payloads", async () => {
     const { controller, workflowService } = createController();
 
-    await expect(controller.executeSearch(requestWithCookie(), "task-1", { limit: 30 })).rejects.toThrow(BadRequestException);
+    await expect(
+      controller.executeSearch(requestWithCookie(), "task-1", { limit: 0 })
+    ).rejects.toThrow(BadRequestException);
     expect(workflowService.executeBraveSearchForTask).not.toHaveBeenCalled();
   });
 });

@@ -43,7 +43,19 @@ export type IcpScoreDraft = {
   grade: "high" | "medium" | "low";
   reasons: string[];
   risks: string[];
-  status: "qualified" | "review" | "needs_country_review" | "country_conflict_review" | "rejected";
+  leadType?: EvidenceLeadType;
+  intelligenceType?: IntelligenceType;
+  reviewLabels?: string[];
+  extractableCompanies?: string[];
+  pageType?: PageType;
+  status:
+    | "qualified"
+    | "review"
+    | "needs_country_review"
+    | "country_conflict_review"
+    | "intelligence_review"
+    | "evidence_review"
+    | "rejected";
 };
 
 type CountryConfidence = "high" | "medium" | "low" | "unknown";
@@ -78,7 +90,9 @@ export type CandidateBuyerEvaluation = {
   risks: string[];
 };
 
-export type CandidateAiEvaluator = (candidate: NormalizedLeadCandidate) => Promise<CandidateBuyerEvaluation | null>;
+export type CandidateAiEvaluator = (
+  candidate: NormalizedLeadCandidate
+) => Promise<CandidateBuyerEvaluation | null>;
 
 type ExistingLead = {
   id: string;
@@ -105,8 +119,32 @@ type PageType =
   | "content_or_directory"
   | "unknown";
 
+type EvidenceLeadType =
+  | "customer"
+  | "content_evidence"
+  | "government_information"
+  | "intelligence";
+
+type IntelligenceType =
+  | "government_tender"
+  | "rfq_notice"
+  | "exhibition_pdf"
+  | "project_news"
+  | "company_directory";
+
+type EvidenceLeadClassification = {
+  leadType: Exclude<EvidenceLeadType, "customer">;
+  intelligenceType?: IntelligenceType;
+  reviewLabels: string[];
+  extractableCompanies: string[];
+  status: Extract<IcpScoreDraft["status"], "intelligence_review" | "evidence_review">;
+  scoreCap: number;
+  reason: string;
+  risk: string;
+};
+
 const contactProbeTimeoutMs = 8000;
-const contactProbePageLimit = 14;
+const contactProbePageLimit = 18;
 const contactLinkedProbePageLimit = 10;
 const maxAiCandidateEvaluationsPerBatch = 5;
 
@@ -139,10 +177,11 @@ export class LeadQualificationService {
     let forcedStatus: IcpScoreDraft["status"] | null = null;
     const pageType = classifyCandidatePage(candidate, criteria);
     const pageQuality = assessPageQuality(candidate, criteria, pageType);
+    const evidenceClassification = classifyEvidenceLead(candidate, criteria, pageType);
     const countryValidation = validatedCountry(candidate);
-    const hasTelecomContextSignal = hasTelecomContext(text);
+    const hasSearchContextSignal = hasSearchContext(text, criteria);
     const hasIndustryContextSignal =
-      hasTelecomContextSignal ||
+      hasSearchContextSignal ||
       hasAny(text, criteria.productKeywords) ||
       hasAny(text, criteria.customerTypeKeywords) ||
       hasAny(text, buyerRoleTerms) ||
@@ -151,7 +190,8 @@ export class LeadQualificationService {
       hasAny(text, genericBuyerIntentTerms);
     const hasProductKeywordSignal = hasAny(text, criteria.productKeywords);
     const hasSpecificProductSignal =
-      hasAny(text, specificTelecomProductTerms) || hasAny(text, criteria.productKeywords.filter(isSpecificProductTerm));
+      hasAny(text, specificTelecomProductTerms) ||
+      hasAny(text, criteria.productKeywords.filter(isSpecificProductTerm));
     const hasTargetCustomerType = hasAny(text, criteria.customerTypeKeywords);
     const hasUseCaseCustomerSignal = hasAny(text, buyerUseCaseTerms);
     const hasInfrastructureCustomerSignal = hasAny(text, infrastructureCustomerTerms);
@@ -162,6 +202,11 @@ export class LeadQualificationService {
       hasTargetCustomerType ||
       hasInfrastructureCustomerSignal ||
       hasGenericBuyerIntentSignal;
+    const hasDirectContact = candidate.contacts.some(
+      (contact) => contact.type === "email" || contact.type === "phone"
+    );
+    const buyerServicePage = looksLikeBuyerSideCompanyPage(candidate);
+    const hasGenericServiceBuyerSignal = hasAny(text, genericServiceBuyerGateTerms);
 
     score += pageQuality.scoreAdjustment;
     reasons.push(...pageQuality.reasons);
@@ -187,33 +232,53 @@ export class LeadQualificationService {
 
     if (hasUseCaseCustomerSignal) {
       score += 12;
-      reasons.push("Matches maintenance, operator, tower, power, ISP, or field-service buyer scenario");
+      reasons.push(
+        "Matches maintenance, operator, tower, power, ISP, or field-service buyer scenario"
+      );
     }
 
     if (hasInfrastructureCustomerSignal && hasIndustryContextSignal) {
       score += 18;
-      reasons.push("Matches operator, infrastructure, engineering, maintenance, or service customer profile");
+      reasons.push(
+        "Matches operator, infrastructure, engineering, maintenance, or service customer profile"
+      );
     }
 
     const hasTargetMarketConstraint = hasTargetRegionConstraint(criteria.targetRegions);
     const targetCountryMismatch = Boolean(
       countryValidation.inferredCountry &&
-        hasTargetMarketConstraint &&
-        !matchesTargetRegion(countryValidation.inferredCountry, criteria.targetRegions)
+      hasTargetMarketConstraint &&
+      !matchesTargetRegion(countryValidation.inferredCountry, criteria.targetRegions)
     );
     const targetCountryVerified =
       Boolean(countryValidation.inferredCountry) &&
-      (countryValidation.countryConfidence === "high" || countryValidation.countryConfidence === "medium") &&
+      (countryValidation.countryConfidence === "high" ||
+        countryValidation.countryConfidence === "medium") &&
       !countryValidation.countryConflict;
     const targetCountryUnverified =
       hasTargetMarketConstraint &&
       (!countryValidation.inferredCountry ||
         countryValidation.countryConfidence === "low" ||
         countryValidation.countryConfidence === "unknown");
+    const sourceQueryCountryMismatch = Boolean(
+      countryValidation.inferredCountry &&
+        candidate.queryCountry &&
+        !matchesTargetRegion(countryValidation.inferredCountry, [candidate.queryCountry])
+    );
 
-    if (targetCountryVerified && matchesTargetRegion(countryValidation.inferredCountry!, criteria.targetRegions)) {
+    if (
+      targetCountryVerified &&
+      matchesTargetRegion(countryValidation.inferredCountry!, criteria.targetRegions)
+    ) {
       score += 15;
-      reasons.push(`Target country verified from official evidence: ${countryValidation.inferredCountry}`);
+      reasons.push(
+        `Target country verified from official evidence: ${countryValidation.inferredCountry}`
+      );
+      if (sourceQueryCountryMismatch) {
+        reasons.push(
+          `Source query country differs from verified country; using official evidence: ${countryValidation.inferredCountry}`
+        );
+      }
     } else if (targetCountryMismatch) {
       score -= 20;
       risks.push("Official country evidence does not match the selected target markets");
@@ -229,7 +294,9 @@ export class LeadQualificationService {
       forcedStatus = buyerOrIndustryFit ? "country_conflict_review" : "rejected";
       risks.push(
         `Country evidence conflicts${
-          countryValidation.countryConflictCountries.length ? `: ${countryValidation.countryConflictCountries.join(", ")}` : ""
+          countryValidation.countryConflictCountries.length
+            ? `: ${countryValidation.countryConflictCountries.join(", ")}`
+            : ""
         }`
       );
     } else if (targetCountryMismatch) {
@@ -256,7 +323,11 @@ export class LeadQualificationService {
       risks.push("Missing official website URL");
     }
 
-    if (!hasSpecificProductSignal && hasAny(text, genericItServiceTerms) && !hasInfrastructureCustomerSignal) {
+    if (
+      !hasSpecificProductSignal &&
+      hasAny(text, genericItServiceTerms) &&
+      !hasInfrastructureCustomerSignal
+    ) {
       score = Math.min(score, 74);
       risks.push("Only generic IT/service signal; no explicit product or buyer context");
     }
@@ -266,34 +337,59 @@ export class LeadQualificationService {
       risks.push("No clear buyer, operator, integrator, procurement, or maintenance signal");
     }
 
-    if (hasInfrastructureCustomerSignal && !hasSpecificProductSignal && !hasProcurementIntent(text)) {
+    if (
+      hasInfrastructureCustomerSignal &&
+      !hasSpecificProductSignal &&
+      !hasProcurementIntent(text)
+    ) {
       score = Math.min(score, 74);
       risks.push("Infrastructure or service customer fit is kept for outreach validation");
     }
 
-    const hasDirectContact = candidate.contacts.some((contact) => contact.type === "email" || contact.type === "phone");
-    const buyerServicePage = looksLikeBuyerSideCompanyPage(candidate);
-    const riskyDiscoveryPage = pageType !== "procurement_document" && isRiskyDiscoveryPage(candidate) && !buyerServicePage;
+    const riskyDiscoveryPage =
+      pageType !== "procurement_document" && isRiskyDiscoveryPage(candidate) && !buyerServicePage;
     if (!hasDirectContact) {
       score = Math.min(score, 74);
       risks.push("No usable email or phone found yet");
     }
 
     if (riskyDiscoveryPage) {
-      const evidenceCap = hasDirectContact && hasSpecificProductSignal && hasUseCaseCustomerSignal ? 58 : 44;
+      const evidenceCap =
+        hasDirectContact && hasSpecificProductSignal && hasUseCaseCustomerSignal ? 58 : 44;
       score = Math.min(score, evidenceCap);
-      risks.push("Third-party, directory, or content page is kept as evidence but needs manual validation");
+      risks.push(
+        "Third-party, directory, or content page is kept as evidence but needs manual validation"
+      );
       if (!hasDirectContact) {
         risks.push("Discovery/content page without direct contact stays low-confidence");
       }
     } else if (buyerServicePage && pageType === "official_company_site") {
       score = Math.max(score, hasDirectContact ? 58 : 52);
-      reasons.push("Official service or infrastructure page is kept for ICP review even without explicit spare-parts demand");
+      reasons.push(
+        "Official service or infrastructure page is kept for ICP review even without explicit spare-parts demand"
+      );
+    }
+
+    const hasMainReadyServiceEvidence =
+      pageType === "official_company_site" &&
+      targetCountryVerified &&
+      hasSearchContextSignal &&
+      hasDirectContact;
+    if (buyerServicePage && hasGenericServiceBuyerSignal && !hasMainReadyServiceEvidence) {
+      score = Math.min(score, 49);
+      if (!forcedStatus) {
+        forcedStatus = "evidence_review";
+      }
+      risks.push(
+        "Generic service, maintenance, or integrator page needs official site, target country evidence, search-context match, and direct contact before entering the main customer list"
+      );
     }
 
     if (targetCountryMismatch) {
       score = Math.min(score, 49);
-      risks.push("Verified candidate country is outside the selected target markets; kept for country-conflict review");
+      risks.push(
+        "Verified candidate country is outside the selected target markets; kept for country-conflict review"
+      );
     }
 
     if (targetCountryUnverified) {
@@ -307,13 +403,33 @@ export class LeadQualificationService {
     }
 
     if (pageType === "procurement_document") {
-      score = Math.max(Math.min(score, 74), 50);
-      risks.push("Procurement/RFQ document is kept as a buying-signal lead but needs buyer extraction before qualification");
+      score = Math.min(score, 49);
+      forcedStatus = "intelligence_review";
+      risks.push(
+        "Procurement/RFQ result is intelligence only; it is kept out of the main customer list and outreach flow"
+      );
+    }
+
+    if (evidenceClassification) {
+      score = Math.min(score, evidenceClassification.scoreCap);
+      forcedStatus = evidenceClassification.status;
+      reasons.push(evidenceClassification.reason);
+      risks.push(evidenceClassification.risk);
+    } else if (pageType === "unknown" && !isOfficialMainCustomerPage(candidate, pageType)) {
+      score = Math.min(score, 49);
+      if (!forcedStatus || forcedStatus === "needs_country_review") {
+        forcedStatus = "evidence_review";
+      }
+      risks.push(
+        "Candidate is not backed by an official company homepage, about, contact, services, solutions, telecom, project, or location page"
+      );
     }
 
     if (pageType === "brand_oem_site") {
       score = Math.min(score, 44);
-      risks.push("Brand or OEM official site is usually supplier/competitor evidence, not a buyer lead");
+      risks.push(
+        "Brand or OEM official site is usually supplier/competitor evidence, not a buyer lead"
+      );
     }
 
     if (pageType === "supplier_or_storefront") {
@@ -323,7 +439,9 @@ export class LeadQualificationService {
 
     if (pageType === "third_party_profile" || pageType === "non_procurement_document") {
       score = Math.min(score, 44);
-      risks.push("Third-party profile or non-procurement document is evidence only, not a direct buyer lead");
+      risks.push(
+        "Third-party profile or non-procurement document is evidence only, not a direct buyer lead"
+      );
     }
 
     const finalScore = clamp(Math.round(score), 0, 100);
@@ -337,21 +455,30 @@ export class LeadQualificationService {
     const status =
       forcedStatus === "rejected"
         ? "rejected"
-        : forcedStatus === "country_conflict_review" && !hardRejectedPage
-          ? "country_conflict_review"
-        : forcedStatus === "needs_country_review" && !hardRejectedPage
-          ? "needs_country_review"
-          : finalScore >= 75
-            ? "qualified"
-            : finalScore >= 50
-              ? "review"
-              : "rejected";
+        : forcedStatus === "intelligence_review"
+          ? "intelligence_review"
+          : forcedStatus === "evidence_review"
+            ? "evidence_review"
+            : forcedStatus === "country_conflict_review" && !hardRejectedPage
+              ? "country_conflict_review"
+              : forcedStatus === "needs_country_review" && !hardRejectedPage
+                ? "needs_country_review"
+                : finalScore >= 75
+                  ? "qualified"
+                  : finalScore >= 50
+                    ? "review"
+                    : "rejected";
 
     return {
       score: finalScore,
       grade,
       reasons: reasons.length ? reasons : ["Insufficient explicit ICP signals"],
       risks,
+      leadType: evidenceClassification?.leadType,
+      intelligenceType: evidenceClassification?.intelligenceType,
+      reviewLabels: evidenceClassification?.reviewLabels,
+      extractableCompanies: evidenceClassification?.extractableCompanies,
+      pageType,
       status
     };
   }
@@ -363,7 +490,9 @@ export class LeadQualificationService {
     defaultCountry?: string,
     aiEvaluator?: CandidateAiEvaluator
   ) {
-    const allCandidates = results.map((result) => normalizeResult(result, { taskId, defaultCountry }));
+    const allCandidates = results.map((result) =>
+      normalizeResult(result, { taskId, defaultCountry })
+    );
     const normalized = dedupeCandidates(allCandidates);
     const existing = await this.prisma.leadCandidate.findMany({
       where: { taskId },
@@ -382,7 +511,9 @@ export class LeadQualificationService {
       }
 
       const canProbeContact = shouldProbeContactPages(candidate);
-      const enrichedCandidate = inferMissingCandidateCountry(canProbeContact ? await enrichCandidateContacts(candidate) : candidate);
+      const enrichedCandidate = inferMissingCandidateCountry(
+        canProbeContact ? await enrichCandidateContacts(candidate) : candidate
+      );
       if (shouldHardRejectCandidate(enrichedCandidate, criteria)) {
         skipped += 1;
         continue;
@@ -392,9 +523,14 @@ export class LeadQualificationService {
       const emailKeys = enrichedCandidate.contacts
         .filter((contact) => contact.type === "email")
         .map((contact) => `email:${contact.value.toLowerCase()}`);
-      const existingLead = existingLeadByKey.get(key) ?? emailKeys.map((emailKey) => existingLeadByKey.get(emailKey)).find(Boolean);
+      const existingLead =
+        existingLeadByKey.get(key) ??
+        emailKeys.map((emailKey) => existingLeadByKey.get(emailKey)).find(Boolean);
       if (existingLead) {
-        const missingContacts = missingExistingContacts(existingLead.contacts, enrichedCandidate.contacts);
+        const missingContacts = missingExistingContacts(
+          existingLead.contacts,
+          enrichedCandidate.contacts
+        );
         if (missingContacts.length) {
           await this.prisma.leadContact.createMany({
             data: missingContacts.map((contact) => ({
@@ -419,7 +555,9 @@ export class LeadQualificationService {
         Boolean(aiEvaluator) &&
         aiEvaluationsUsed < maxAiCandidateEvaluationsPerBatch &&
         shouldEvaluateCandidateWithAi(ruleIcp, enrichedCandidate, criteria);
-      const aiEvaluation = shouldUseAi ? await safelyEvaluateCandidate(aiEvaluator!, enrichedCandidate) : null;
+      const aiEvaluation = shouldUseAi
+        ? await safelyEvaluateCandidate(aiEvaluator!, enrichedCandidate)
+        : null;
       if (shouldUseAi) {
         aiEvaluationsUsed += 1;
       }
@@ -462,7 +600,12 @@ export class LeadQualificationService {
                   countryEvidence: enrichedCandidate.countryEvidence ?? []
                 },
                 aiEvaluation,
-                ruleScore: ruleIcp.score
+                ruleScore: ruleIcp.score,
+                leadType: icp.leadType ?? null,
+                intelligenceType: icp.intelligenceType ?? null,
+                reviewLabels: icp.reviewLabels ?? [],
+                extractableCompanies: icp.extractableCompanies ?? [],
+                pageType: icp.pageType ?? ruleIcp.pageType ?? null
               })
             }
           }
@@ -495,6 +638,10 @@ function shouldEvaluateCandidateWithAi(
   candidate: NormalizedLeadCandidate,
   criteria: IcpScoringCriteria
 ) {
+  if (ruleIcp.status === "intelligence_review" || ruleIcp.status === "evidence_review") {
+    return false;
+  }
+
   const countryValidation = validatedCountry(candidate);
   if (
     hasTargetRegionConstraint(criteria.targetRegions) &&
@@ -520,7 +667,10 @@ function shouldEvaluateCandidateWithAi(
     return true;
   }
 
-  if ((ruleIcp.score < 35 && !buyerServicePage) || (isRiskyDiscoveryPage(candidate) && !buyerServicePage)) {
+  if (
+    (ruleIcp.score < 35 && !buyerServicePage) ||
+    (isRiskyDiscoveryPage(candidate) && !buyerServicePage)
+  ) {
     return false;
   }
 
@@ -535,7 +685,9 @@ function shouldEvaluateCandidateWithAi(
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  const hasDirectContact = candidate.contacts.some((contact) => contact.type === "email" || contact.type === "phone");
+  const hasDirectContact = candidate.contacts.some(
+    (contact) => contact.type === "email" || contact.type === "phone"
+  );
   const hasBuyerOrProductSignal =
     hasAny(text, buyerRoleTerms) ||
     hasAny(text, buyerUseCaseTerms) ||
@@ -548,7 +700,10 @@ function shouldEvaluateCandidateWithAi(
   return hasDirectContact || hasBuyerOrProductSignal || buyerServicePage;
 }
 
-async function safelyEvaluateCandidate(aiEvaluator: CandidateAiEvaluator, candidate: NormalizedLeadCandidate) {
+async function safelyEvaluateCandidate(
+  aiEvaluator: CandidateAiEvaluator,
+  candidate: NormalizedLeadCandidate
+) {
   try {
     return await aiEvaluator(candidate);
   } catch {
@@ -556,7 +711,10 @@ async function safelyEvaluateCandidate(aiEvaluator: CandidateAiEvaluator, candid
   }
 }
 
-function mergeAiEvaluationWithRuleScore(ruleIcp: IcpScoreDraft, ai: CandidateBuyerEvaluation): IcpScoreDraft {
+function mergeAiEvaluationWithRuleScore(
+  ruleIcp: IcpScoreDraft,
+  ai: CandidateBuyerEvaluation
+): IcpScoreDraft {
   const weightedScore = Math.round(clamp(ai.fitScore, 0, 100) * 0.6 + ruleIcp.score * 0.4);
   let score = weightedScore;
   const rejectTypes = new Set([
@@ -573,21 +731,39 @@ function mergeAiEvaluationWithRuleScore(ruleIcp: IcpScoreDraft, ai: CandidateBuy
     score = Math.min(score, 44);
   } else if (ai.decision === "reject") {
     score = Math.min(score, 49);
-  } else if (ai.resultType === "target_buyer" && ai.decision === "qualified" && ai.confidence >= 0.72) {
+  } else if (
+    ai.resultType === "target_buyer" &&
+    ai.decision === "qualified" &&
+    ai.confidence >= 0.72
+  ) {
     score = Math.max(score, 75);
   }
 
+  if (ruleIcp.status === "intelligence_review" || ai.resultType === "procurement_intelligence") {
+    score = Math.min(score, 49);
+  }
+
+  if (ruleIcp.status === "evidence_review") {
+    score = Math.min(score, 49);
+  }
+
   const finalScore = clamp(score, 0, 100);
-  const status =
-    ruleIcp.status === "country_conflict_review"
-      ? "country_conflict_review"
-      : ruleIcp.status === "needs_country_review"
-        ? "needs_country_review"
-        : finalScore >= 75
-          ? "qualified"
-          : finalScore >= 50
-            ? "review"
-            : "rejected";
+  let status: IcpScoreDraft["status"];
+  if (ruleIcp.status === "intelligence_review" || ai.resultType === "procurement_intelligence") {
+    status = "intelligence_review";
+  } else if (ruleIcp.status === "evidence_review") {
+    status = "evidence_review";
+  } else if (ruleIcp.status === "country_conflict_review") {
+    status = "country_conflict_review";
+  } else if (ruleIcp.status === "needs_country_review") {
+    status = "needs_country_review";
+  } else if (finalScore >= 75) {
+    status = "qualified";
+  } else if (finalScore >= 50) {
+    status = "review";
+  } else {
+    status = "rejected";
+  }
   const grade = finalScore >= 75 ? "high" : finalScore >= 50 ? "medium" : "low";
   const reasons = uniqueStrings([
     ...ruleIcp.reasons,
@@ -608,6 +784,17 @@ function mergeAiEvaluationWithRuleScore(ruleIcp: IcpScoreDraft, ai: CandidateBuy
     grade,
     reasons,
     risks,
+    leadType:
+      ruleIcp.leadType ??
+      (ai.resultType === "procurement_intelligence" ? "intelligence" : undefined),
+    intelligenceType:
+      ruleIcp.intelligenceType ??
+      (ai.resultType === "procurement_intelligence" ? "rfq_notice" : undefined),
+    reviewLabels:
+      ruleIcp.reviewLabels ??
+      (ai.resultType === "procurement_intelligence" ? ["procurement_intelligence"] : undefined),
+    extractableCompanies: ruleIcp.extractableCompanies,
+    pageType: ruleIcp.pageType,
     status
   };
 }
@@ -704,7 +891,9 @@ function missingExistingContacts(
   candidateContacts: NormalizedLeadCandidate["contacts"]
 ) {
   const existingContactKeys = new Set(existingContacts.map(contactKey));
-  return dedupeContacts(candidateContacts).filter((contact) => !existingContactKeys.has(contactKey(contact)));
+  return dedupeContacts(candidateContacts).filter(
+    (contact) => !existingContactKeys.has(contactKey(contact))
+  );
 }
 
 function extractCompanyName(title: string, url: string) {
@@ -718,7 +907,9 @@ function extractCompanyName(title: string, url: string) {
     .split(/\s(?:[-–—|:»]\s)+|\s[|]\s/)
     .map((part) => cleanupCompanyName(part))
     .filter(Boolean);
-  const selected = parts.find((part) => isLikelyCompanyName(part, domainCompany)) ?? parts.find((part) => !isGenericTitle(part));
+  const selected =
+    parts.find((part) => isLikelyCompanyName(part, domainCompany)) ??
+    parts.find((part) => !isGenericTitle(part));
 
   return selected || domainCompany || "Unknown Company";
 }
@@ -746,16 +937,28 @@ function extractAttributedCompanyName(value: string) {
 function isGenericTitle(value: string) {
   const lower = value.toLowerCase();
   return (
+    isForbiddenCompanyName(value) ||
+    looksLikePseudoCompanyName(value) ||
     genericExactTitleTerms.some((term) => lower === term) ||
     genericTitleTerms.some((term) => lower === term || lower.includes(term)) ||
     looksLikeProductTitle(value)
   );
 }
 
+function isForbiddenCompanyName(value: string) {
+  const normalized = cleanupCompanyName(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return (
+    !normalized ||
+    forbiddenCompanyNameTerms.has(normalized) ||
+    /^by\s+[a-z0-9 .'-]{2,60}$/i.test(value.trim()) ||
+    /\b(?:tagline|awesome image|blog category|article author|pdf)\b/i.test(value)
+  );
+}
+
 function isLikelyCompanyName(value: string, domainCompany: string | null) {
   const name = cleanupCompanyName(value);
   const lower = name.toLowerCase();
-  if (!name || name.length > 72 || isGenericTitle(name)) {
+  if (!name || name.length > 72 || isGenericTitle(name) || isForbiddenCompanyName(name)) {
     return false;
   }
 
@@ -767,7 +970,11 @@ function isLikelyCompanyName(value: string, domainCompany: string | null) {
     return true;
   }
 
-  if (/\b(?:llc|ltd|limited|inc|corp|corporation|group|communications|solutions|systems|services|networks?)\b/i.test(name)) {
+  if (
+    /\b(?:llc|ltd|limited|inc|corp|corporation|group|communications|solutions|systems|services|networks?)\b/i.test(
+      name
+    )
+  ) {
     return true;
   }
 
@@ -780,7 +987,27 @@ function looksLikeProductTitle(value: string) {
     hasAny(lower, productTitleTerms) ||
     /\b(?:\d{2,5}\s?w|\d{2,5}w|48v|24v|85-300|vac|vdc|sfp\+?|100g|10g)\b/i.test(value) ||
     (hasAny(lower, ["huawei", "zte", "ericsson", "nokia", "alcatel-lucent", "eltek"]) &&
-      hasAny(lower, ["rectifier", "module", "board", "rru", "bbu", "aau", "networking equipment", "hardware repair"]))
+      hasAny(lower, [
+        "rectifier",
+        "module",
+        "board",
+        "rru",
+        "bbu",
+        "aau",
+        "networking equipment",
+      "hardware repair"
+      ]))
+  );
+}
+
+function looksLikePseudoCompanyName(value: string) {
+  const lower = cleanupCompanyName(value).toLowerCase();
+  return (
+    /^(?:top[-\s]?rated|leading|best|trusted|premier|professional|award[-\s]?winning|one[-\s]?stop|no\.?\s*1|#1)\b/.test(
+      lower
+    ) ||
+    /^(?:communication package|network deployment|exploring|das installation)\b/.test(lower) ||
+    /\b(?:company|service|services|solutions?|package)\s+(?:in|for)\s+[a-z]/.test(lower)
   );
 }
 
@@ -810,7 +1037,11 @@ function formatDomainLabelAsCompany(label: string) {
   return expanded
     .split(/\s+/)
     .filter(Boolean)
-    .map((part) => (domainAcronymTerms.has(part.toLowerCase()) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1)))
+    .map((part) =>
+      domainAcronymTerms.has(part.toLowerCase())
+        ? part.toUpperCase()
+        : part.charAt(0).toUpperCase() + part.slice(1)
+    )
     .join(" ");
 }
 
@@ -898,16 +1129,9 @@ function assessCountryValidation(candidate: NormalizedLeadCandidate) {
     : mediumCountries.length
       ? mediumCountries
       : lowCountries;
-  const queryCountry = candidate.queryCountry ?? null;
-  const queryConflict = Boolean(
-    queryCountry && candidateCountries.length === 1 && !matchesTargetRegion(candidateCountries[0]!, [queryCountry])
-  );
   const evidenceConflict = candidateCountries.length > 1;
-  const countryConflict = evidenceConflict || queryConflict;
-  const countryConflictCountries = uniqueCountries([
-    ...candidateCountries,
-    ...(queryConflict && queryCountry ? [queryCountry] : [])
-  ]);
+  const countryConflict = evidenceConflict;
+  const countryConflictCountries = countryConflict ? uniqueCountries(candidateCountries) : [];
   const inferredCountry = candidateCountries.length === 1 ? candidateCountries[0]! : null;
   const countryConfidence: CountryConfidence =
     countryConflict || !inferredCountry
@@ -944,7 +1168,10 @@ function collectCountryEvidence(candidate: NormalizedLeadCandidate): CountryEvid
     evidence.push({
       type: "website_domain",
       country: websiteCountry,
-      value: domainFromUrl(candidate.website ?? candidate.sourceUrl) ?? candidate.website ?? candidate.sourceUrl,
+      value:
+        domainFromUrl(candidate.website ?? candidate.sourceUrl) ??
+        candidate.website ??
+        candidate.sourceUrl,
       sourceUrl: candidate.website ?? candidate.sourceUrl,
       confidence: "medium"
     });
@@ -1038,11 +1265,15 @@ function hasCountryContextCue(text: string) {
 }
 
 function hasServiceAreaCue(text: string) {
-  return /\b(?:serves?|serving|service area|coverage|operations?|operates?|market|region)\b/i.test(text);
+  return /\b(?:serves?|serving|service area|coverage|operations?|operates?|market|region)\b/i.test(
+    text
+  );
 }
 
 function hasAddressCue(text: string) {
-  return /\b(?:address|office|offices|headquarters|hq|located|based|locations?|branches)\b/i.test(text);
+  return /\b(?:address|office|offices|headquarters|hq|located|based|locations?|branches)\b/i.test(
+    text
+  );
 }
 
 function uniqueCountries(values: string[]) {
@@ -1081,7 +1312,11 @@ function dedupeCountryEvidence(evidence: CountryEvidence[]) {
 function inferCountryFromPhone(phone: string) {
   const trimmed = phone.trim();
   const digits = digitsOnly(trimmed);
-  const internationalDigits = trimmed.startsWith("+") ? digits : digits.startsWith("00") ? digits.slice(2) : "";
+  const internationalDigits = trimmed.startsWith("+")
+    ? digits
+    : digits.startsWith("00")
+      ? digits.slice(2)
+      : "";
 
   if (internationalDigits) {
     const match = phoneCountryCodeSignals.find(([code]) => internationalDigits.startsWith(code));
@@ -1134,11 +1369,18 @@ function extractContacts(text: string, sourceUrl: string): NormalizedLeadCandida
   });
 }
 
-function extractContactsFromHtml(html: string, sourceUrl: string): NormalizedLeadCandidate["contacts"] {
+function extractContactsFromHtml(
+  html: string,
+  sourceUrl: string
+): NormalizedLeadCandidate["contacts"] {
   const decoded = decodeHtmlEntities(html);
   const searchable = htmlToSearchableText(html);
   const contacts = [
-    ...extractEmailsFromHtml(decoded).map((value) => ({ type: "email" as const, value, sourceUrl })),
+    ...extractEmailsFromHtml(decoded).map((value) => ({
+      type: "email" as const,
+      value,
+      sourceUrl
+    })),
     ...extractTelLinkPhones(decoded).map((value) => ({ type: "phone" as const, value, sourceUrl })),
     ...extractPhoneContacts(searchable, sourceUrl),
     ...extractSocialUrls(decoded).map((value) => ({ type: "social" as const, value, sourceUrl }))
@@ -1148,16 +1390,16 @@ function extractContactsFromHtml(html: string, sourceUrl: string): NormalizedLea
 }
 
 function extractEmails(text: string) {
-  return uniqueStrings([
-    ...extractDirectEmails(text),
-    ...extractObfuscatedEmails(text)
-  ]).filter(isUsableEmail);
+  return uniqueStrings([...extractDirectEmails(text), ...extractObfuscatedEmails(text)]).filter(
+    isUsableEmail
+  );
 }
 
 function extractEmailsFromHtml(html: string) {
   return uniqueStrings([
     ...extractDirectEmails(html),
     ...extractMailtoEmails(html),
+    ...extractCloudflareProtectedEmails(html),
     ...extractObfuscatedEmails(html)
   ]).filter(isUsableEmail);
 }
@@ -1170,6 +1412,40 @@ function extractDirectEmails(text: string) {
 function extractMailtoEmails(html: string) {
   const matches = html.match(/mailto:([^"'\s?<>]+)/gi) ?? [];
   return matches.map((value) => normalizeEmailCandidate(value.replace(/^mailto:/i, "")));
+}
+
+function extractCloudflareProtectedEmails(html: string) {
+  const matches = [
+    ...Array.from(html.matchAll(/\bdata-cfemail=["']([a-f0-9]+)["']/gi)),
+    ...Array.from(html.matchAll(/\/cdn-cgi\/l\/email-protection#([a-f0-9]+)/gi))
+  ];
+
+  return matches
+    .map((match) => (match[1] ? decodeCloudflareEmail(match[1]) : ""))
+    .filter(Boolean)
+    .map(normalizeEmailCandidate);
+}
+
+function decodeCloudflareEmail(encoded: string) {
+  if (!encoded || encoded.length < 4 || encoded.length % 2 !== 0) {
+    return "";
+  }
+
+  const key = Number.parseInt(encoded.slice(0, 2), 16);
+  if (!Number.isFinite(key)) {
+    return "";
+  }
+
+  let output = "";
+  for (let index = 2; index < encoded.length; index += 2) {
+    const charCode = Number.parseInt(encoded.slice(index, index + 2), 16);
+    if (!Number.isFinite(charCode)) {
+      return "";
+    }
+    output += String.fromCharCode(charCode ^ key);
+  }
+
+  return output;
 }
 
 function extractObfuscatedEmails(text: string) {
@@ -1220,7 +1496,7 @@ function isUsableEmail(email: string) {
     return false;
   }
 
-  return !["example.com", "domain.com", "yourdomain.com", "company.com", "email.com"].includes(domain);
+  return !discardedEmailDomains.includes(domain);
 }
 
 function trimEmailToKnownTld(email: string) {
@@ -1234,11 +1510,19 @@ function extractTelLinkPhones(html: string) {
   const matches = html.match(/href=["']tel:([^"']+)["']/gi) ?? [];
   return matches
     .map((value) => value.replace(/^href=["']tel:/i, "").replace(/["']$/g, ""))
-    .map((value) => safeDecodeURIComponent(value).replace(/[^\d+().\-\s]/g, " ").replace(/\s+/g, " ").trim())
+    .map((value) =>
+      safeDecodeURIComponent(value)
+        .replace(/[^\d+().\-\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+    )
     .filter(isPlausiblePhoneNumber);
 }
 
-function extractPhoneContacts(text: string, sourceUrl: string): NormalizedLeadCandidate["contacts"] {
+function extractPhoneContacts(
+  text: string,
+  sourceUrl: string
+): NormalizedLeadCandidate["contacts"] {
   const normalized = text.replace(/\s+/g, " ");
   const loosePhones = new Set(extractPhones(normalized));
   const matches = Array.from(normalized.matchAll(/(?:\+?\d[\d\s().-]{7,}\d)/g)).filter((match) =>
@@ -1248,14 +1532,20 @@ function extractPhoneContacts(text: string, sourceUrl: string): NormalizedLeadCa
     .map((match) => {
       const value = match[0].replace(/\s+/g, " ").trim();
       const index = match.index ?? 0;
-      const context = normalized.slice(Math.max(0, index - 120), Math.min(normalized.length, index + value.length + 120));
+      const context = normalized.slice(
+        Math.max(0, index - 120),
+        Math.min(normalized.length, index + value.length + 120)
+      );
       return { value, context };
     })
     .filter(({ value }) => isPlausiblePhoneNumber(value))
     .filter(({ value, context }) => hasPhoneSignal(value, context))
     .filter(({ context }) => !hasPartNumberContext(context))
     .map(({ value }) => ({ type: "phone" as const, value, sourceUrl }))
-    .filter((contact, index, contacts) => contacts.findIndex((item) => digitsOnly(item.value) === digitsOnly(contact.value)) === index);
+    .filter(
+      (contact, index, contacts) =>
+        contacts.findIndex((item) => digitsOnly(item.value) === digitsOnly(contact.value)) === index
+    );
 }
 
 function isPlausiblePhoneNumber(phone: string) {
@@ -1285,7 +1575,11 @@ function hasPhoneSignal(phone: string, context: string) {
     return true;
   }
 
-  if (/\b(?:phone|tel|telephone|mobile|cell|call|fax|whatsapp|contact|office|main|direct|sales|support|customer service)\b\s*[:#-]?/i.test(context)) {
+  if (
+    /\b(?:phone|tel|telephone|mobile|cell|call|fax|whatsapp|contact|office|main|direct|sales|support|customer service)\b\s*[:#-]?/i.test(
+      context
+    )
+  ) {
     return true;
   }
 
@@ -1308,7 +1602,7 @@ function extractPhones(text: string) {
     .map((phone) => phone.replace(/\s+/g, " ").trim())
     .filter((phone) => !/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(phone))
     .filter((phone) => !/(?:19|20)\d{2}\s*[-\u2013]\s*(?:19|20)\d{2}/.test(phone))
-    .filter((phone) => (phone.match(/\(/g)?.length ?? 0) === ((phone.match(/\)/g)?.length ?? 0)))
+    .filter((phone) => (phone.match(/\(/g)?.length ?? 0) === (phone.match(/\)/g)?.length ?? 0))
     .filter((phone) => {
       const digits = phone.replace(/\D/g, "");
       const hasCountryPrefix = phone.trim().startsWith("+");
@@ -1318,12 +1612,15 @@ function extractPhones(text: string) {
 
 function extractSocialUrls(text: string) {
   const matches =
-    text.match(/https?:\/\/(?:www\.)?(?:linkedin\.com|facebook\.com|instagram\.com|x\.com|twitter\.com|wa\.me)\/[^\s),"'<]+/gi) ??
-    [];
+    text.match(
+      /https?:\/\/(?:www\.)?(?:linkedin\.com|facebook\.com|instagram\.com|x\.com|twitter\.com|wa\.me)\/[^\s),"'<]+/gi
+    ) ?? [];
   return matches.map((url) => url.replace(/[),.;:]+$/g, ""));
 }
 
-async function enrichCandidateContacts(candidate: NormalizedLeadCandidate): Promise<NormalizedLeadCandidate> {
+async function enrichCandidateContacts(
+  candidate: NormalizedLeadCandidate
+): Promise<NormalizedLeadCandidate> {
   if (!candidate.website) {
     return candidate;
   }
@@ -1361,11 +1658,17 @@ async function enrichCandidateContacts(candidate: NormalizedLeadCandidate): Prom
     contacts.push(...extractContacts(text, url));
   }
 
-  const companyName = chooseBestCompanyName(candidate.companyName, candidate.website, companyNameCandidates);
+  const companyName = chooseBestCompanyName(
+    candidate.companyName,
+    candidate.website,
+    companyNameCandidates
+  );
   return {
     ...candidate,
     companyName,
-    summary: [candidate.summary, ...snippets].filter(Boolean).join("\n").slice(0, 5000) || candidate.summary,
+    summary:
+      [candidate.summary, ...snippets].filter(Boolean).join("\n").slice(0, 5000) ||
+      candidate.summary,
     contacts: dedupeContacts(contacts)
   };
 }
@@ -1398,11 +1701,17 @@ function chooseBestCompanyName(currentName: string, website: string | null, cand
 }
 
 function extractJsonLdOrganizationNames(html: string) {
-  const scripts = html.match(/<script\b[^>]*type=["'][^"']*ld\+json[^"']*["'][^>]*>[\s\S]*?<\/script>/gi) ?? [];
+  const scripts =
+    html.match(/<script\b[^>]*type=["'][^"']*ld\+json[^"']*["'][^>]*>[\s\S]*?<\/script>/gi) ?? [];
   const names: string[] = [];
 
   for (const script of scripts) {
-    const json = decodeHtmlEntities(script.replace(/^<script\b[^>]*>/i, "").replace(/<\/script>$/i, "").trim());
+    const json = decodeHtmlEntities(
+      script
+        .replace(/^<script\b[^>]*>/i, "")
+        .replace(/<\/script>$/i, "")
+        .trim()
+    );
     try {
       collectOrganizationNames(JSON.parse(json), names);
     } catch {
@@ -1427,7 +1736,9 @@ function collectOrganizationNames(value: unknown, names: string[]) {
   const type = record["@type"];
   const types = Array.isArray(type) ? type : [type];
   const isOrganization = types.some(
-    (item) => typeof item === "string" && /^(organization|corporation|localbusiness|professionalservice)$/i.test(item)
+    (item) =>
+      typeof item === "string" &&
+      /^(organization|corporation|localbusiness|professionalservice)$/i.test(item)
   );
   if (isOrganization && typeof record.name === "string") {
     names.push(record.name);
@@ -1467,9 +1778,13 @@ function extractLogoAltCompanyNames(html: string) {
 function extractCopyrightCompanyNames(html: string) {
   const text = htmlToSearchableText(html);
   const matches = Array.from(
-    text.matchAll(/(?:copyright|©|\(c\))\s*(?:copyright)?\s*(?:©|\(c\))?\s*(?:\d{4}(?:\s*[-–]\s*\d{4})?)?\s+([A-Z][A-Za-z0-9&.,'() -]{2,80})/gi)
+    text.matchAll(
+      /(?:copyright|©|\(c\))\s*(?:copyright)?\s*(?:©|\(c\))?\s*(?:\d{4}(?:\s*[-–]\s*\d{4})?)?\s+([A-Z][A-Za-z0-9&.,'() -]{2,80})/gi
+    )
   );
-  return matches.map((match) => (match[1] ?? "").replace(/\b(?:all rights reserved|privacy policy|terms).*$/i, "").trim());
+  return matches.map((match) =>
+    (match[1] ?? "").replace(/\b(?:all rights reserved|privacy policy|terms).*$/i, "").trim()
+  );
 }
 
 function extractTitleCompanyNames(html: string, url: string) {
@@ -1523,15 +1838,39 @@ function shouldProbeContactPages(candidate: NormalizedLeadCandidate) {
   return !looksLikeArticlePath(path) || hasAny(text, buyerRoleTerms);
 }
 
-function shouldHardRejectCandidate(candidate: NormalizedLeadCandidate, criteria: IcpScoringCriteria) {
-  const domain = candidate.website ? domainFromUrl(candidate.website) : domainFromUrl(candidate.sourceUrl);
+function shouldHardRejectCandidate(
+  candidate: NormalizedLeadCandidate,
+  criteria: IcpScoringCriteria
+) {
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
   const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
   const pageType = classifyCandidatePage(candidate, criteria);
 
-  if (pageType === "own_site" || pageType === "third_party_profile" || pageType === "non_procurement_document") {
+  if (
+    pageType === "own_site" ||
+    pageType === "third_party_profile"
+  ) {
+    return true;
+  }
+
+  if (domain && isAlwaysHardRejectedContentDomain(domain)) {
+    return true;
+  }
+
+  if (domain && isLegacyMigratedDomain(domain)) {
+    return true;
+  }
+
+  if (classifyEvidenceLead(candidate, criteria, pageType)) {
+    return false;
+  }
+
+  if (pageType === "non_procurement_document") {
     return true;
   }
 
@@ -1551,7 +1890,14 @@ function shouldHardRejectCandidate(candidate: NormalizedLeadCandidate, criteria:
     return true;
   }
 
-  if ((looksLikeContentTitle(candidate.companyName) || hasAny(text, hardRejectContentTerms)) && !looksLikeDirectCompanyEvidence(candidate)) {
+  if (domain && isBlockedContentDomain(domain)) {
+    return true;
+  }
+
+  if (
+    (looksLikeContentTitle(candidate.companyName) || hasAny(text, hardRejectContentTerms)) &&
+    !looksLikeDirectCompanyEvidence(candidate)
+  ) {
     return true;
   }
 
@@ -1559,7 +1905,9 @@ function shouldHardRejectCandidate(candidate: NormalizedLeadCandidate, criteria:
 }
 
 function isRiskyDiscoveryPage(candidate: NormalizedLeadCandidate) {
-  const domain = candidate.website ? domainFromUrl(candidate.website) : domainFromUrl(candidate.sourceUrl);
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
   const path = pathFromUrl(candidate.sourceUrl);
   const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
     .filter(Boolean)
@@ -1572,14 +1920,16 @@ function isRiskyDiscoveryPage(candidate: NormalizedLeadCandidate) {
 
   return Boolean(
     (domain && (isBlockedContentDomain(domain) || isBlockedMarketplaceDomain(domain))) ||
-      looksLikeArticlePath(path) ||
-      looksLikeContentTitle(candidate.companyName) ||
-      hasAny(text, contentNoiseTerms)
+    looksLikeArticlePath(path) ||
+    looksLikeContentTitle(candidate.companyName) ||
+    hasAny(text, contentNoiseTerms)
   );
 }
 
 function looksLikeBuyerSideCompanyPage(candidate: NormalizedLeadCandidate) {
-  const domain = candidate.website ? domainFromUrl(candidate.website) : domainFromUrl(candidate.sourceUrl);
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
   const path = pathFromUrl(candidate.sourceUrl);
   const text = [
     candidate.companyName,
@@ -1615,7 +1965,8 @@ function looksLikeBuyerSideCompanyPage(candidate: NormalizedLeadCandidate) {
   }
 
   const serviceOrCompanyPath =
-    looksLikeCompanyOrDirectoryPath(path) || buyerServicePagePathTerms.some((term) => path.includes(term));
+    looksLikeCompanyOrDirectoryPath(path) ||
+    buyerServicePagePathTerms.some((term) => path.includes(term));
   const hasCompanyIdentity =
     candidate.contacts.some((contact) => contact.type === "email" || contact.type === "phone") ||
     hasAny(text, generalCompanyEntityTerms) ||
@@ -1625,7 +1976,9 @@ function looksLikeBuyerSideCompanyPage(candidate: NormalizedLeadCandidate) {
 }
 
 function looksLikeDirectCompanyEvidence(candidate: NormalizedLeadCandidate) {
-  const domain = candidate.website ? domainFromUrl(candidate.website) : domainFromUrl(candidate.sourceUrl);
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
   const path = pathFromUrl(candidate.sourceUrl);
   const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
     .filter(Boolean)
@@ -1642,7 +1995,9 @@ function looksLikeDirectCompanyEvidence(candidate: NormalizedLeadCandidate) {
 
   return (
     looksLikeCompanyOrDirectoryPath(path) &&
-    (hasAny(text, buyerRoleTerms) || hasAny(text, generalCompanyEntityTerms) || hasTelecomContext(text))
+    (hasAny(text, buyerRoleTerms) ||
+      hasAny(text, generalCompanyEntityTerms) ||
+      hasTelecomContext(text))
   );
 }
 
@@ -1657,7 +2012,15 @@ function contactProbeUrls(website: string, sourceUrl: string) {
     for (const path of contactPagePathCandidates(sourceUrl, website)) {
       urls.add(`${origin}${path}`);
     }
-    for (const path of ["/about", "/about-us", "/company", "/support", "/sales", "/request-a-quote", "/quote"]) {
+    for (const path of [
+      "/about",
+      "/about-us",
+      "/company",
+      "/support",
+      "/sales",
+      "/request-a-quote",
+      "/quote"
+    ]) {
       urls.add(`${origin}${path}`);
     }
   } catch {
@@ -1679,10 +2042,13 @@ function contactPagePathCandidates(...urls: string[]) {
 
   const suffixes = [
     "/contact",
-    "/contact/",
-    "/contact.html",
+    "/contactus",
     "/contact-us",
+    "/contact/",
+    "/contactus/",
     "/contact-us/",
+    "/contact.html",
+    "/contactus.html",
     "/contact-us.html",
     "/contacts",
     "/contacts/",
@@ -1702,7 +2068,9 @@ function contactPagePathCandidates(...urls: string[]) {
     "/offices",
     "/offices/"
   ];
-  return uniqueStrings(suffixes.flatMap((suffix) => [...prefixes].map((prefix) => `${prefix}${suffix}`)));
+  return uniqueStrings(
+    suffixes.flatMap((suffix) => [...prefixes].map((prefix) => `${prefix}${suffix}`))
+  );
 }
 
 function installBasePathPrefix(url: string) {
@@ -1717,6 +2085,7 @@ function installBasePathPrefix(url: string) {
     if (
       [
         "contact",
+        "contactus",
         "contact-us",
         "contacts",
         "get-in-touch",
@@ -1804,7 +2173,10 @@ async function fetchText(url: string) {
       }
     });
     const contentType = response.headers.get("content-type") ?? "";
-    if (!response.ok || (!contentType.includes("text/html") && !contentType.includes("text/plain"))) {
+    if (
+      !response.ok ||
+      (!contentType.includes("text/html") && !contentType.includes("text/plain"))
+    ) {
       return "";
     }
 
@@ -1872,6 +2244,29 @@ function hasTelecomContext(text: string) {
   return /\bnetwork\b/.test(text) && hasAny(text, networkTelecomQualifiers);
 }
 
+function hasSearchContext(text: string, criteria: IcpScoringCriteria) {
+  const criteriaTerms = [
+    ...criteria.productKeywords,
+    ...criteria.customerTypeKeywords,
+    ...(criteria.brandTerms ?? [])
+  ].filter((term) => term.trim().length >= 2);
+
+  return hasAny(text, criteriaTerms) || (criteriaIndicatesTelecom(criteria) && hasTelecomContext(text));
+}
+
+function criteriaIndicatesTelecom(criteria: IcpScoringCriteria) {
+  const criteriaText = [
+    ...criteria.productKeywords,
+    ...criteria.customerTypeKeywords,
+    ...(criteria.brandTerms ?? [])
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return hasTelecomContext(criteriaText) || hasAny(criteriaText, specificTelecomProductTerms);
+}
+
 function isSpecificProductTerm(term: string) {
   const normalized = term.toLowerCase();
   return specificTelecomProductTerms.some((specificTerm) => normalized.includes(specificTerm));
@@ -1926,8 +2321,13 @@ function normalizeRegionKey(region: string) {
   return region.trim().toLowerCase();
 }
 
-function classifyCandidatePage(candidate: NormalizedLeadCandidate, criteria: IcpScoringCriteria): PageType {
-  const domain = candidate.website ? domainFromUrl(candidate.website) : domainFromUrl(candidate.sourceUrl);
+function classifyCandidatePage(
+  candidate: NormalizedLeadCandidate,
+  criteria: IcpScoringCriteria
+): PageType {
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
   const path = pathFromUrl(candidate.sourceUrl);
   const text = [
     candidate.companyName,
@@ -1951,6 +2351,10 @@ function classifyCandidatePage(candidate: NormalizedLeadCandidate, criteria: Icp
 
   if (domain && isThirdPartyProfileDomain(domain)) {
     return hasProcurementIntent(text) ? "procurement_document" : "third_party_profile";
+  }
+
+  if (domain && isProcurementIntelligenceDomain(domain) && hasProcurementIntent(text)) {
+    return "procurement_document";
   }
 
   if (domain && isBrandOemDomain(domain, criteria)) {
@@ -2045,12 +2449,259 @@ function hasBuyerSideSignal(text: string) {
   );
 }
 
+function classifyEvidenceLead(
+  candidate: NormalizedLeadCandidate,
+  criteria: IcpScoringCriteria,
+  pageType = classifyCandidatePage(candidate, criteria)
+): EvidenceLeadClassification | null {
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
+  const path = pathFromUrl(candidate.sourceUrl);
+  const originalText = [
+    candidate.companyName,
+    candidate.website,
+    candidate.sourceUrl,
+    candidate.summary,
+    candidate.country,
+    candidate.contacts.map((contact) => contact.value).join(" ")
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const text = originalText.toLowerCase();
+  const isDocument = looksLikeDocumentPath(path);
+  const isProcurement = hasProcurementIntent(text);
+  const isGovernment =
+    (domain ? isGovernmentInformationDomain(domain) : false) ||
+    hasAny(text, governmentInformationTerms) ||
+    path.includes("/information-and-services/");
+  const isNewsOrContent =
+    (domain ? isNewsMediaDomain(domain) : false) ||
+    looksLikeArticlePath(path) ||
+    hasAny(text, newsContentTerms) ||
+    pageType === "content_or_directory";
+  const isExplicitNewsArticle =
+    (domain ? isNewsMediaDomain(domain) : false) ||
+    looksLikeArticlePath(path) ||
+    hasAny(text, ["reported", "news article", "press release"]);
+  const isDirectory =
+    looksLikeDirectoryEvidence(path, text) ||
+    (pageType === "third_party_profile" && hasAny(text, directoryDocumentTerms));
+  const hasRelevantSearchContext =
+    hasSearchContext(text, criteria) ||
+    hasAny(text, specificTelecomProductTerms);
+  const extractableCompanies = extractMentionedCompanySignals(originalText);
+  const usefulProjectNews =
+    isExplicitNewsArticle &&
+    hasRelevantSearchContext &&
+    hasAny(text, projectNewsTerms);
+  const usefulDocumentIntelligence =
+    isDocument &&
+    hasRelevantSearchContext &&
+    (isProcurement || hasAny(text, exhibitionDocumentTerms) || hasAny(text, directoryDocumentTerms));
+  const allowedProcurementDirectory =
+    isProcurement && domain ? isProcurementIntelligenceDomain(domain) : false;
+  const hardContentNoise =
+    looksLikeContentTitle(candidate.companyName) ||
+    hasAny(text, hardRejectContentTerms) ||
+    hasAny(text, [
+      "market report",
+      "industry report",
+      "market research",
+      "technology indicator",
+      "mobile network codes",
+      "mcc & mnc",
+      "mcc mnc",
+      "lookup",
+      "regulatory registration",
+      "register as a telecommunications provider",
+      "policy alert",
+      "commission restricts"
+    ]);
+
+  if (
+    pageType === "supplier_or_storefront" ||
+    isSupplierOrStorefrontPage(text, path) ||
+    hasAny(text, consumerElectronicsTerms)
+  ) {
+    return null;
+  }
+
+  if (domain && isBlockedMarketplaceDomain(domain) && !allowedProcurementDirectory) {
+    return null;
+  }
+
+  if (
+    hardContentNoise &&
+    !isGovernment &&
+    !usefulProjectNews &&
+    !usefulDocumentIntelligence &&
+    !allowedProcurementDirectory
+  ) {
+    return null;
+  }
+
+  if (isGovernment && isProcurement) {
+    return intelligenceClassification(
+      "government_tender",
+      ["government_tender", "procurement_intelligence"],
+      extractableCompanies
+    );
+  }
+
+  if (
+    isProcurement &&
+    (pageType === "procurement_document" ||
+      isDocument ||
+      isNewsOrContent ||
+      isDirectory ||
+      (domain ? isProcurementIntelligenceDomain(domain) : false))
+  ) {
+    return intelligenceClassification(
+      "rfq_notice",
+      ["rfq_notice", "procurement_intelligence"],
+      extractableCompanies
+    );
+  }
+
+  if (isDocument && hasRelevantSearchContext) {
+    if (hasAny(text, exhibitionDocumentTerms)) {
+      return intelligenceClassification(
+        "exhibition_pdf",
+        ["exhibition_pdf", "pdf_list", "extractable_companies"],
+        extractableCompanies
+      );
+    }
+
+    if (hasAny(text, directoryDocumentTerms)) {
+      return intelligenceClassification(
+        "company_directory",
+        ["company_directory", "pdf_list", "extractable_companies"],
+        extractableCompanies
+      );
+    }
+  }
+
+  if (isDirectory && hasRelevantSearchContext) {
+    return intelligenceClassification(
+      "company_directory",
+      ["company_directory", "extractable_companies"],
+      extractableCompanies
+    );
+  }
+
+  if (isGovernment) {
+    return {
+      leadType: "government_information",
+      reviewLabels: ["government_information"],
+      extractableCompanies,
+      status: "evidence_review",
+      scoreCap: 49,
+      reason: "Government information page kept for review as evidence",
+      risk: "Government information pages are not buyer companies and cannot enter ICP 75+"
+    };
+  }
+
+  if (isNewsOrContent && hasRelevantSearchContext) {
+    if (usefulProjectNews) {
+      return intelligenceClassification(
+        "project_news",
+        ["project_news", "extractable_companies"],
+        extractableCompanies
+      );
+    }
+
+    return {
+      leadType: "content_evidence",
+      reviewLabels: ["content_evidence"],
+      extractableCompanies,
+      status: "evidence_review",
+      scoreCap: 49,
+      reason: "Content page kept only as evidence, not as a customer",
+      risk:
+        "News, article, blog, media, report, or content page cannot enter the main customer list"
+    };
+  }
+
+  return null;
+}
+
+function intelligenceClassification(
+  intelligenceType: IntelligenceType,
+  reviewLabels: string[],
+  extractableCompanies: string[]
+): EvidenceLeadClassification {
+  return {
+    leadType: "intelligence",
+    intelligenceType,
+    reviewLabels: uniqueStrings(["intelligence", ...reviewLabels]),
+    extractableCompanies,
+    status: "intelligence_review",
+    scoreCap: 49,
+    reason: "Search result is useful buyer intelligence but not a direct customer",
+    risk:
+      "Intelligence sources must be reviewed and mined for real local companies before outreach or CRM sync"
+  };
+}
+
+function isOfficialMainCustomerPage(candidate: NormalizedLeadCandidate, pageType: PageType) {
+  if (pageType !== "official_company_site") {
+    return false;
+  }
+
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
+  const path = pathFromUrl(candidate.sourceUrl);
+
+  if (!domain || isBlockedContentDomain(domain) || isBlockedMarketplaceDomain(domain)) {
+    return false;
+  }
+
+  if (looksLikeArticlePath(path) || looksLikeDocumentPath(path)) {
+    return false;
+  }
+
+  return looksLikeOfficialCustomerPath(path) || looksLikeBuyerSideCompanyPage(candidate);
+}
+
+function looksLikeOfficialCustomerPath(path: string) {
+  if (!path || path === "/" || path.split("/").filter(Boolean).length <= 1) {
+    return true;
+  }
+
+  return officialCustomerPagePathTerms.some((term) => path.includes(term));
+}
+
+function looksLikeDirectoryEvidence(path: string, text: string) {
+  return (
+    path.includes("/directory") ||
+    path.includes("/directories") ||
+    path.includes("/listing") ||
+    path.includes("/listings") ||
+    hasAny(text, directoryDocumentTerms)
+  );
+}
+
+function extractMentionedCompanySignals(text: string) {
+  const companies: string[] = [];
+  for (const [name, pattern] of extractableCompanySignalPatterns) {
+    if (pattern.test(text)) {
+      companies.push(name);
+    }
+  }
+
+  return uniqueStrings(companies);
+}
+
 function assessPageQuality(
   candidate: NormalizedLeadCandidate,
   criteria: IcpScoringCriteria,
   pageType = classifyCandidatePage(candidate, criteria)
 ): PageQualityAssessment {
-  const domain = candidate.website ? domainFromUrl(candidate.website) : domainFromUrl(candidate.sourceUrl);
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
   const path = pathFromUrl(candidate.sourceUrl);
   const text = [
     candidate.companyName,
@@ -2069,7 +2720,9 @@ function assessPageQuality(
   let negativeScore = 0;
   const isDocument = looksLikeDocumentPath(path);
   const hasCompanyOrDirectoryPath = looksLikeCompanyOrDirectoryPath(path);
-  const hasDirectContact = candidate.contacts.some((contact) => contact.type === "email" || contact.type === "phone");
+  const hasDirectContact = candidate.contacts.some(
+    (contact) => contact.type === "email" || contact.type === "phone"
+  );
   const hasDirectCompanyEvidence = looksLikeDirectCompanyEvidence(candidate);
   const buyerServicePage = looksLikeBuyerSideCompanyPage(candidate);
 
@@ -2080,7 +2733,9 @@ function assessPageQuality(
 
   if (pageType === "third_party_profile") {
     negativeScore += 50;
-    risks.push("Search result is a third-party company profile; use it only as evidence to find the official buyer site");
+    risks.push(
+      "Search result is a third-party company profile; use it only as evidence to find the official buyer site"
+    );
   }
 
   if (pageType === "brand_oem_site") {
@@ -2095,12 +2750,16 @@ function assessPageQuality(
 
   if (pageType === "procurement_document") {
     positiveScore += 8;
-    reasons.push("Search result looks like procurement, tender, RFQ, or vendor-registration evidence");
+    reasons.push(
+      "Search result looks like procurement, tender, RFQ, or vendor-registration evidence"
+    );
   }
 
   if (pageType === "non_procurement_document") {
     negativeScore += 42;
-    risks.push("Search result is a non-procurement document such as a brochure, paper, datasheet, or manual");
+    risks.push(
+      "Search result is a non-procurement document such as a brochure, paper, datasheet, or manual"
+    );
   }
 
   if (pageType !== "procurement_document" && domain && isBlockedContentDomain(domain)) {
@@ -2115,7 +2774,9 @@ function assessPageQuality(
 
   if (hasAny(text, consumerElectronicsTerms)) {
     negativeScore += 26;
-    risks.push("Search result is about consumer phone accessories or retail electronics, not telecom infrastructure");
+    risks.push(
+      "Search result is about consumer phone accessories or retail electronics, not telecom infrastructure"
+    );
   }
 
   if (hasCompanyOrDirectoryPath) {
@@ -2130,7 +2791,9 @@ function assessPageQuality(
 
   if (isDocument && pageType !== "procurement_document") {
     negativeScore += 8;
-    risks.push("Search result is a document, brochure, or catalog; keeping it for scoring instead of auto-skipping");
+    risks.push(
+      "Search result is a document, brochure, or catalog; keeping it for scoring instead of auto-skipping"
+    );
   }
 
   if (hasAny(text, buyerRoleTerms)) {
@@ -2183,11 +2846,13 @@ function assessPageQuality(
 }
 
 function isBlockedContentDomain(domain: string) {
-  if (domain.endsWith(".edu") || domain.endsWith(".gov")) {
+  if (isGovernmentInformationDomain(domain) || isNewsMediaDomain(domain)) {
     return true;
   }
 
-  return blockedContentDomains.some((blockedDomain) => domain === blockedDomain || domain.endsWith(`.${blockedDomain}`));
+  return blockedContentDomains.some(
+    (blockedDomain) => domain === blockedDomain || domain.endsWith(`.${blockedDomain}`)
+  );
 }
 
 function isBlockedMarketplaceDomain(domain: string) {
@@ -2196,12 +2861,54 @@ function isBlockedMarketplaceDomain(domain: string) {
   );
 }
 
-function isHardRejectedDiscoveryDomain(domain: string) {
-  if (domain.endsWith(".edu") || domain.endsWith(".gov")) {
+function isAlwaysHardRejectedContentDomain(domain: string) {
+  return alwaysHardRejectedContentDomains.some((blockedDomain) =>
+    domainMatches(domain, blockedDomain)
+  );
+}
+
+function isProcurementIntelligenceDomain(domain: string) {
+  if (isGovernmentOrEducationDomain(domain) || isGovernmentInformationDomain(domain)) {
     return true;
   }
 
-  return hardRejectedDiscoveryDomains.some((blockedDomain) => domain === blockedDomain || domain.endsWith(`.${blockedDomain}`));
+  return procurementIntelligenceDomains.some((procurementDomain) =>
+    domainMatches(domain, procurementDomain)
+  );
+}
+
+function isGovernmentInformationDomain(domain: string) {
+  return (
+    isGovernmentOrEducationDomain(domain) ||
+    governmentPortalDomains.some((governmentDomain) => domainMatches(domain, governmentDomain))
+  );
+}
+
+function isNewsMediaDomain(domain: string) {
+  return newsMediaDomains.some((newsDomain) => domainMatches(domain, newsDomain));
+}
+
+function isHardRejectedDiscoveryDomain(domain: string) {
+  if (isGovernmentOrEducationDomain(domain)) {
+    return true;
+  }
+
+  return hardRejectedDiscoveryDomains.some(
+    (blockedDomain) => domain === blockedDomain || domain.endsWith(`.${blockedDomain}`)
+  );
+}
+
+function isGovernmentOrEducationDomain(domain: string) {
+  return (
+    domain.endsWith(".gov") ||
+    domain.endsWith(".edu") ||
+    /(^|\.)gov\.[a-z]{2}$/i.test(domain) ||
+    /(^|\.)edu\.[a-z]{2}$/i.test(domain)
+  );
+}
+
+function isLegacyMigratedDomain(domain: string) {
+  return legacyMigratedDomains.some((legacyDomain) => domainMatches(domain, legacyDomain));
 }
 
 function looksLikeCompanyOrDirectoryPath(path: string) {
@@ -2229,7 +2936,9 @@ function looksLikeStorefrontPath(path: string) {
     return false;
   }
 
-  return /\/(?:product(?:s)?|catalog(?:ue|s)?|category(?:ies)?|collection(?:s)?|shop|store|cart|checkout|item(?:s)?|sku)\b/.test(path);
+  return /\/(?:product(?:s)?|catalog(?:ue|s)?|category(?:ies)?|collection(?:s)?|shop|store|cart|checkout|item(?:s)?|sku)\b/.test(
+    path
+  );
 }
 
 function looksLikeContentTitle(value: string) {
@@ -2585,6 +3294,20 @@ const genericBuyerIntentTerms = [
   "supplier registration"
 ];
 
+const genericServiceBuyerGateTerms = [
+  "maintenance company",
+  "maintenance services",
+  "service provider",
+  "network services",
+  "system integrator",
+  "field service",
+  "field services",
+  "managed services",
+  "network maintenance",
+  "repair service",
+  "installation contractor"
+];
+
 const genericBuyerPageSignalTerms = [
   ...genericBuyerIntentTerms,
   "services",
@@ -2652,19 +3375,9 @@ const storefrontCommerceTerms = [
   "add to basket"
 ];
 
-const storefrontAccountTerms = [
-  "login",
-  "register",
-  "sign in",
-  "sign up"
-];
+const storefrontAccountTerms = ["login", "register", "sign in", "sign up"];
 
-const storefrontPriceTerms = [
-  "price",
-  "pricing",
-  "price list",
-  "in stock"
-];
+const storefrontPriceTerms = ["price", "pricing", "price list", "in stock"];
 
 const storefrontSellerTerms = [
   "supplier",
@@ -2866,6 +3579,155 @@ const blockedContentDomains = [
   "yellowpages.com",
   "yellowpages.ae",
   "yello.ae"
+];
+
+const alwaysHardRejectedContentDomains = [
+  "linkedin.com",
+  "facebook.com",
+  "instagram.com",
+  "x.com",
+  "twitter.com",
+  "youtube.com",
+  "tiktok.com",
+  "reddit.com",
+  "wikipedia.org",
+  "wikidata.org",
+  "slideshare.net",
+  "scribd.com",
+  "pdfcoffee.com"
+];
+
+const legacyMigratedDomains = ["etisalat.ae"];
+
+const discardedEmailDomains = [
+  "example.com",
+  "domain.com",
+  "yourdomain.com",
+  "company.com",
+  "email.com",
+  "tecnologia.com"
+];
+
+const procurementIntelligenceDomains = [
+  "tendersontime.com",
+  "globaltenders.com",
+  "biddetail.com",
+  "tendernews.com",
+  "tendersinfo.com",
+  "dgmarket.com",
+  "procurement-notices.undp.org"
+];
+
+const governmentPortalDomains = ["u.ae"];
+
+const newsMediaDomains = [
+  "rcrwireless.com",
+  "euronews.com",
+  "jpost.com",
+  "telecomreview.com",
+  "developingtelecoms.com",
+  "capacitymedia.com",
+  "lightreading.com",
+  "totaltele.com"
+];
+
+const governmentInformationTerms = [
+  "official platform",
+  "government portal",
+  "ministry",
+  "authority",
+  "information-and-services",
+  "public service",
+  "regulator",
+  "regulatory authority"
+];
+
+const newsContentTerms = [
+  "news",
+  "media",
+  "article",
+  "press release",
+  "blog",
+  "reported",
+  "journalist",
+  "publisher"
+];
+
+const projectNewsTerms = [
+  "project",
+  "rollout",
+  "deployment",
+  "deploy",
+  "build",
+  "contract",
+  "agreement",
+  "partnership",
+  "launch",
+  "private 5g",
+  "network upgrade",
+  "tower rollout",
+  "fiber rollout"
+];
+
+const exhibitionDocumentTerms = [
+  "exhibition",
+  "exhibitor",
+  "exhibitors",
+  "expo",
+  "conference",
+  "trade show",
+  "delegate list",
+  "participant list",
+  "attendee list",
+  "event catalogue",
+  "event catalog"
+];
+
+const directoryDocumentTerms = [
+  "directory",
+  "company directory",
+  "member directory",
+  "members directory",
+  "association",
+  "exhibitor list",
+  "supplier list",
+  "vendor list",
+  "participant list",
+  "attendee list",
+  "catalogue",
+  "catalog"
+];
+
+const officialCustomerPagePathTerms = [
+  "/about",
+  "/contact",
+  "/services",
+  "/service",
+  "/solutions",
+  "/solution",
+  "/industries",
+  "/industry",
+  "/telecom",
+  "/projects",
+  "/project",
+  "/locations",
+  "/location"
+];
+
+const extractableCompanySignalPatterns: Array<[string, RegExp]> = [
+  ["ADNOC", /\bADNOC\b/i],
+  ["e&", /(^|[^a-z0-9])e&([^a-z0-9]|$)|\betisalat by e&/i],
+  ["Nokia", /\bNokia\b/i],
+  ["Huawei", /\bHuawei\b/i],
+  ["ZTE", /\bZTE\b/i],
+  ["Ericsson", /\bEricsson\b/i],
+  ["du", /\bdu\b|\bEmirates Integrated Telecommunications\b/i],
+  ["stc", /\bstc\b|\bSaudi Telecom\b/i],
+  ["Ooredoo", /\bOoredoo\b/i],
+  ["Vodafone", /\bVodafone\b/i],
+  ["Orange", /\bOrange\b/i],
+  ["MTN", /\bMTN\b/i],
+  ["Airtel", /\bAirtel\b/i]
 ];
 
 const blockedMarketplaceDomains = [
@@ -3131,6 +3993,10 @@ const hardBuyerPageExclusionTerms = [
   "media platform",
   "event platform",
   "conference platform",
+  "rebranding educational message",
+  "looking for etisalat",
+  "we're now eand.ae",
+  "welcome to the new era",
   "supplier directory",
   "manufacturers and suppliers",
   "wholesale suppliers",
@@ -3164,7 +4030,11 @@ const hardRejectContentTerms = [
   "wholesale suppliers",
   "manufacturers and suppliers",
   "supplier directory",
-  "product details"
+  "product details",
+  "rebranding educational message",
+  "looking for etisalat",
+  "we're now eand.ae",
+  "welcome to the new era"
 ];
 
 const genericDiscoveryTitlePatterns = [
@@ -3223,14 +4093,30 @@ const productTitleTerms = [
 
 const domainCompanyNameOverrides: Record<string, string> = {
   ats4solutions: "ATS 4 Solutions",
+  greenportsuppliers: "Greenport Suppliers",
   hctgroup: "HCT Group",
   ispsupplies: "ISP Supplies",
   mfcomm: "MF Communications",
+  rtesqatar: "RTES Qatar",
   screamerelectronicservices: "Screamer Electronic Services",
+  sfps: "SFPS",
+  stc: "STC",
+  telephonyme: "TelephonyME",
   tempestns: "Tempest"
 };
 
-const domainAcronymTerms = new Set(["isp", "hct", "ats", "mf", "usa", "uk", "uae"]);
+const domainAcronymTerms = new Set([
+  "isp",
+  "hct",
+  "ats",
+  "mf",
+  "rtes",
+  "sfps",
+  "stc",
+  "usa",
+  "uk",
+  "uae"
+]);
 
 const genericTitleTerms = [
   "telecom equipment",
@@ -3249,16 +4135,43 @@ const genericTitleTerms = [
 ];
 
 const genericExactTitleTerms = [
+  "about",
+  "about us",
+  "awesome image",
   "business",
+  "by",
+  "contact",
+  "contact us",
   "distribution",
+  "home",
+  "homepage",
+  "pdf",
   "products",
   "services",
   "category",
   "catalog",
+  "tagline",
   "listing",
   "telecom",
   "telecommunications"
 ];
+
+const forbiddenCompanyNameTerms = new Set([
+  "about",
+  "about us",
+  "article author",
+  "awesome image",
+  "blog category",
+  "by",
+  "category",
+  "contact",
+  "contact us",
+  "home",
+  "homepage",
+  "pdf",
+  "tagline",
+  "welcome"
+]);
 
 const globalTargetRegions = new Set(["global", "worldwide", "all countries", "all markets"]);
 
@@ -3427,7 +4340,16 @@ const targetRegionCountryMap: Record<string, string[]> = {
     "El Salvador",
     "Dominican Republic"
   ],
-  americas: ["United States", "Canada", "Mexico", "Brazil", "Chile", "Colombia", "Peru", "Argentina"],
+  americas: [
+    "United States",
+    "Canada",
+    "Mexico",
+    "Brazil",
+    "Chile",
+    "Colombia",
+    "Peru",
+    "Argentina"
+  ],
   oceania: ["Australia", "New Zealand", "Papua New Guinea"]
 };
 

@@ -41,7 +41,10 @@ import type {
   ProductProfileAnalysis,
   SearchStrategyPlan
 } from "../ai/leadhunt-ai.schemas.js";
-import { LeadQualificationService, type IcpScoringCriteria } from "../leads/lead-qualification.service.js";
+import {
+  LeadQualificationService,
+  type IcpScoringCriteria
+} from "../leads/lead-qualification.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { BraveSearchService } from "../search/brave-search.service.js";
 import type { BraveSearchResult } from "../search/brave-search.client.js";
@@ -179,15 +182,65 @@ const knownQueryMarkets = [
 ];
 
 const searchTargetMarketExpansions: Record<string, string[]> = {
-  "middle east": ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait", "Bahrain", "Jordan", "Iraq", "Iran"],
-  mena: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait", "Bahrain", "Jordan", "Iraq", "Iran", "Egypt", "Morocco"],
+  "middle east": [
+    "UAE",
+    "Saudi Arabia",
+    "Qatar",
+    "Oman",
+    "Kuwait",
+    "Bahrain",
+    "Jordan",
+    "Iraq",
+    "Iran"
+  ],
+  mena: [
+    "UAE",
+    "Saudi Arabia",
+    "Qatar",
+    "Oman",
+    "Kuwait",
+    "Bahrain",
+    "Jordan",
+    "Iraq",
+    "Iran",
+    "Egypt",
+    "Morocco"
+  ],
   gcc: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait", "Bahrain"],
   africa: ["Nigeria", "Kenya", "South Africa", "Egypt", "Morocco", "Ghana", "Tanzania"],
   "north africa": ["Egypt", "Morocco", "Algeria", "Tunisia"],
-  europe: ["Germany", "United Kingdom", "France", "Italy", "Spain", "Poland", "Netherlands", "Romania", "Ukraine"],
-  "latin america": ["Brazil", "Mexico", "Chile", "Colombia", "Peru", "Argentina", "Ecuador", "Costa Rica"],
+  europe: [
+    "Germany",
+    "United Kingdom",
+    "France",
+    "Italy",
+    "Spain",
+    "Poland",
+    "Netherlands",
+    "Romania",
+    "Ukraine"
+  ],
+  "latin america": [
+    "Brazil",
+    "Mexico",
+    "Chile",
+    "Colombia",
+    "Peru",
+    "Argentina",
+    "Ecuador",
+    "Costa Rica"
+  ],
   latam: ["Brazil", "Mexico", "Chile", "Colombia", "Peru", "Argentina", "Ecuador", "Costa Rica"],
-  americas: ["United States", "Canada", "Mexico", "Brazil", "Chile", "Colombia", "Peru", "Argentina"],
+  americas: [
+    "United States",
+    "Canada",
+    "Mexico",
+    "Brazil",
+    "Chile",
+    "Colombia",
+    "Peru",
+    "Argentina"
+  ],
   "north america": ["United States", "Canada", "Mexico"],
   asia: [
     "UAE",
@@ -204,7 +257,15 @@ const searchTargetMarketExpansions: Record<string, string[]> = {
     "Kazakhstan",
     "Uzbekistan"
   ],
-  "southeast asia": ["Indonesia", "Vietnam", "Malaysia", "Philippines", "Thailand", "Singapore", "Cambodia"],
+  "southeast asia": [
+    "Indonesia",
+    "Vietnam",
+    "Malaysia",
+    "Philippines",
+    "Thailand",
+    "Singapore",
+    "Cambodia"
+  ],
   "south asia": ["India", "Pakistan", "Bangladesh", "Sri Lanka", "Nepal"],
   "central asia": ["Kazakhstan", "Uzbekistan", "Kyrgyzstan", "Tajikistan", "Turkmenistan"],
   oceania: ["Australia", "New Zealand", "Papua New Guinea"]
@@ -238,13 +299,15 @@ function createLangGraphCheckpointer(store: LangGraphCheckpointStore): LangGraph
 }
 
 function resolvePostgresCheckpointSettings() {
-  const rawConnectionString = process.env.LANGGRAPH_CHECKPOINT_DATABASE_URL ?? process.env.DATABASE_URL;
+  const rawConnectionString =
+    process.env.LANGGRAPH_CHECKPOINT_DATABASE_URL ?? process.env.DATABASE_URL;
   if (!rawConnectionString) {
     throw new Error("DATABASE_URL is required when LANGGRAPH_CHECKPOINT_STORE=postgres");
   }
 
   const url = new URL(rawConnectionString);
-  const schema = process.env.LANGGRAPH_CHECKPOINT_SCHEMA ?? url.searchParams.get("schema") ?? "public";
+  const schema =
+    process.env.LANGGRAPH_CHECKPOINT_SCHEMA ?? url.searchParams.get("schema") ?? "public";
   url.searchParams.delete("schema");
 
   return {
@@ -263,13 +326,17 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Optional()
-    @Inject(BraveSearchService) private readonly braveSearchService?: BraveSearchService,
+    @Inject(BraveSearchService)
+    private readonly braveSearchService?: BraveSearchService,
     @Optional()
-    @Inject(LeadQualificationService) private readonly leadQualificationService?: LeadQualificationService,
+    @Inject(LeadQualificationService)
+    private readonly leadQualificationService?: LeadQualificationService,
     @Optional()
-    @Inject(WebsiteContentService) private readonly websiteContentService?: WebsiteContentService,
+    @Inject(WebsiteContentService)
+    private readonly websiteContentService?: WebsiteContentService,
     @Optional()
-    @Inject(LeadHuntAiService) private readonly leadHuntAiService?: LeadHuntAiService
+    @Inject(LeadHuntAiService)
+    private readonly leadHuntAiService?: LeadHuntAiService
   ) {}
 
   async onModuleInit() {
@@ -297,12 +364,10 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     }
 
     const checkpointer = this.graphCheckpointer as PostgresSaver;
-    this.graphCheckpointerSetup ??= checkpointer
-      .setup()
-      .catch((error) => {
-        this.graphCheckpointerSetup = undefined;
-        throw error;
-      });
+    this.graphCheckpointerSetup ??= checkpointer.setup().catch((error) => {
+      this.graphCheckpointerSetup = undefined;
+      throw error;
+    });
 
     await this.graphCheckpointerSetup;
   }
@@ -427,7 +492,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     for (const task of tasks) {
       const input = createTaskInputFromPayload(task.inputPayload, task.targetCount ?? undefined);
       if (!input) {
-        await this.markAutonomousDiscoveryFailed(task.id, "Cannot recover task without prompt", "plan_search_queries");
+        await this.markAutonomousDiscoveryFailed(
+          task.id,
+          "Cannot recover task without prompt",
+          "plan_search_queries"
+        );
         continue;
       }
 
@@ -475,18 +544,19 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
       const qualityGate = await this.evaluateFirstStageSearchQuality(taskId);
       if (qualityGate.shouldStop) {
-        const qualityFallback = await this.rewritePendingQueriesForQualityGate(taskId, qualityGate);
+        const qualityGatePreservation = await this.preservePendingQueriesAfterQualityGate(
+          taskId,
+          qualityGate
+        );
         searchResult = {
           ...searchResult,
-          hasMore: qualityFallback.remainingQueries > 0,
-          remainingQueries: qualityFallback.remainingQueries
+          hasMore: qualityGatePreservation.remainingQueries > 0,
+          remainingQueries: qualityGatePreservation.remainingQueries
         };
         qualityGateOutput = {
           ...qualityGate,
-          action: qualityFallback.rewrittenCount
-            ? "rewrote_pending_queries_with_local_buyer_fallback"
-            : "no_pending_queries_to_rewrite",
-          qualityFallback
+          action: qualityGatePreservation.action,
+          qualityGatePreservation
         };
         await this.markStepCompleted(taskId, "brave_search", {
           ...searchResult,
@@ -580,9 +650,17 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           hasCustomerProfile: Boolean(context.customerProfile)
         }),
       analyze_product_profile: () =>
-        this.completeWorkflowStep(taskId, "analyze_product_profile", context.productProfileAnalysis),
+        this.completeWorkflowStep(
+          taskId,
+          "analyze_product_profile",
+          context.productProfileAnalysis
+        ),
       analyze_customer_profile: () =>
-        this.completeWorkflowStep(taskId, "analyze_customer_profile", context.customerProfileAnalysis),
+        this.completeWorkflowStep(
+          taskId,
+          "analyze_customer_profile",
+          context.customerProfileAnalysis
+        ),
       expand_keywords: () =>
         this.completeWorkflowStep(taskId, "expand_keywords", {
           keywordGroups: context.keywordGroups,
@@ -668,14 +746,18 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
             draftCount,
             approvedLeadIds
           };
-      }),
+        }),
       wait_email_confirmation: async () => {
-        const resume = await this.interruptWorkflowAt<EmailReviewResume>(taskId, "wait_email_confirmation", {
-          type: "email_confirmation",
+        const resume = await this.interruptWorkflowAt<EmailReviewResume>(
           taskId,
-          draftCount,
-          message: "Confirm the outreach email before sending or saving it."
-        });
+          "wait_email_confirmation",
+          {
+            type: "email_confirmation",
+            taskId,
+            draftCount,
+            message: "Confirm the outreach email before sending or saving it."
+          }
+        );
         const output = {
           approved: resume.approved ?? resume.action !== "cancel",
           action: resume.action ?? "save_draft"
@@ -922,12 +1004,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           };
         }),
       wait_email_confirmation: async () => {
-        const resume = await this.interruptWorkflowAt<EmailReviewResume>(taskId, "wait_email_confirmation", {
-          type: "email_confirmation",
+        const resume = await this.interruptWorkflowAt<EmailReviewResume>(
           taskId,
-          draftCount,
-          message: "Confirm the outreach email before sending or saving it."
-        });
+          "wait_email_confirmation",
+          {
+            type: "email_confirmation",
+            taskId,
+            draftCount,
+            message: "Confirm the outreach email before sending or saving it."
+          }
+        );
         const output = {
           approved: resume.approved ?? resume.action !== "cancel",
           action: resume.action ?? "save_draft"
@@ -961,19 +1047,25 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     await this.persistWorkflowSnapshot(taskId, workflow, "search-to-email");
     const searchResult = graphRun.getSearchResult();
 
-    return searchResult ?? {
-      ok: false,
-      executedQueries: 0,
-      resultCount: 0,
-      createdCandidates: 0,
-      skippedCandidates: 0,
-      errors: [{ queryId: taskId, message: workflow.error ?? "Search workflow did not run" }],
-      hasMore: false,
-      remainingQueries: 0
-    };
+    return (
+      searchResult ?? {
+        ok: false,
+        executedQueries: 0,
+        resultCount: 0,
+        createdCandidates: 0,
+        skippedCandidates: 0,
+        errors: [{ queryId: taskId, message: workflow.error ?? "Search workflow did not run" }],
+        hasMore: false,
+        remainingQueries: 0
+      }
+    );
   }
 
-  private async executeBraveSearchBatchForTask(userId: string, taskId: string, input: { limit?: number } = {}) {
+  private async executeBraveSearchBatchForTask(
+    userId: string,
+    taskId: string,
+    input: { limit?: number } = {}
+  ) {
     if (!this.braveSearchService || !this.leadQualificationService) {
       throw new BadRequestException("Search services are not configured");
     }
@@ -1044,7 +1136,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
             qualifiedCount: 0
           }
         });
-        const search = await this.runSearchWithDevelopmentFallback(query.id, searchParams, query.country);
+        const search = await this.runSearchWithDevelopmentFallback(
+          query.id,
+          searchParams,
+          query.country
+        );
         await this.prisma.searchQuery.update({
           where: { id: query.id },
           data: {
@@ -1099,7 +1195,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     const hasMore = remainingQueries > 0;
 
     if (failedQueries === task.searchQueries.length) {
-      await this.markStepFailed(taskId, "brave_search", searchErrors[0]?.message ?? "All Brave searches failed");
+      await this.markStepFailed(
+        taskId,
+        "brave_search",
+        searchErrors[0]?.message ?? "All Brave searches failed"
+      );
 
       return {
         ok: false,
@@ -1227,8 +1327,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     const criteria = buildIcpCriteria(parseTaskPayload(task?.inputPayload ?? null));
     const targetRegions = criteria.targetRegions;
     const totalCandidates = candidates.length;
-    const mainCandidates = candidates.filter((candidate) => isMainCandidateStatus(candidate.status)).length;
-    const rejectedCandidates = candidates.filter((candidate) => candidate.status === "rejected").length;
+    const mainCandidates = candidates.filter((candidate) =>
+      isMainCandidateStatus(candidate.status)
+    ).length;
+    const rejectedCandidates = candidates.filter(
+      (candidate) => candidate.status === "rejected"
+    ).length;
     const countryIssueCandidates = candidates.filter(
       (candidate) =>
         candidate.status === "needs_country_review" ||
@@ -1237,16 +1341,22 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         !candidate.country ||
         candidate.countryConfidence === "low" ||
         candidate.countryConfidence === "unknown" ||
-        (targetRegions.length > 0 && candidate.country && !countryMatchesAnyTarget(candidate.country, targetRegions))
+        (targetRegions.length > 0 &&
+          candidate.country &&
+          !countryMatchesAnyTarget(candidate.country, targetRegions))
     ).length;
     const rejectedRatio = ratio(rejectedCandidates, totalCandidates);
     const countryIssueRatio = ratio(countryIssueCandidates, totalCandidates);
     const shouldStop =
       executedQueryCount >= FIRST_STAGE_SEARCH_QUERY_LIMIT &&
       totalCandidates >= 10 &&
-      ((mainCandidates < 1 && rejectedRatio >= 0.85) || countryIssueRatio >= 0.4 || rejectedRatio >= 0.9);
+      ((mainCandidates < 1 && rejectedRatio >= 0.85) ||
+        countryIssueRatio >= 0.4 ||
+        rejectedRatio >= 0.9);
     const reasons = [
-      ...(mainCandidates < 1 && rejectedRatio >= 0.85 ? ["review_plus_under_1_and_rejected_ratio_high"] : []),
+      ...(mainCandidates < 1 && rejectedRatio >= 0.85
+        ? ["review_plus_under_1_and_rejected_ratio_high"]
+        : []),
       ...(countryIssueRatio >= 0.4 ? ["country_issue_ratio_high"] : []),
       ...(rejectedRatio >= 0.9 ? ["rejected_ratio_high"] : [])
     ];
@@ -1265,7 +1375,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private async rewritePendingQueriesForQualityGate(
+  private async preservePendingQueriesAfterQualityGate(
     taskId: string,
     qualityGate: { reasons: string[]; executedQueryCount: number }
   ) {
@@ -1294,133 +1404,100 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException("Lead task not found");
     }
 
-    const pendingQueries = task.searchQueries.filter((query) => query.executionStatus === "pending");
-    if (!pendingQueries.length) {
-      return {
-        rewrittenCount: 0,
-        removedPendingCount: 0,
-        remainingQueries: 0,
-        reasons: qualityGate.reasons
-      };
-    }
-
+    const pendingQueries = task.searchQueries.filter(
+      (query) => query.executionStatus === "pending"
+    );
     const payload = parseTaskPayload(task.inputPayload);
     const criteria = buildIcpCriteria(payload);
-    const countryPool =
-      normalizeTargetMarkets(criteria.targetRegions) ??
-      normalizeTargetMarkets(asStringArray(payload.keywordGroups?.marketTerms)) ??
-      ["UAE"];
+    const countryPool = normalizeTargetMarkets(criteria.targetRegions) ??
+      normalizeTargetMarkets(asStringArray(payload.keywordGroups?.marketTerms)) ?? ["UAE"];
     const keywordGroups = keywordGroupsFromPayload(payload, countryPool);
     const channelCustomersRequested = isChannelCustomerRequest(payload.prompt ?? "");
-    const existingQueryTexts = new Set(task.searchQueries.map((query) => query.query.toLowerCase()));
-    const replacementQueries = buildQualityFallbackSearchQueries(
-      keywordGroups,
-      countryPool,
-      channelCustomersRequested,
-      pendingQueries.length,
-      existingQueryTexts
+    const existingQueryTexts = new Set(
+      task.searchQueries.map((query) => query.query.toLowerCase())
     );
-
-    await this.prisma.searchQuery.deleteMany({
-      where: {
-        taskId,
-        executionStatus: "pending"
-      }
-    });
-
-    if (replacementQueries.length) {
-      await this.prisma.searchQuery.createMany({
-        data: replacementQueries.map((query) => ({
-          taskId,
-          provider: query.provider,
-          operatorSource: query.operatorSource,
-          executionStatus: "pending",
-          operatorName: query.operatorName,
-          strategyTemplate: query.strategyTemplate,
-          query: query.query,
-          keywordGroups: query.keywordGroups,
-          country: query.country,
-          effectivenessScore: query.effectivenessScore
-        }))
-      });
-    }
+    const suggestedFallbackQueries = pendingQueries.length
+      ? buildQualityFallbackSearchQueries(
+          keywordGroups,
+          countryPool,
+          channelCustomersRequested,
+          pendingQueries.length,
+          existingQueryTexts
+        )
+      : [];
 
     const remainingQueries = await this.countPendingSearchQueries(taskId);
-    await this.updateTaskPayloadAfterQualityFallback(taskId, task.inputPayload, {
-      replacementQueries,
-      preservedQueries: task.searchQueries.filter((query) => query.executionStatus !== "pending"),
-      removedPendingQueries: pendingQueries.map((query) => ({ query: query.query, country: query.country })),
+    await this.updateTaskPayloadAfterQualityGatePreservation(taskId, task.inputPayload, {
+      pendingQueries: pendingQueries.map((query) => ({
+        query: query.query,
+        country: query.country,
+        strategyTemplate: query.strategyTemplate,
+        operatorName: query.operatorName
+      })),
+      suggestedFallbackQueries,
       qualityGate,
       remainingQueries
     });
 
     return {
-      rewrittenCount: replacementQueries.length,
-      removedPendingCount: pendingQueries.length,
+      action: "preserved_pending_queries_after_quality_gate",
+      rewrittenCount: 0,
+      removedPendingCount: 0,
+      preservedPendingCount: pendingQueries.length,
       remainingQueries,
       reasons: qualityGate.reasons,
-      countries: uniqueStrings(replacementQueries.map((query) => query.country ?? "").filter(Boolean)),
-      sampleQueries: replacementQueries.slice(0, 5).map((query) => query.query)
+      suggestedFallbackQueryCount: suggestedFallbackQueries.length,
+      countries: uniqueStrings(pendingQueries.map((query) => query.country ?? "").filter(Boolean)),
+      sampleQueries: pendingQueries.slice(0, 5).map((query) => query.query),
+      suggestedFallbackQueries: suggestedFallbackQueries.slice(0, 5).map((query) => ({
+        query: query.query,
+        country: query.country,
+        batchType: "quality_fallback_suggestion"
+      }))
     };
   }
 
-  private async updateTaskPayloadAfterQualityFallback(
+  private async updateTaskPayloadAfterQualityGatePreservation(
     taskId: string,
     inputPayload: Prisma.JsonValue | null,
     fallback: {
-      replacementQueries: PlannedSearchQuery[];
-      preservedQueries: Array<{
+      pendingQueries: Array<{
         query: string;
-        provider: string;
-        operatorSource: string | null;
-        executionStatus: string;
-        operatorName: string | null;
-        strategyTemplate: string | null;
-        keywordGroups: Prisma.JsonValue | null;
         country: string | null;
-        effectivenessScore: number | null;
+        strategyTemplate: string | null;
+        operatorName: string | null;
       }>;
-      removedPendingQueries: Array<{ query: string; country: string | null }>;
+      suggestedFallbackQueries: PlannedSearchQuery[];
       qualityGate: { reasons: string[]; executedQueryCount: number };
       remainingQueries: number;
     }
   ) {
     const payloadObject = toPlainObject(inputPayload);
     const profileSignals = toPlainObject(payloadObject.profileSignals);
-    const nextSearchQueries = [
-      ...fallback.preservedQueries.map((query) => ({
-        provider: query.provider,
-        operatorSource: query.operatorSource,
-        executionStatus: query.executionStatus,
-        operatorName: query.operatorName,
-        strategyTemplate: query.strategyTemplate,
-        query: query.query,
-        keywordGroups: query.keywordGroups,
-        country: query.country,
-        effectivenessScore: query.effectivenessScore
-      })),
-      ...fallback.replacementQueries.map(serializePlannedSearchQuery)
-    ];
 
     await this.prisma.leadTask.update({
       where: { id: taskId },
       data: {
         inputPayload: toJsonValue({
           ...payloadObject,
-          searchQueries: nextSearchQueries,
           profileSignals: {
             ...profileSignals,
-            qualityFallback: {
-              action: "rewrote_pending_queries_with_local_buyer_fallback",
+            qualityGate: {
+              action: "preserved_pending_queries_after_quality_gate",
               reasons: fallback.qualityGate.reasons,
               executedQueryCount: fallback.qualityGate.executedQueryCount,
-              removedPendingQueryCount: fallback.removedPendingQueries.length,
-              replacementQueryCount: fallback.replacementQueries.length,
+              pendingQueryCount: fallback.pendingQueries.length,
               remainingQueries: fallback.remainingQueries,
-              removedPendingQueries: fallback.removedPendingQueries.slice(0, 10),
-              sampleReplacementQueries: fallback.replacementQueries.slice(0, 10).map((query) => ({
+              samplePendingQueries: fallback.pendingQueries.slice(0, 10)
+            },
+            qualityFallbackSuggestion: {
+              action: "quality_fallback_suggestion",
+              status: "suggestion_only",
+              queryCount: fallback.suggestedFallbackQueries.length,
+              sampleQueries: fallback.suggestedFallbackQueries.slice(0, 10).map((query) => ({
                 query: query.query,
-                country: query.country
+                country: query.country,
+                batchType: "quality_fallback_suggestion"
               }))
             }
           }
@@ -1505,10 +1582,18 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     const qualified = task.leadCandidates.filter((lead) => (lead.icpScore?.score ?? 0) >= 75);
     const approved = task.leadCandidates.filter((lead) => lead.status === "approved");
     const drafts = task.leadCandidates.flatMap((lead) => lead.outreachDrafts);
-    const sent = drafts.flatMap((draft) => draft.sendLogs).filter((log) => log.status === "sent" || log.sentAt);
+    const sent = drafts
+      .flatMap((draft) => draft.sendLogs)
+      .filter((log) => log.status === "sent" || log.sentAt);
     const crmSynced = task.leadCandidates.filter((lead) => lead.crmLead).length;
-    const followups = task.leadCandidates.flatMap((lead) => lead.followupTasks).filter((followup) => followup.status === "pending");
-    const topMarkets = topValues(task.leadCandidates.map((lead) => lead.country).filter((value): value is string => Boolean(value)));
+    const followups = task.leadCandidates
+      .flatMap((lead) => lead.followupTasks)
+      .filter((followup) => followup.status === "pending");
+    const topMarkets = topValues(
+      task.leadCandidates
+        .map((lead) => lead.country)
+        .filter((value): value is string => Boolean(value))
+    );
     const topCompanies = qualified.slice(0, 5).map((lead) => lead.companyName);
     const summary = {
       did: [
@@ -1531,7 +1616,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       },
       next: [
         drafts.length > sent.length ? "继续检查并确认待发送开发信" : "等待客户回复并进入回复分类",
-        followups.length ? `按计划处理 ${followups.length} 个待跟进提醒` : "发送后为无回复客户创建 3 天后跟进提醒",
+        followups.length
+          ? `按计划处理 ${followups.length} 个待跟进提醒`
+          : "发送后为无回复客户创建 3 天后跟进提醒",
         "将高意向回复同步到 CRM 阶段和数据看板"
       ]
     };
@@ -1548,7 +1635,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async approveCandidatesForUser(userId: string, taskId: string, input: { leadIds?: string[] } = {}) {
+  async approveCandidatesForUser(
+    userId: string,
+    taskId: string,
+    input: { leadIds?: string[] } = {}
+  ) {
     const graphRun = this.createSearchToEmailGraphHandlers(userId, taskId);
 
     try {
@@ -1565,7 +1656,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       await this.persistWorkflowSnapshot(taskId, workflow, "search-to-email");
       const approvalResult = graphRun.getApprovalResult();
       if (!approvalResult) {
-        throw new Error(workflow.error ?? "Lead approval graph did not resume from a pending review");
+        throw new Error(
+          workflow.error ?? "Lead approval graph did not resume from a pending review"
+        );
       }
 
       return {
@@ -1579,7 +1672,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async approveCandidatesWithLegacyGraph(userId: string, taskId: string, input: { leadIds?: string[] } = {}) {
+  private async approveCandidatesWithLegacyGraph(
+    userId: string,
+    taskId: string,
+    input: { leadIds?: string[] } = {}
+  ) {
     const approval = await this.applyCandidateApproval(userId, taskId, input);
     await this.markStepCompleted(taskId, "human_approval", {
       approved: true,
@@ -1633,14 +1730,22 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     );
     const selected = requestedIds.length
       ? task.leadCandidates.filter((candidate) => requestedIds.includes(candidate.id))
-      : eligibleCandidates.filter((candidate) => (candidate.icpScore?.score ?? 0) >= 80).slice(0, 10);
+      : eligibleCandidates
+          .filter((candidate) => (candidate.icpScore?.score ?? 0) >= 80)
+          .slice(0, 10);
 
     if (requestedIds.length && selected.length !== requestedIds.length) {
       throw new BadRequestException("Some candidates do not belong to this task");
     }
 
-    if (selected.some((candidate) => !eligibleCandidates.some((eligible) => eligible.id === candidate.id))) {
-      throw new BadRequestException("Only country-verified review or qualified candidates can be approved");
+    if (
+      selected.some(
+        (candidate) => !eligibleCandidates.some((eligible) => eligible.id === candidate.id)
+      )
+    ) {
+      throw new BadRequestException(
+        "Only country-verified review or qualified candidates can be approved"
+      );
     }
 
     if (!selected.length) {
@@ -1684,7 +1789,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  markStepCompleted(taskId: string, nodeName: LeadHuntWorkflowNode, output: Record<string, unknown> = {}) {
+  markStepCompleted(
+    taskId: string,
+    nodeName: LeadHuntWorkflowNode,
+    output: Record<string, unknown> = {}
+  ) {
     return this.updateStep(taskId, nodeName, "completed", {
       output,
       endedAt: new Date(),
@@ -1692,7 +1801,10 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  pauseAtHumanApproval(taskId: string, nodeName: Extract<LeadHuntWorkflowNode, "human_approval" | "wait_email_confirmation">) {
+  pauseAtHumanApproval(
+    taskId: string,
+    nodeName: Extract<LeadHuntWorkflowNode, "human_approval" | "wait_email_confirmation">
+  ) {
     return this.updateStep(taskId, nodeName, "waiting", {
       output: { waitingForHuman: true },
       endedAt: null,
@@ -1719,7 +1831,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   private async completeWorkflowStep(
     taskId: string,
     nodeName: LeadHuntWorkflowNode,
-    output: Record<string, unknown> | (() => Record<string, unknown> | Promise<Record<string, unknown>>)
+    output:
+      | Record<string, unknown>
+      | (() => Record<string, unknown> | Promise<Record<string, unknown>>)
   ): Promise<Partial<LeadHuntWorkflowState>> {
     await this.markStepRunning(taskId, nodeName);
 
@@ -1795,7 +1909,10 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private workflowFailedState(nodeName: LeadHuntWorkflowNode, error: string): Partial<LeadHuntWorkflowState> {
+  private workflowFailedState(
+    nodeName: LeadHuntWorkflowNode,
+    error: string
+  ): Partial<LeadHuntWorkflowState> {
     return {
       status: "failed",
       currentNode: nodeName,
@@ -1825,7 +1942,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async updateTaskStatusFromWorkflow(taskId: string, workflow: LeadHuntWorkflowState) {
-    if (workflow.status !== "paused" && workflow.status !== "failed" && workflow.status !== "completed") {
+    if (
+      workflow.status !== "paused" &&
+      workflow.status !== "failed" &&
+      workflow.status !== "completed"
+    ) {
       return;
     }
 
@@ -1859,7 +1980,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private async persistWorkflowSnapshot(taskId: string, workflow: LeadHuntWorkflowState, phase: string) {
+  private async persistWorkflowSnapshot(
+    taskId: string,
+    workflow: LeadHuntWorkflowState,
+    phase: string
+  ) {
     const task = await this.prisma.leadTask.findFirst({
       where: { id: taskId },
       select: { inputPayload: true }
@@ -1938,7 +2063,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           take: 20
         })
       : [];
-    const productProfileUrls = compactStrings([product?.websiteUrl, product?.productPageUrl, ...(product?.documentUrls ?? [])]);
+    const productProfileUrls = compactStrings([
+      product?.websiteUrl,
+      product?.productPageUrl,
+      ...(product?.documentUrls ?? [])
+    ]);
     const referenceCustomerUrls = customer?.referenceCustomerUrls ?? [];
     const siteEvidence =
       (await this.websiteContentService?.readProfileSites({
@@ -1946,8 +2075,14 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         referenceCustomerUrls
       })) ?? emptyProfileSiteEvidence();
     const siteKeywordHints = collectSiteKeywordHints(siteEvidence);
-    const ruleProductProfileAnalysis = buildProductProfileAnalysis(product, siteEvidence.productSites);
-    const ruleCustomerProfileAnalysis = buildCustomerProfileAnalysis(customer, siteEvidence.referenceCustomerSites);
+    const ruleProductProfileAnalysis = buildProductProfileAnalysis(
+      product,
+      siteEvidence.productSites
+    );
+    const ruleCustomerProfileAnalysis = buildCustomerProfileAnalysis(
+      customer,
+      siteEvidence.referenceCustomerSites
+    );
     const marketSelection = resolveTargetMarketSelection(input.prompt, customer?.targetRegions);
     const targetMarkets = marketSelection.targetMarkets;
     const profileKeywordInput = {
@@ -1964,7 +2099,10 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           ...sample.contacts.map((contact) => contact.value)
         ]).join(" ")
       ),
-      customerProfileNotes: buildEvidenceNotes(customer?.notes, siteEvidence.referenceCustomerSites),
+      customerProfileNotes: buildEvidenceNotes(
+        customer?.notes,
+        siteEvidence.referenceCustomerSites
+      ),
       targetMarkets,
       productTerms: siteKeywordHints.productTerms,
       customerIntentTerms: siteKeywordHints.customerIntentTerms,
@@ -2004,7 +2142,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       profileSignals: {
         productUrlsUsed: profileKeywordInput.productProfileUrls,
         referenceCustomerUrlsUsed: profileKeywordInput.referenceCustomerUrls ?? [],
-        productUrlsRead: siteEvidence.productSites.filter((site) => site.status === "read").map((site) => site.finalUrl),
+        productUrlsRead: siteEvidence.productSites
+          .filter((site) => site.status === "read")
+          .map((site) => site.finalUrl),
         referenceCustomerUrlsRead: siteEvidence.referenceCustomerSites
           .filter((site) => site.status === "read")
           .map((site) => site.finalUrl),
@@ -2022,8 +2162,18 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   private async buildAiPlanningContext(input: {
     taskId?: string;
     input: CreateTaskInput;
-    product: { websiteUrl?: string | null; productPageUrl?: string | null; documentUrls?: string[]; notes?: string | null } | null;
-    customer: { targetRegions?: string[]; referenceCustomerUrls?: string[]; crmSampleIds?: string[]; notes?: string | null } | null;
+    product: {
+      websiteUrl?: string | null;
+      productPageUrl?: string | null;
+      documentUrls?: string[];
+      notes?: string | null;
+    } | null;
+    customer: {
+      targetRegions?: string[];
+      referenceCustomerUrls?: string[];
+      crmSampleIds?: string[];
+      notes?: string | null;
+    } | null;
     siteEvidence: ProfileSiteEvidence;
     profileKeywordInput: {
       taskText: string;
@@ -2047,8 +2197,13 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     let productProfileAnalysis = input.ruleProductProfileAnalysis;
     let customerProfileAnalysis = input.ruleCustomerProfileAnalysis;
     const channelCustomersRequested = isChannelCustomerRequest(input.input.prompt);
-    let keywordGroups = prioritizeKeywordGroupCustomerIntentTerms(input.ruleKeywordGroups, channelCustomersRequested);
-    let searchQueries = limitPlannedSearchQueries(mapGeneratedSearchQueries(input.ruleSearchQueries));
+    let keywordGroups = prioritizeKeywordGroupCustomerIntentTerms(
+      input.ruleKeywordGroups,
+      channelCustomersRequested
+    );
+    let searchQueries = limitPlannedSearchQueries(
+      mapGeneratedSearchQueries(input.ruleSearchQueries)
+    );
     let aiKeywordExpansion: KeywordExpansionResult | null = null;
     let aiQueryCount = 0;
     let rejectedAiQueries: Array<{ query: string; country: string; reason: string }> = [];
@@ -2067,8 +2222,14 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    const productEvidenceNotes = buildEvidenceNotes(input.product?.notes, input.siteEvidence.productSites);
-    const customerEvidenceNotes = buildEvidenceNotes(input.customer?.notes, input.siteEvidence.referenceCustomerSites);
+    const productEvidenceNotes = buildEvidenceNotes(
+      input.product?.notes,
+      input.siteEvidence.productSites
+    );
+    const customerEvidenceNotes = buildEvidenceNotes(
+      input.customer?.notes,
+      input.siteEvidence.referenceCustomerSites
+    );
 
     try {
       await this.markOptionalPlanningStepRunning(input.taskId, "analyze_product_profile");
@@ -2080,7 +2241,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           notes: productEvidenceNotes
         });
       } else {
-        fallbackReasons.push("No product website URL was saved; product analysis used deterministic evidence.");
+        fallbackReasons.push(
+          "No product website URL was saved; product analysis used deterministic evidence."
+        );
       }
     } catch (error) {
       fallbackReasons.push(`GPT product analysis failed: ${searchErrorMessage(error)}`);
@@ -2094,15 +2257,23 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.markOptionalPlanningStepRunning(input.taskId, "analyze_customer_profile");
-      if (input.customer?.targetRegions?.length || input.customer?.referenceCustomerUrls?.length || input.customer?.notes) {
+      if (
+        input.customer?.targetRegions?.length ||
+        input.customer?.referenceCustomerUrls?.length ||
+        input.customer?.notes
+      ) {
         customerProfileAnalysis = await this.leadHuntAiService.analyzeCustomerProfile({
-          targetRegions: input.targetMarkets?.length ? input.targetMarkets : input.customer?.targetRegions ?? ["Global"],
+          targetRegions: input.targetMarkets?.length
+            ? input.targetMarkets
+            : (input.customer?.targetRegions ?? ["Global"]),
           referenceCustomerUrls: input.customer?.referenceCustomerUrls ?? [],
           crmSampleIds: input.customer?.crmSampleIds ?? [],
           notes: customerEvidenceNotes
         });
       } else {
-        fallbackReasons.push("No customer profile was saved; customer analysis used deterministic defaults.");
+        fallbackReasons.push(
+          "No customer profile was saved; customer analysis used deterministic defaults."
+        );
       }
     } catch (error) {
       fallbackReasons.push(`GPT customer analysis failed: ${searchErrorMessage(error)}`);
@@ -2125,7 +2296,10 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         keywordGroupsFromAiExpansion(aiKeywordExpansion, input.targetMarkets),
         input.ruleKeywordGroups
       );
-      keywordGroups = prioritizeKeywordGroupCustomerIntentTerms(keywordGroups, channelCustomersRequested);
+      keywordGroups = prioritizeKeywordGroupCustomerIntentTerms(
+        keywordGroups,
+        channelCustomersRequested
+      );
       keywordGroups = constrainKeywordGroupMarkets(keywordGroups, input.targetMarkets);
     } catch (error) {
       fallbackReasons.push(`GPT keyword expansion failed: ${searchErrorMessage(error)}`);
@@ -2137,7 +2311,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.markOptionalPlanningStepRunning(input.taskId, "plan_search_queries");
-      const searchTargetMarkets = input.targetMarkets?.length ? input.targetMarkets : keywordGroups.marketTerms;
+      const searchTargetMarkets = input.targetMarkets?.length
+        ? input.targetMarkets
+        : keywordGroups.marketTerms;
       const searchPlan = await this.leadHuntAiService.generateSearchStrategy({
         keywordGroups: aiKeywordExpansion ?? keywordExpansionFromKeywordGroups(keywordGroups),
         targetMarkets: searchTargetMarkets,
@@ -2154,7 +2330,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       );
       const aiQueries = limitPlannedSearchQueries(normalization.queries);
       rejectedAiQueries = normalization.rejected;
-      aiQueryCount = aiQueries.filter((query) => query.templateId === "gpt55_search_strategy").length;
+      aiQueryCount = aiQueries.filter(
+        (query) => query.templateId === "gpt55_search_strategy"
+      ).length;
       searchQueries = aiQueries;
     } catch (error) {
       fallbackReasons.push(`GPT search strategy failed: ${searchErrorMessage(error)}`);
@@ -2178,7 +2356,10 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private async markOptionalPlanningStepRunning(taskId: string | undefined, nodeName: LeadHuntWorkflowNode) {
+  private async markOptionalPlanningStepRunning(
+    taskId: string | undefined,
+    nodeName: LeadHuntWorkflowNode
+  ) {
     if (!taskId) {
       return;
     }
@@ -2220,9 +2401,15 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
             snippet: candidate.summary,
             sourceUrl: candidate.sourceUrl,
             contacts: {
-              emails: candidate.contacts.filter((contact) => contact.type === "email").map((contact) => contact.value),
-              phones: candidate.contacts.filter((contact) => contact.type === "phone").map((contact) => contact.value),
-              socialProfiles: candidate.contacts.filter((contact) => contact.type === "social").map((contact) => contact.value)
+              emails: candidate.contacts
+                .filter((contact) => contact.type === "email")
+                .map((contact) => contact.value),
+              phones: candidate.contacts
+                .filter((contact) => contact.type === "phone")
+                .map((contact) => contact.value),
+              socialProfiles: candidate.contacts
+                .filter((contact) => contact.type === "social")
+                .map((contact) => contact.value)
             }
           },
           productProfile: payload.productProfileAnalysis ?? payload.productProfile ?? {},
@@ -2256,7 +2443,10 @@ function limitPlannedSearchQueries(queries: PlannedSearchQuery[]) {
   return queries.slice(0, DEFAULT_SEARCH_QUERY_COUNT);
 }
 
-function keywordGroupsFromAiExpansion(input: KeywordExpansionResult, targetMarkets: string[] | undefined): KeywordGroups {
+function keywordGroupsFromAiExpansion(
+  input: KeywordExpansionResult,
+  targetMarkets: string[] | undefined
+): KeywordGroups {
   const brandTerms = extractKnownBrandTerms([
     ...input.primaryProducts,
     ...input.relatedProducts,
@@ -2267,7 +2457,10 @@ function keywordGroupsFromAiExpansion(input: KeywordExpansionResult, targetMarke
     brandTerms,
     productTerms: uniqueStrings([...input.primaryProducts, ...input.relatedProducts]),
     longTailProductTerms: uniqueStrings(input.longTailProducts),
-    customerIntentTerms: uniqueStrings([...input.purchaseIntentTerms, ...input.upstreamDownstreamTerms]),
+    customerIntentTerms: uniqueStrings([
+      ...input.purchaseIntentTerms,
+      ...input.upstreamDownstreamTerms
+    ]),
     marketTerms: uniqueStrings([...(targetMarkets ?? []), ...input.targetMarketTerms]),
     scenarioTerms: uniqueStrings(input.industryScenarioTerms),
     excludeTerms: uniqueStrings(input.exclusionTerms)
@@ -2293,9 +2486,17 @@ function mergeKeywordGroups(primary: KeywordGroups, fallback: KeywordGroups): Ke
   return {
     brandTerms: uniqueStrings([...primary.brandTerms, ...fallback.brandTerms]),
     productTerms: uniqueStrings([...primary.productTerms, ...fallback.productTerms]),
-    longTailProductTerms: uniqueStrings([...primary.longTailProductTerms, ...fallback.longTailProductTerms]),
-    customerIntentTerms: uniqueStrings([...primary.customerIntentTerms, ...fallback.customerIntentTerms]),
-    marketTerms: primary.marketTerms.length ? uniqueStrings(primary.marketTerms) : fallback.marketTerms,
+    longTailProductTerms: uniqueStrings([
+      ...primary.longTailProductTerms,
+      ...fallback.longTailProductTerms
+    ]),
+    customerIntentTerms: uniqueStrings([
+      ...primary.customerIntentTerms,
+      ...fallback.customerIntentTerms
+    ]),
+    marketTerms: primary.marketTerms.length
+      ? uniqueStrings(primary.marketTerms)
+      : fallback.marketTerms,
     scenarioTerms: uniqueStrings([...primary.scenarioTerms, ...fallback.scenarioTerms]),
     excludeTerms: uniqueStrings([...primary.excludeTerms, ...fallback.excludeTerms])
   };
@@ -2307,7 +2508,10 @@ function prioritizeKeywordGroupCustomerIntentTerms(
 ): KeywordGroups {
   return {
     ...keywordGroups,
-    customerIntentTerms: prioritizeCustomerIntentTerms(keywordGroups.customerIntentTerms, channelCustomersRequested)
+    customerIntentTerms: prioritizeCustomerIntentTerms(
+      keywordGroups.customerIntentTerms,
+      channelCustomersRequested
+    )
   };
 }
 
@@ -2327,33 +2531,38 @@ function prioritizeCustomerIntentTerms(terms: string[], channelCustomersRequeste
   return primary;
 }
 
+const channelCustomerPattern =
+  /\b(channels?|channel partners?|suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b|\u7ecf\u9500|\u5206\u9500|\u6e20\u9053|\u5e93\u5b58\u5546|\u4ee3\u7406\u5546|\u8fdb\u53e3\u5546|\u6279\u53d1/i;
+
 function isChannelCustomerRequest(prompt: string) {
-  return /\b(channels?|channel partners?|suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b|经销|分销|渠道|库存商|代理商|进口商|批发/i.test(
-    prompt
-  );
+  return channelCustomerPattern.test(prompt);
 }
 
 function isChannelCustomerTerm(term: string) {
-  return /\b(distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?|suppliers?)\b|经销|分销|渠道|库存商|代理商|进口商|批发/i.test(
-    term
-  );
+  return channelCustomerPattern.test(term);
 }
 
 function isChannelOnlyQuery(query: string) {
   const lower = query.toLowerCase();
-  const hasChannel = /\b(suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b/i.test(lower);
+  const hasChannel =
+    /\b(suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b/i.test(
+      lower
+    );
   if (!hasChannel) {
     return false;
   }
 
-  return !/\b(maintenance|repair|replacement|operation|operations|operator|carrier|isp|wisp|ftth|contractor|integrator|procurement|purchasing|rfq|tender|bid|vendor registration|supplier registration|deployment|rollout|project|field services|managed services|o&m)\b/i.test(
+  return !/\b(maintenance|repair|replacement|operation|operations|operator|carrier|isp|wisp|ftth|contractor|integrator|procurement|purchasing|rfq|tender|bid|vendor registration|supplier registration|field services|managed services|o&m)\b/i.test(
     lower
   );
 }
 
 const channelTemplateIds = new Set(["direct_distributor_country", "distributor_exact_scenario"]);
 
-function constrainKeywordGroupMarkets(keywordGroups: KeywordGroups, targetMarkets: string[] | undefined): KeywordGroups {
+function constrainKeywordGroupMarkets(
+  keywordGroups: KeywordGroups,
+  targetMarkets: string[] | undefined
+): KeywordGroups {
   const markets = normalizeTargetMarkets(targetMarkets);
   if (!markets?.length) {
     return keywordGroups;
@@ -2371,7 +2580,10 @@ function compactOperatorLibrary(channelCustomersRequested = false) {
     version: library.version,
     operators: library.operators.map(compactStrategyTemplate),
     templates: library.templates
-      .filter((template) => template.executionStatus === "supported" || template.executionStatus === "experimental")
+      .filter(
+        (template) =>
+          template.executionStatus === "supported" || template.executionStatus === "experimental"
+      )
       .filter((template) => channelCustomersRequested || !channelTemplateIds.has(template.id))
       .map(compactStrategyTemplate)
   };
@@ -2402,8 +2614,12 @@ function normalizeAiSearchPlan(
   minQueryCount: number,
   targetMarkets: string[] | undefined,
   channelCustomersRequested = false
-): { queries: PlannedSearchQuery[]; rejected: Array<{ query: string; country: string; reason: string }> } {
-  const countryPool = normalizeTargetMarkets(targetMarkets) ?? normalizeTargetMarkets(keywordGroups.marketTerms) ?? ["UAE"];
+): {
+  queries: PlannedSearchQuery[];
+  rejected: Array<{ query: string; country: string; reason: string }>;
+} {
+  const countryPool = normalizeTargetMarkets(targetMarkets) ??
+    normalizeTargetMarkets(keywordGroups.marketTerms) ?? ["UAE"];
   const supportedStatuses = new Set(["supported", "experimental"]);
   const seen = new Set<string>();
   const output: PlannedSearchQuery[] = [];
@@ -2411,25 +2627,51 @@ function normalizeAiSearchPlan(
 
   for (const query of [...plan.queries].sort(compareAiSearchQueries)) {
     if (!supportedStatuses.has(query.executionStatus)) {
-      rejected.push({ query: query.query, country: query.country, reason: `unsupported_execution_status:${query.executionStatus}` });
+      rejected.push({
+        query: query.query,
+        country: query.country,
+        reason: `unsupported_execution_status:${query.executionStatus}`
+      });
       continue;
     }
 
     if (!isStrategyTypeWithinBudget(output, query.strategyType, channelCustomersRequested)) {
-      rejected.push({ query: query.query, country: query.country, reason: `strategy_budget_exceeded:${query.strategyType ?? "unknown"}` });
+      rejected.push({
+        query: query.query,
+        country: query.country,
+        reason: `strategy_budget_exceeded:${query.strategyType ?? "unknown"}`
+      });
       continue;
     }
 
-    const countryResolution = resolveAiQueryCountry(query.country, query.query, countryPool, output.length);
+    const countryResolution = resolveAiQueryCountry(
+      query.country,
+      query.query,
+      countryPool,
+      output.length
+    );
     if (!countryResolution.country) {
-      rejected.push({ query: query.query, country: query.country, reason: countryResolution.reason });
+      rejected.push({
+        query: query.query,
+        country: query.country,
+        reason: countryResolution.reason
+      });
       continue;
     }
 
     const country = countryResolution.country;
-    const queryNormalization = normalizeAiQueryText(query.query, country, keywordGroups, countryPool);
+    const queryNormalization = normalizeAiQueryText(
+      query.query,
+      country,
+      keywordGroups,
+      countryPool
+    );
     if (!queryNormalization.query) {
-      rejected.push({ query: query.query, country: query.country, reason: queryNormalization.reason });
+      rejected.push({
+        query: query.query,
+        country: query.country,
+        reason: queryNormalization.reason
+      });
       continue;
     }
 
@@ -2439,12 +2681,20 @@ function normalizeAiSearchPlan(
     }
 
     if (!hasEnoughQuerySignals(queryText, keywordGroups, country)) {
-      rejected.push({ query: query.query, country: query.country, reason: "missing_product_customer_or_market_signal" });
+      rejected.push({
+        query: query.query,
+        country: query.country,
+        reason: "missing_product_customer_or_market_signal"
+      });
       continue;
     }
 
     if (!channelCustomersRequested && isChannelOnlyQuery(queryText)) {
-      rejected.push({ query: query.query, country: query.country, reason: "channel_query_without_user_request" });
+      rejected.push({
+        query: query.query,
+        country: query.country,
+        reason: "channel_query_without_user_request"
+      });
       continue;
     }
 
@@ -2472,7 +2722,10 @@ function normalizeAiSearchPlan(
     if (output.length >= minQueryCount) {
       break;
     }
-    if (fallback.country && !countryPool.some((country) => marketMatches(country, fallback.country ?? ""))) {
+    if (
+      fallback.country &&
+      !countryPool.some((country) => marketMatches(country, fallback.country ?? ""))
+    ) {
       continue;
     }
     if (!channelCustomersRequested && isChannelOnlyQuery(fallback.query)) {
@@ -2486,7 +2739,11 @@ function normalizeAiSearchPlan(
     output.push(fallback);
   }
 
-  for (const supplemental of buildSupplementalBuyerSearchQueries(keywordGroups, countryPool, channelCustomersRequested)) {
+  for (const supplemental of buildSupplementalBuyerSearchQueries(
+    keywordGroups,
+    countryPool,
+    channelCustomersRequested
+  )) {
     if (output.length >= minQueryCount) {
       break;
     }
@@ -2505,7 +2762,8 @@ function compareAiSearchQueries(
   left: SearchStrategyPlan["queries"][number],
   right: SearchStrategyPlan["queries"][number]
 ) {
-  const strategyRank = aiSearchStrategyRank(left.strategyType) - aiSearchStrategyRank(right.strategyType);
+  const strategyRank =
+    aiSearchStrategyRank(left.strategyType) - aiSearchStrategyRank(right.strategyType);
   if (strategyRank !== 0) {
     return strategyRank;
   }
@@ -2552,7 +2810,9 @@ function isStrategyTypeWithinBudget(
     unknown: 6
   };
   const limit = limits[normalizedType] ?? limits.unknown ?? 6;
-  const used = existingQueries.filter((query) => (query.strategyType ?? "unknown") === normalizedType).length;
+  const used = existingQueries.filter(
+    (query) => (query.strategyType ?? "unknown") === normalizedType
+  ).length;
   return used < limit;
 }
 
@@ -2570,10 +2830,15 @@ function resolveAiQueryCountry(
 
   const combinedText = `${rawCountry} ${queryText}`;
   const mentionedKnown = findMentionedKnownMarkets(combinedText);
-  const mentionedOffTarget = mentionedKnown.filter((market) => !countryPool.some((country) => marketMatches(country, market)));
+  const mentionedOffTarget = mentionedKnown.filter(
+    (market) => !countryPool.some((country) => marketMatches(country, market))
+  );
   const mentioned = findMentionedMarkets(combinedText, countryPool);
   if (mentionedOffTarget.length && !mentioned.length) {
-    return { country: null, reason: `off_target_market:${mentionedOffTarget.slice(0, 3).join(",")}` };
+    return {
+      country: null,
+      reason: `off_target_market:${mentionedOffTarget.slice(0, 3).join(",")}`
+    };
   }
 
   if (mentioned.length === 1) {
@@ -2739,14 +3004,19 @@ function buildQualityFallbackSearchQueries(
   const queries: PlannedSearchQuery[] = [];
   const seen = new Set(existingQueryTexts);
 
-  for (let index = 0; queries.length < limit && index < templates.length * countries.length; index += 1) {
+  for (
+    let index = 0;
+    queries.length < limit && index < templates.length * countries.length;
+    index += 1
+  ) {
     const country = countries[index % countries.length] ?? countries[0] ?? "UAE";
     const template = templates[Math.floor(index / countries.length) % templates.length];
     if (!template) {
       break;
     }
     const query = appendSafeNegativeTerms(template.render(country), keywordGroups.excludeTerms);
-    const normalizedQuery = normalizeAiQueryText(query, country, keywordGroups, countries).query || query;
+    const normalizedQuery =
+      normalizeAiQueryText(query, country, keywordGroups, countries).query || query;
     const key = normalizedQuery.toLowerCase();
     if (seen.has(key) || (!channelCustomersRequested && isChannelOnlyQuery(normalizedQuery))) {
       continue;
@@ -2756,14 +3026,14 @@ function buildQualityFallbackSearchQueries(
       provider: "brave",
       operatorSource: "brave_official",
       executionStatus: "experimental",
-      operatorName: "Quality fallback local buyer search",
-      strategyTemplate: `quality_fallback:${template.strategyType}`,
+      operatorName: "Quality fallback suggestion",
+      strategyTemplate: `quality_fallback_suggestion:${template.strategyType}`,
       strategyType: template.strategyType,
       query: normalizedQuery,
       keywordGroups,
       country,
       effectivenessScore: 0.72,
-      templateId: `quality_fallback_${template.strategyType}`
+      templateId: `quality_fallback_suggestion_${template.strategyType}`
     });
   }
 
@@ -2777,7 +3047,7 @@ function serializePlannedSearchQuery(query: PlannedSearchQuery) {
     executionStatus: query.executionStatus,
     operatorName: query.operatorName,
     strategyTemplate: query.strategyTemplate,
-    strategyType: null,
+    strategyType: query.strategyType ?? null,
     query: query.query,
     keywordGroups: query.keywordGroups,
     country: query.country,
@@ -2786,14 +3056,20 @@ function serializePlannedSearchQuery(query: PlannedSearchQuery) {
   };
 }
 
-function keywordGroupsFromPayload(payload: ReturnType<typeof parseTaskPayload>, marketTerms: string[]): KeywordGroups {
+function keywordGroupsFromPayload(
+  payload: ReturnType<typeof parseTaskPayload>,
+  marketTerms: string[]
+): KeywordGroups {
   const groups = payload.keywordGroups ?? {};
 
   return {
     brandTerms: asStringArray(groups.brandTerms),
     productTerms: asStringArray(groups.productTerms),
     longTailProductTerms: asStringArray(groups.longTailProductTerms),
-    customerIntentTerms: prioritizeCustomerIntentTerms(asStringArray(groups.customerIntentTerms), false),
+    customerIntentTerms: prioritizeCustomerIntentTerms(
+      asStringArray(groups.customerIntentTerms),
+      false
+    ),
     marketTerms,
     scenarioTerms: asStringArray(groups.scenarioTerms),
     excludeTerms: asStringArray(groups.excludeTerms)
@@ -2828,8 +3104,14 @@ function selectSupplementalProductGroups(keywordGroups: KeywordGroups) {
 
 function selectSupplementalModelTerms(keywordGroups: KeywordGroups) {
   return uniqueStrings([...keywordGroups.productTerms, ...keywordGroups.longTailProductTerms])
-    .filter((term) => /\d/.test(term) || /\b(?:rru|bbu|aau|olt|sfp|umpt|ubbp|wbbp|r8882|r8862|r4850|baseband)\b/i.test(term))
-    .filter((term) => !/\b(?:supplier|distributor|stockist|reseller|wholesale|manufacturer)\b/i.test(term))
+    .filter(
+      (term) =>
+        /\d/.test(term) ||
+        /\b(?:rru|bbu|aau|olt|sfp|umpt|ubbp|wbbp|r8882|r8862|r4850|baseband)\b/i.test(term)
+    )
+    .filter(
+      (term) => !/\b(?:supplier|distributor|stockist|reseller|wholesale|manufacturer)\b/i.test(term)
+    )
     .slice(0, 10);
 }
 
@@ -2851,9 +3133,9 @@ function normalizeCountryAlias(value: string) {
     canada: "Canada",
     au: "Australia",
     australia: "Australia",
-    "加拿大": "Canada",
-    "澳大利亚": "Australia",
-    "澳洲": "Australia"
+    加拿大: "Canada",
+    澳大利亚: "Australia",
+    澳洲: "Australia"
   };
 
   return aliases[normalized] ?? value.trim();
@@ -2865,32 +3147,37 @@ function normalizeAiQueryText(
   keywordGroups: KeywordGroups,
   targetMarkets: string[]
 ): { query: string; reason: string } {
-  const cleaned = query
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/\s+/g, " ")
-    .trim();
+  const cleaned = query.replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim();
   if (!cleaned) {
     return { query: "", reason: "empty_query" };
   }
 
-  let sanitized = removeQuotedMarketPhrases(cleaned, targetMarkets);
-  const conflicts = findMentionedKnownMarkets(sanitized).filter((market) => !marketMatches(country, market));
+  let sanitized = stripEvidenceNegativeTerms(removeQuotedMarketPhrases(cleaned, targetMarkets));
+  const conflicts = findMentionedKnownMarkets(sanitized).filter(
+    (market) => !marketMatches(country, market)
+  );
   if (conflicts.length) {
     sanitized = removeConflictingMarketMentions(sanitized, country, conflicts);
   }
 
   const siteConflict = siteCountryConflict(sanitized, country);
   if (siteConflict) {
-    sanitized = sanitized.replace(/\bsite:[^\s)]+/gi, "").replace(/\s+/g, " ").trim();
+    sanitized = sanitized
+      .replace(/\bsite:[^\s)]+/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   sanitized = reduceQueryComplexity(sanitized);
-  const withCountry = queryMentionsCountry(sanitized, country) ? sanitized : `${sanitized} ${country}`;
+  const withCountry = queryMentionsCountry(sanitized, country)
+    ? sanitized
+    : `${sanitized} ${country}`;
   const withNegatives = appendSafeNegativeTerms(withCountry, keywordGroups.excludeTerms);
   const compacted = reduceQueryComplexity(withNegatives).replace(/\s+$/, "");
 
-  const remainingConflicts = findMentionedKnownMarkets(compacted).filter((market) => !marketMatches(country, market));
+  const remainingConflicts = findMentionedKnownMarkets(compacted).filter(
+    (market) => !marketMatches(country, market)
+  );
   if (remainingConflicts.length) {
     return { query: "", reason: `market_conflict:${remainingConflicts.slice(0, 3).join(",")}` };
   }
@@ -2900,12 +3187,18 @@ function normalizeAiQueryText(
 
 function queryMentionsCountry(query: string, country: string) {
   const lower = query.toLowerCase();
-  return lower.includes(country.toLowerCase()) || lower.includes(normalizeCountryAlias(country).toLowerCase());
+  return (
+    lower.includes(country.toLowerCase()) ||
+    lower.includes(normalizeCountryAlias(country).toLowerCase())
+  );
 }
 
 function isValidSearchCountry(value: string) {
   const normalized = normalizeCountryAlias(value);
-  return Boolean(resolveCountry(normalized)) || ["UAE", "Dubai", "Abu Dhabi"].some((market) => marketMatches(market, normalized));
+  return (
+    Boolean(resolveCountry(normalized)) ||
+    ["UAE", "Dubai", "Abu Dhabi"].some((market) => marketMatches(market, normalized))
+  );
 }
 
 function marketMatches(left: string, right: string) {
@@ -2931,7 +3224,9 @@ function findMentionedKnownMarkets(text: string) {
 function queryMentionsMarket(text: string, market: string) {
   const normalized = normalizeCountryAlias(market);
   const aliases = queryMarketAliases(normalized);
-  return aliases.some((alias) => new RegExp(`(^|[^a-z0-9])${quoteRegExp(alias)}([^a-z0-9]|$)`, "i").test(text));
+  return aliases.some((alias) =>
+    new RegExp(`(^|[^a-z0-9])${quoteRegExp(alias)}([^a-z0-9]|$)`, "i").test(text)
+  );
 }
 
 function queryMarketAliases(market: string) {
@@ -2962,7 +3257,8 @@ function removeQuotedMarketPhrases(query: string, targetMarkets: string[]) {
     .replace(/"([^"]{20,})"/g, (match, phrase: string) => {
       const phraseLower = phrase.toLowerCase();
       const mentionsMarket = Boolean(
-        findMentionedKnownMarkets(phrase).length || targetMarkets.some((market) => queryMentionsMarket(phrase, market))
+        findMentionedKnownMarkets(phrase).length ||
+        targetMarkets.some((market) => queryMentionsMarket(phrase, market))
       );
       const looksLikeSegment =
         mentionsMarket &&
@@ -2983,7 +3279,10 @@ function removeConflictingMarketMentions(query: string, country: string, conflic
         continue;
       }
       output = output.replace(new RegExp(`"[^"]*${quoteRegExp(alias)}[^"]*"`, "gi"), " ");
-      output = output.replace(new RegExp(`(^|[^a-z0-9])${quoteRegExp(alias)}([^a-z0-9]|$)`, "gi"), " ");
+      output = output.replace(
+        new RegExp(`(^|[^a-z0-9])${quoteRegExp(alias)}([^a-z0-9]|$)`, "gi"),
+        " "
+      );
     }
   }
   return output.replace(/\s+/g, " ").trim();
@@ -3017,7 +3316,12 @@ function reduceQueryComplexity(query: string) {
     output = shortened;
   }
 
-  return output.length > 180 ? output.slice(0, 180).replace(/\s+\S*$/, "").trim() : output;
+  return output.length > 180
+    ? output
+        .slice(0, 180)
+        .replace(/\s+\S*$/, "")
+        .trim()
+    : output;
 }
 
 function keepFirstOrGroup(query: string) {
@@ -3033,7 +3337,7 @@ function keepFirstOrGroup(query: string) {
         .map((term) => term.trim())
         .filter(Boolean)
         .slice(0, 3);
-      return terms.length > 1 ? `(${terms.join(" OR ")})` : terms[0] ?? "";
+      return terms.length > 1 ? `(${terms.join(" OR ")})` : (terms[0] ?? "");
     })
     .replace(/\s+/g, " ")
     .trim();
@@ -3059,32 +3363,59 @@ function limitNegativeTerms(query: string, maxTerms: number) {
 }
 
 function appendSafeNegativeTerms(query: string, excludeTerms: string[]) {
-  const safeTerms = ["jobs", "careers", "news", "wikipedia"];
+  const safeTerms = ["jobs", "careers", "training", "course", "marketplace", "wikipedia"];
   const configuredSafeTerms = excludeTerms.filter((term) => safeTerms.includes(term.toLowerCase()));
-  const terms = uniqueStrings([...safeTerms.slice(0, 3), ...configuredSafeTerms]).slice(0, 3);
+  const terms = uniqueStrings([...safeTerms.slice(0, 5), ...configuredSafeTerms]).slice(0, 5);
   const missingTerms = terms
     .filter((term) => !new RegExp(`-${quoteRegExp(term)}\\b`, "i").test(query))
     .map((term) => `-${term}`);
 
-  return [query, ...missingTerms].join(" ").replace(/\s+/g, " ").trim();
+  return stripEvidenceNegativeTerms([query, ...missingTerms].join(" "));
+}
+
+function stripEvidenceNegativeTerms(query: string) {
+  return query
+    .replace(/\s-(?:pdf|news|blog|blogs|article|articles|report|reports)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, country: string) {
   const lower = query.toLowerCase();
   const hasCountry = queryMentionsCountry(query, country);
   const hasProduct = keywordGroups.productTerms.some((term) => lower.includes(term.toLowerCase()));
-  const hasCustomer = keywordGroups.customerIntentTerms.some((term) => lower.includes(term.toLowerCase()));
-  const hasScenario = keywordGroups.scenarioTerms.some((term) => lower.includes(term.toLowerCase()));
-  const hasBuyerRole = hasCustomer || hasScenario || queryBuyerRoleTerms.some((term) => lower.includes(term));
+  const hasCustomer = keywordGroups.customerIntentTerms.some((term) =>
+    lower.includes(term.toLowerCase())
+  );
+  const hasScenario = keywordGroups.scenarioTerms.some((term) =>
+    lower.includes(term.toLowerCase())
+  );
+  const hasBuyerRole =
+    hasCustomer || hasScenario || queryBuyerRoleTerms.some((term) => lower.includes(term));
   const hasEntryPoint = queryEntryPointTerms.some((term) => lower.includes(term));
-  const hasSellerOnlyTrap = querySellerOnlyTerms.some((term) => lower.includes(term)) && !hasBuyerRole;
+  const hasSellerOnlyTrap =
+    querySellerOnlyTerms.some((term) => lower.includes(term)) && !hasBuyerRole;
   const hasProductOrIndustryContext = hasProduct || hasScenario || hasTelecomQueryContext(lower);
 
-  return hasCountry && !hasSellerOnlyTrap && hasProductOrIndustryContext && (hasBuyerRole || hasEntryPoint);
+  return (
+    hasCountry &&
+    !hasSellerOnlyTrap &&
+    hasProductOrIndustryContext &&
+    (hasBuyerRole || hasEntryPoint)
+  );
 }
 
 function extractKnownBrandTerms(values: string[]) {
-  const brands = ["Huawei", "ZTE", "Ericsson", "Nokia", "Eltek", "Alcatel-Lucent", "Delta", "Vertiv"];
+  const brands = [
+    "Huawei",
+    "ZTE",
+    "Ericsson",
+    "Nokia",
+    "Eltek",
+    "Alcatel-Lucent",
+    "Delta",
+    "Vertiv"
+  ];
   const text = values.join(" ").toLowerCase();
   return brands.filter((brand) => text.includes(brand.toLowerCase()));
 }
@@ -3140,9 +3471,7 @@ const queryBuyerRoleTerms = [
   "distributor",
   "stockist",
   "reseller",
-  "importer",
-  "deployment",
-  "rollout"
+  "importer"
 ];
 
 const querySellerOnlyTerms = [
@@ -3170,12 +3499,16 @@ function buildExecutionPlan(hasProductProfile: boolean, hasCustomerProfile: bool
     {
       step: "analyze_product_profile",
       title: "分析产品能力",
-      detail: hasProductProfile ? "从官网、产品页和补充说明提取产品词" : "使用任务文本和通用 B2B 词库补全产品词"
+      detail: hasProductProfile
+        ? "从官网、产品页和补充说明提取产品词"
+        : "使用任务文本和通用 B2B 词库补全产品词"
     },
     {
       step: "analyze_customer_profile",
       title: "分析目标客户",
-      detail: hasCustomerProfile ? "从目标地区、参考客户和 CRM 样本提取客户意图" : "使用任务文本和通用买家画像补全客户意图"
+      detail: hasCustomerProfile
+        ? "从目标地区、参考客户和 CRM 样本提取客户意图"
+        : "使用任务文本和通用买家画像补全客户意图"
     },
     {
       step: "plan_search_queries",
@@ -3196,7 +3529,9 @@ function buildExecutionPlan(hasProductProfile: boolean, hasCustomerProfile: bool
 }
 
 function toPlainObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : {};
 }
 
 function getWorkflowInterrupts(workflow: LeadHuntWorkflowState): unknown[] {
@@ -3221,18 +3556,26 @@ function interruptNodeName(interrupts: unknown[]): LeadHuntWorkflowNode | null {
 }
 
 function asStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 function resolveTargetMarketSelection(taskText: string, profileRegions: string[] | undefined) {
-  const promptMarkets = normalizeTargetMarkets(detectTaskMarkets(taskText)) ?? [];
-  const profileMarkets = normalizeTargetMarkets(profileRegions) ?? [];
-  const promptHasGlobal = promptMarkets.some((market) => market.toLowerCase() === "global");
+  const detectedPromptMarkets = detectTaskMarkets(taskText);
+  const promptMarketBuckets = splitTargetMarkets(detectedPromptMarkets);
+  const profileMarketBuckets = splitTargetMarkets(profileRegions);
+  const promptMarkets = promptMarketBuckets.primaryMarkets;
+  const profileMarkets = profileMarketBuckets.primaryMarkets;
+  const promptHasGlobal = detectedPromptMarkets.some(
+    (market) => normalizeMarketKey(market) === "global"
+  );
   const promptSpecificMarkets = promptMarkets.filter((market) => market.toLowerCase() !== "global");
 
   if (promptSpecificMarkets.length) {
     return {
       targetMarkets: promptSpecificMarkets,
+      secondaryMarkets: promptMarketBuckets.secondaryMarkets,
       promptMarkets,
       profileMarkets,
       marketSource: "prompt" as const
@@ -3242,6 +3585,7 @@ function resolveTargetMarketSelection(taskText: string, profileRegions: string[]
   if (promptHasGlobal && profileMarkets.length) {
     return {
       targetMarkets: profileMarkets,
+      secondaryMarkets: profileMarketBuckets.secondaryMarkets,
       promptMarkets,
       profileMarkets,
       marketSource: "profile" as const
@@ -3251,6 +3595,7 @@ function resolveTargetMarketSelection(taskText: string, profileRegions: string[]
   if (profileMarkets.length) {
     return {
       targetMarkets: profileMarkets,
+      secondaryMarkets: profileMarketBuckets.secondaryMarkets,
       promptMarkets,
       profileMarkets,
       marketSource: "profile" as const
@@ -3259,17 +3604,36 @@ function resolveTargetMarketSelection(taskText: string, profileRegions: string[]
 
   return {
     targetMarkets: promptMarkets.length ? promptMarkets : undefined,
+    secondaryMarkets: promptMarketBuckets.secondaryMarkets,
     promptMarkets,
     profileMarkets,
     marketSource: promptMarkets.length ? ("prompt" as const) : ("none" as const)
   };
 }
 
+function splitTargetMarkets(markets: string[] | undefined, maxPrimaryMarkets = 5) {
+  const rawMarkets = uniqueStrings(markets ?? [])
+    .map((market) => market.trim())
+    .filter(Boolean);
+  const orderedMarkets = uniqueStrings(
+    rawMarkets.flatMap(expandSearchTargetMarket).map(normalizeSearchTargetCountry)
+  );
+
+  return {
+    primaryMarkets: orderedMarkets.slice(0, maxPrimaryMarkets),
+    secondaryMarkets: orderedMarkets.slice(maxPrimaryMarkets)
+  };
+}
+
 function normalizeTargetMarkets(markets: string[] | undefined) {
   const uniqueMarkets = uniqueStrings(markets ?? []);
   const filteredMarkets =
-    uniqueMarkets.length > 1 ? uniqueMarkets.filter((market) => normalizeMarketKey(market) !== "global") : uniqueMarkets;
-  const expandedMarkets = uniqueStrings(filteredMarkets.flatMap(expandSearchTargetMarket).map(normalizeSearchTargetCountry));
+    uniqueMarkets.length > 1
+      ? uniqueMarkets.filter((market) => normalizeMarketKey(market) !== "global")
+      : uniqueMarkets;
+  const expandedMarkets = uniqueStrings(
+    filteredMarkets.flatMap(expandSearchTargetMarket).map(normalizeSearchTargetCountry)
+  );
 
   return expandedMarkets.length ? expandedMarkets : undefined;
 }
@@ -3363,7 +3727,9 @@ function detectTaskMarkets(text: string): string[] {
       : [];
   });
 
-  return Array.from(new Set(matches.sort((left, right) => left.index - right.index).map((match) => match.market)));
+  return Array.from(
+    new Set(matches.sort((left, right) => left.index - right.index).map((match) => match.market))
+  );
 }
 
 function compactStrings(values: Array<string | null | undefined>): string[] {
@@ -3403,7 +3769,7 @@ function collectSiteKeywordHints(siteEvidence: ProfileSiteEvidence) {
 function buildEvidenceNotes(notes: string | null | undefined, sites: WebsiteEvidence[]) {
   const snippets = sites
     .filter((site) => site.status === "read")
-    .flatMap((site) => site.evidenceSnippets.length ? site.evidenceSnippets : [site.textSample])
+    .flatMap((site) => (site.evidenceSnippets.length ? site.evidenceSnippets : [site.textSample]))
     .filter(Boolean)
     .slice(0, 8);
   const combined = compactStrings([notes, ...snippets]);
@@ -3412,7 +3778,11 @@ function buildEvidenceNotes(notes: string | null | undefined, sites: WebsiteEvid
 }
 
 function buildProductProfileAnalysis(
-  product: { websiteUrl?: string | null; productPageUrl?: string | null; notes?: string | null } | null,
+  product: {
+    websiteUrl?: string | null;
+    productPageUrl?: string | null;
+    notes?: string | null;
+  } | null,
   sites: WebsiteEvidence[]
 ) {
   const readSites = sites.filter((site) => site.status === "read");
@@ -3424,12 +3794,26 @@ function buildProductProfileAnalysis(
   ]);
   const brandTerms = uniqueStrings(readSites.flatMap((site) => site.extractedTerms.brandTerms));
   const evidence = readSites.flatMap((site) => site.evidenceSnippets).slice(0, 8);
-  const totalProducts = readSites.reduce((max, site) => Math.max(max, site.productCatalog?.totalProducts ?? 0), 0);
-  const catalogPagesRead = readSites.reduce((sum, site) => sum + (site.productCatalog?.pagesRead ?? 0), 0);
+  const totalProducts = readSites.reduce(
+    (max, site) => Math.max(max, site.productCatalog?.totalProducts ?? 0),
+    0
+  );
+  const catalogPagesRead = readSites.reduce(
+    (sum, site) => sum + (site.productCatalog?.pagesRead ?? 0),
+    0
+  );
 
   return {
-    source: readSites.length ? "website_content" : product ? "saved_profile_only" : "task_text_only",
-    confidence: readSites.length ? confidenceFromEvidence(productTerms.length + brandTerms.length) : product ? 0.35 : 0.2,
+    source: readSites.length
+      ? "website_content"
+      : product
+        ? "saved_profile_only"
+        : "task_text_only",
+    confidence: readSites.length
+      ? confidenceFromEvidence(productTerms.length + brandTerms.length)
+      : product
+        ? 0.35
+        : 0.2,
     websiteUrls: uniqueStrings(compactStrings([product?.websiteUrl, product?.productPageUrl])),
     readUrls: readSites.map((site) => site.finalUrl),
     failedUrls: failedSites.map((site) => ({ url: site.url, error: site.error })),
@@ -3437,7 +3821,10 @@ function buildProductProfileAnalysis(
     keyProducts: productTerms.slice(0, 12),
     productCatalog: {
       totalProducts: totalProducts || productNames.length,
-      listedProducts: readSites.reduce((sum, site) => sum + (site.productCatalog?.listedProducts ?? 0), 0),
+      listedProducts: readSites.reduce(
+        (sum, site) => sum + (site.productCatalog?.listedProducts ?? 0),
+        0
+      ),
       extractedProducts: productNames.length,
       pagesRead: catalogPagesRead,
       truncated: readSites.some((site) => site.productCatalog?.truncated)
@@ -3445,12 +3832,18 @@ function buildProductProfileAnalysis(
     brands: brandTerms.slice(0, 8),
     searchKeywords: uniqueStrings([...productTerms, ...brandTerms]).slice(0, 16),
     evidence,
-    warning: readSites.length ? null : "No website content was read; analysis uses saved notes and defaults only."
+    warning: readSites.length
+      ? null
+      : "No website content was read; analysis uses saved notes and defaults only."
   };
 }
 
 function buildCustomerProfileAnalysis(
-  customer: { targetRegions?: string[]; referenceCustomerUrls?: string[]; notes?: string | null } | null,
+  customer: {
+    targetRegions?: string[];
+    referenceCustomerUrls?: string[];
+    notes?: string | null;
+  } | null,
   sites: WebsiteEvidence[]
 ) {
   const readSites = sites.filter((site) => site.status === "read");
@@ -3463,8 +3856,16 @@ function buildCustomerProfileAnalysis(
   const evidence = readSites.flatMap((site) => site.evidenceSnippets).slice(0, 8);
 
   return {
-    source: readSites.length ? "website_content" : customer ? "saved_profile_only" : "task_text_only",
-    confidence: readSites.length ? confidenceFromEvidence(customerTypes.length + scenarios.length) : customer ? 0.35 : 0.2,
+    source: readSites.length
+      ? "website_content"
+      : customer
+        ? "saved_profile_only"
+        : "task_text_only",
+    confidence: readSites.length
+      ? confidenceFromEvidence(customerTypes.length + scenarios.length)
+      : customer
+        ? 0.35
+        : 0.2,
     targetRegions: customer?.targetRegions ?? [],
     referenceUrls: customer?.referenceCustomerUrls ?? [],
     readUrls: readSites.map((site) => site.finalUrl),
@@ -3473,7 +3874,9 @@ function buildCustomerProfileAnalysis(
     buyingSignals: scenarios.slice(0, 10),
     searchKeywords: uniqueStrings([...customerTypes, ...scenarios]).slice(0, 16),
     evidence,
-    warning: readSites.length ? null : "No reference customer website content was read; analysis uses saved notes and defaults only."
+    warning: readSites.length
+      ? null
+      : "No reference customer website content was read; analysis uses saved notes and defaults only."
   };
 }
 
@@ -3501,10 +3904,15 @@ function parseTaskPayload(value: Prisma.JsonValue | null): {
   customerProfileAnalysis?: Record<string, unknown> | null;
   keywordGroups?: Partial<KeywordGroups>;
 } {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as ReturnType<typeof parseTaskPayload>) : {};
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as ReturnType<typeof parseTaskPayload>)
+    : {};
 }
 
-function createTaskInputFromPayload(value: Prisma.JsonValue | null, targetCount?: number): CreateTaskInput | null {
+function createTaskInputFromPayload(
+  value: Prisma.JsonValue | null,
+  targetCount?: number
+): CreateTaskInput | null {
   const payload = parseTaskPayload(value);
   const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
   if (!prompt) {
@@ -3597,18 +4005,18 @@ function countryToBraveCode(country: string | null) {
   const codes: Record<string, string> = {
     uae: "ALL",
     "united arab emirates": "ALL",
-    "阿联酋": "ALL",
+    阿联酋: "ALL",
     dubai: "ALL",
     "abu dhabi": "ALL",
     "saudi arabia": "SA",
-    "沙特": "SA",
+    沙特: "SA",
     riyadh: "SA",
     jeddah: "SA",
     qatar: "ALL",
     nigeria: "ALL",
-    "尼日利亚": "ALL",
+    尼日利亚: "ALL",
     kenya: "ALL",
-    "肯尼亚": "ALL",
+    肯尼亚: "ALL",
     "south africa": "ZA",
     indonesia: "ID",
     brazil: "BR",
@@ -3663,12 +4071,12 @@ function countryToBraveCode(country: string | null) {
     uganda: "UG",
     algeria: "DZ",
     russia: "ALL",
-    "俄罗斯": "ALL",
+    俄罗斯: "ALL",
     ukraine: "ALL",
-    "乌克兰": "ALL"
+    乌克兰: "ALL"
   };
 
-  return normalized ? codes[normalized] ?? "ALL" : "US";
+  return normalized ? (codes[normalized] ?? "ALL") : "US";
 }
 
 function canUseDevelopmentSearchFallback() {
@@ -3716,7 +4124,11 @@ function buildDevelopmentSearchResults(query: string, country: string | null): B
 
 function normalizeFallbackMarket(country: string | null): FallbackMarket {
   const normalized = country?.toLowerCase() ?? "";
-  if (normalized.includes("saudi") || normalized.includes("riyadh") || normalized.includes("jeddah")) {
+  if (
+    normalized.includes("saudi") ||
+    normalized.includes("riyadh") ||
+    normalized.includes("jeddah")
+  ) {
     return "SAUDI";
   }
 
@@ -3769,7 +4181,10 @@ function shouldPlanTaskInline() {
 
 type FallbackMarket = "UAE" | "SAUDI";
 
-const fallbackCompanies: Record<FallbackMarket, Array<{ name: string; domain: string; type: string }>> = {
+const fallbackCompanies: Record<
+  FallbackMarket,
+  Array<{ name: string; domain: string; type: string }>
+> = {
   UAE: [
     {
       name: "Gulf Telecom Supplies FZE",
@@ -3837,7 +4252,9 @@ function buildOutreachDraft(candidate: {
   icpScore: { score: number; grade: string } | null;
 }) {
   const email = candidate.contacts.find((contact) => contact.type === "email")?.value;
-  const productFit = candidate.icpScore ? `ICP ${candidate.icpScore.score}/${candidate.icpScore.grade}` : "high-fit B2B profile";
+  const productFit = candidate.icpScore
+    ? `ICP ${candidate.icpScore.score}/${candidate.icpScore.grade}`
+    : "high-fit B2B profile";
   const countryLine = candidate.country ? ` in ${candidate.country}` : "";
 
   return {

@@ -14,14 +14,18 @@ describe("search strategy library", () => {
 
     expect(queries).toHaveLength(15);
     expect(
-      queries.every((item) => /equipment|component|spare parts|network|maintenance|contractor|integrator|operator|procurement|RFQ|telecom|RRU|BBU|5G/i.test(item.query))
+      queries.every((item) =>
+        /equipment|component|spare parts|network|maintenance|contractor|integrator|operator|procurement|RFQ|telecom|RRU|BBU|5G/i.test(
+          item.query
+        )
+      )
     ).toBe(true);
     expect(new Set(queries.map((item) => item.country))).not.toContain("Nigeria");
     expect(queries[0]?.templateId).toBe("maintenance_company_contact");
     expect(queries[0]?.query).toContain("-job");
     expect(queries[0]?.query).toContain("-marketplace");
-    expect(queries[0]?.query).toContain('-"yellow pages"');
-    expect(queries[0]?.query).toContain('-"supplier directory"');
+    expect(queries[0]?.query).not.toContain('-"yellow pages"');
+    expect(queries[0]?.query).not.toContain('-"supplier directory"');
     expect(queries[0]?.query).not.toContain("-phone");
     expect(queries.map((item) => item.query).join("\n")).not.toMatch(/\binpage:|\bloc:|\blang:/);
     expect(queries.map((item) => item.query).join("\n")).not.toMatch(/\bsite:/);
@@ -71,6 +75,27 @@ describe("search strategy library", () => {
     );
   });
 
+  it("recognizes explicit Chinese channel customer requests without promoting channels by default", () => {
+    const buyerQueries = generateSearchQueries({
+      taskText: "\u5e2e\u6211\u627e5G\u901a\u4fe1\u8bbe\u5907\u76f8\u5173\u7684\u5ba2\u6237",
+      targetMarkets: ["UAE"],
+      minQueryCount: 20
+    });
+    const channelQueries = generateSearchQueries({
+      taskText:
+        "\u5e2e\u6211\u627e5G\u901a\u4fe1\u8bbe\u5907\u7ecf\u9500\u5546\u548c\u5e93\u5b58\u5546",
+      targetMarkets: ["UAE"],
+      minQueryCount: 20
+    });
+
+    expect(
+      new Set(buyerQueries.map((query) => query.templateId)).has("direct_distributor_country")
+    ).toBe(false);
+    expect(
+      new Set(channelQueries.map((query) => query.templateId)).has("direct_distributor_country")
+    ).toBe(true);
+  });
+
   it("uses product and reference customer profile URLs to create similar-customer queries", () => {
     const queries = generateSearchQueries({
       taskText: "帮我找5G通信设备相关的客户",
@@ -86,7 +111,11 @@ describe("search strategy library", () => {
     expect(queryText).toMatch(/5G|RRU|BBU|microwave backhaul|telecom power/i);
     expect(queryText).not.toMatch(/\binpage:|\bloc:|\blang:/);
     expect(queries[0]?.keywordGroups.customerIntentTerms).toEqual(
-      expect.arrayContaining(["telecom system integrator", "network maintenance company", "base station maintenance company"])
+      expect.arrayContaining([
+        "telecom system integrator",
+        "network maintenance company",
+        "base station maintenance company"
+      ])
     );
     expect(queries[0]?.keywordGroups.excludeTerms).toEqual(
       expect.arrayContaining(["Accio", "TradeWheel", "Alibaba", "directory", "yellow pages"])
@@ -150,7 +179,16 @@ describe("search strategy library", () => {
         "ZTE ZXSDR B8200",
         "ZTE ZXSDR R8882"
       ],
-      targetMarkets: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Nigeria", "Germany", "Brazil", "Kenya"],
+      targetMarkets: [
+        "UAE",
+        "Saudi Arabia",
+        "Qatar",
+        "Oman",
+        "Nigeria",
+        "Germany",
+        "Brazil",
+        "Kenya"
+      ],
       minQueryCount: 8
     });
 
@@ -174,7 +212,9 @@ describe("search strategy library", () => {
     });
     const countries = new Set(queries.map((query) => query.country));
 
-    expect(countries).toEqual(new Set(["UAE", "Dubai", "Abu Dhabi", "Saudi Arabia", "Riyadh", "Jeddah"]));
+    expect(countries).toEqual(
+      new Set(["UAE", "Dubai", "Abu Dhabi", "Saudi Arabia", "Riyadh", "Jeddah"])
+    );
   });
 
   it("expands selected macro regions so large market selections are not silently truncated", () => {
@@ -233,7 +273,9 @@ describe("search strategy library", () => {
   });
 
   it("contains Brave, Google, and common SEO source metadata", () => {
-    const sources = new Set(getSearchStrategyLibrary().operators.map((item) => item.operatorSource));
+    const sources = new Set(
+      getSearchStrategyLibrary().operators.map((item) => item.operatorSource)
+    );
 
     expect(sources.has("brave_official")).toBe(true);
     expect(sources.has("google_official")).toBe(true);

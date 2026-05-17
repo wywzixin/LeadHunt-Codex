@@ -24,7 +24,13 @@ export type ExpandedKeywords = {
 
 type ProfileHints = Partial<ExpandedKeywords>;
 
-const defaultMainProducts = ["equipment", "components", "spare parts", "industrial equipment", "telecom equipment"];
+const defaultMainProducts = [
+  "equipment",
+  "components",
+  "spare parts",
+  "industrial equipment",
+  "telecom equipment"
+];
 
 const defaultRelatedProducts = [
   "maintenance parts",
@@ -170,7 +176,6 @@ const defaultExcludeTerms = [
   "job",
   "jobs",
   "career",
-  "news",
   "training",
   "consumer phone",
   "consumer",
@@ -181,7 +186,6 @@ const defaultExcludeTerms = [
   "supplier directory",
   "company directory",
   "trade directory",
-  "blog",
   "youtube",
   "facebook",
   "linkedin",
@@ -324,7 +328,10 @@ export function expandLeadKeywords(input: KeywordExpansionInput = {}): ExpandedK
       ...(profileHints.relatedProductTerms ?? []),
       ...defaultRelatedProducts
     ]),
-    longTailProductTerms: unique([...(profileHints.longTailProductTerms ?? []), ...defaultLongTailProducts]),
+    longTailProductTerms: unique([
+      ...(profileHints.longTailProductTerms ?? []),
+      ...defaultLongTailProducts
+    ]),
     upstreamDownstreamTerms: unique([
       ...(profileHints.upstreamDownstreamTerms ?? []),
       ...defaultUpstreamDownstreamTerms
@@ -344,7 +351,11 @@ export function expandLeadKeywords(input: KeywordExpansionInput = {}): ExpandedK
 function detectMainProducts(sourceText: string) {
   const terms: string[] = [];
   if (/5g/i.test(sourceText)) {
-    terms.push("5G telecom equipment", "5G base station equipment", "radio access network equipment");
+    terms.push(
+      "5G telecom equipment",
+      "5G base station equipment",
+      "radio access network equipment"
+    );
   }
   if (/base station|bts|enodeb|gnodeb|ran equipment/i.test(sourceText)) {
     terms.push("base station equipment", "RAN equipment");
@@ -390,10 +401,21 @@ function detectCustomerIntentTerms(sourceText: string) {
     terms.push("procurement", "purchasing", "RFQ", "tender");
   }
   if (/operator|carrier|service provider/i.test(sourceText)) {
-    terms.push("operator procurement", "service provider", "telecom operator procurement", "mobile network operator");
+    terms.push(
+      "operator procurement",
+      "service provider",
+      "telecom operator procurement",
+      "mobile network operator"
+    );
   }
   if (/\u7ef4\u62a4|maintenance|o&m|operations/i.test(sourceText)) {
-    terms.push("maintenance company", "field service company", "network maintenance company", "base station maintenance company", "telecom field services");
+    terms.push(
+      "maintenance company",
+      "field service company",
+      "network maintenance company",
+      "base station maintenance company",
+      "telecom field services"
+    );
   }
   if (/base station|bts|enodeb|gnodeb|\u57fa\u7ad9|ran/i.test(sourceText)) {
     terms.push("RAN maintenance", "cell site maintenance");
@@ -417,7 +439,12 @@ function detectCustomerIntentTerms(sourceText: string) {
     terms.push("system integrator", "telecom system integrator");
   }
   if (/\u5de5\u7a0b|\u627f\u5305|contractor/i.test(sourceText)) {
-    terms.push("engineering contractor", "turnkey contractor", "telecom contractor", "tower contractor");
+    terms.push(
+      "engineering contractor",
+      "turnkey contractor",
+      "telecom contractor",
+      "tower contractor"
+    );
   }
   if (/\u8fdb\u53e3|import/i.test(sourceText)) {
     terms.push("telecom importer");
@@ -425,10 +452,11 @@ function detectCustomerIntentTerms(sourceText: string) {
   return terms;
 }
 
+const channelCustomerPattern =
+  /\b(channels?|channel partners?|suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b|\u7ecf\u9500|\u5206\u9500|\u6e20\u9053|\u5e93\u5b58\u5546|\u4ee3\u7406\u5546|\u8fdb\u53e3\u5546|\u6279\u53d1/i;
+
 function isChannelCustomerRequest(sourceText: string) {
-  return /\b(channels?|channel partners?|suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b|经销|分销|渠道|库存商|代理商|进口商|批发/i.test(
-    sourceText
-  );
+  return channelCustomerPattern.test(sourceText);
 }
 
 function prioritizeCustomerIntentTerms(terms: string[], promoteChannel: boolean) {
@@ -448,9 +476,7 @@ function prioritizeCustomerIntentTerms(terms: string[], promoteChannel: boolean)
 }
 
 function isChannelCustomerTerm(term: string) {
-  return /\b(distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?|suppliers?)\b|经销|分销|渠道|库存商|代理商|进口商|批发/i.test(
-    term
-  );
+  return channelCustomerPattern.test(term);
 }
 
 function detectMarketTerms(sourceText: string) {
@@ -623,11 +649,50 @@ function expandMarketMacro(market: string): string[] {
       "Egypt"
     ],
     GCC: ["UAE", "Saudi Arabia", "Qatar", "Kuwait", "Oman", "Bahrain"],
-    Europe: ["Germany", "United Kingdom", "France", "Italy", "Spain", "Poland", "Netherlands", "Romania", "Ukraine"],
-    Africa: ["Nigeria", "Kenya", "South Africa", "Egypt", "Morocco", "Ghana", "Ethiopia", "Tanzania", "Uganda", "Algeria"],
+    Europe: [
+      "Germany",
+      "United Kingdom",
+      "France",
+      "Italy",
+      "Spain",
+      "Poland",
+      "Netherlands",
+      "Romania",
+      "Ukraine"
+    ],
+    Africa: [
+      "Nigeria",
+      "Kenya",
+      "South Africa",
+      "Egypt",
+      "Morocco",
+      "Ghana",
+      "Ethiopia",
+      "Tanzania",
+      "Uganda",
+      "Algeria"
+    ],
     "North America": ["United States", "Canada", "Mexico"],
-    "Latin America": ["Brazil", "Mexico", "Chile", "Colombia", "Peru", "Argentina", "Ecuador", "Costa Rica"],
-    Americas: ["United States", "Canada", "Mexico", "Brazil", "Chile", "Colombia", "Peru", "Argentina"],
+    "Latin America": [
+      "Brazil",
+      "Mexico",
+      "Chile",
+      "Colombia",
+      "Peru",
+      "Argentina",
+      "Ecuador",
+      "Costa Rica"
+    ],
+    Americas: [
+      "United States",
+      "Canada",
+      "Mexico",
+      "Brazil",
+      "Chile",
+      "Colombia",
+      "Peru",
+      "Argentina"
+    ],
     Oceania: ["Australia", "New Zealand", "Papua New Guinea"]
   };
 
@@ -640,7 +705,12 @@ function detectScenarioTerms(sourceText: string) {
     terms.push("5G network rollout", "base station maintenance");
   }
   if (/\u7ef4\u62a4|maintenance/i.test(sourceText)) {
-    terms.push("site maintenance", "network maintenance", "RAN maintenance", "spare parts replacement");
+    terms.push(
+      "site maintenance",
+      "network maintenance",
+      "RAN maintenance",
+      "spare parts replacement"
+    );
   }
   if (/base station|bts|enodeb|gnodeb|\u57fa\u7ad9|ran/i.test(sourceText)) {
     terms.push("base station maintenance", "cell site maintenance");
@@ -705,13 +775,22 @@ function domainFromUrl(url: string) {
 function mergeHints(left: ProfileHints, right: ProfileHints): ProfileHints {
   return {
     mainProductTerms: unique([...(left.mainProductTerms ?? []), ...(right.mainProductTerms ?? [])]),
-    relatedProductTerms: unique([...(left.relatedProductTerms ?? []), ...(right.relatedProductTerms ?? [])]),
-    longTailProductTerms: unique([...(left.longTailProductTerms ?? []), ...(right.longTailProductTerms ?? [])]),
+    relatedProductTerms: unique([
+      ...(left.relatedProductTerms ?? []),
+      ...(right.relatedProductTerms ?? [])
+    ]),
+    longTailProductTerms: unique([
+      ...(left.longTailProductTerms ?? []),
+      ...(right.longTailProductTerms ?? [])
+    ]),
     upstreamDownstreamTerms: unique([
       ...(left.upstreamDownstreamTerms ?? []),
       ...(right.upstreamDownstreamTerms ?? [])
     ]),
-    customerIntentTerms: unique([...(left.customerIntentTerms ?? []), ...(right.customerIntentTerms ?? [])]),
+    customerIntentTerms: unique([
+      ...(left.customerIntentTerms ?? []),
+      ...(right.customerIntentTerms ?? [])
+    ]),
     marketTerms: unique([...(left.marketTerms ?? []), ...(right.marketTerms ?? [])]),
     scenarioTerms: unique([...(left.scenarioTerms ?? []), ...(right.scenarioTerms ?? [])]),
     excludeTerms: unique([...(left.excludeTerms ?? []), ...(right.excludeTerms ?? [])])
