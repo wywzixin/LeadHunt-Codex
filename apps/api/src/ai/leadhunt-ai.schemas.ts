@@ -76,20 +76,24 @@ export const searchStrategyPlanSchema = z.object({
       z.object({
         query: z.string().min(1),
         country: z.string().min(2),
-        language: z.string().min(2),
-        operatorSource: z.enum(["google_official", "brave_official", "common_seo"]),
-        executionStatus: z.enum(["supported", "experimental", "manual_only", "disabled"]),
-        rationale: z.string().min(1),
+        language: z.string().min(2).default("en"),
+        operatorSource: z
+          .enum(["google_official", "brave_official", "common_seo"])
+          .default("brave_official"),
+        executionStatus: z.enum(["supported", "experimental"]).default("supported"),
+        rationale: z.string().min(1).default("buyer-led profile query"),
         strategyType: z
           .enum(["buyer_scenario", "product_group", "brand_ecosystem", "model_specific", "procurement_event", "channel"])
           .optional(),
         sourceEvidence: z.enum(["user_prompt", "product_profile", "website", "product_list", "crm_sample", "inferred"]).optional(),
         buyerIntent: z.string().optional(),
+        productEvidence: z.array(z.string().min(1)).default([]),
+        customerEvidence: z.array(z.string().min(1)).default([]),
         negativeTerms: z.array(z.string()).default([]),
-        priority: z.number().int().min(1).max(5)
+        priority: z.number().int().min(1).max(5).default(3)
       })
     )
-    .min(30),
+    .min(10),
   rejectedIdeas: z
     .array(
       z.object({

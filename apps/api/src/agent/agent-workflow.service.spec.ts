@@ -227,7 +227,18 @@ function createWebsiteContentMock() {
 }
 
 function createLeadHuntAiMock(
-  generateSearchStrategy: (input: { targetMarkets: string[] }) => Promise<{
+  generateSearchStrategy: (input: {
+    targetMarkets: string[];
+    refillContext?: {
+      requiredAdditionalQueries: number;
+      acceptedQueries: Array<{
+        query: string;
+        country?: string | null;
+        strategyType?: string | null;
+      }>;
+      rejectedQueries: Array<{ query: string; country: string; reason: string }>;
+    };
+  }) => Promise<{
     queries: Array<{
       query: string;
       country: string;
@@ -235,6 +246,7 @@ function createLeadHuntAiMock(
       operatorSource: string;
       executionStatus: string;
       rationale: string;
+      strategyType?: string;
       priority: number;
     }>;
   }>
@@ -282,7 +294,12 @@ function createLeadHuntAiMock(
   };
 }
 
-function aiSearchQuery(query: string, country: string, priority: number) {
+function aiSearchQuery(
+  query: string,
+  country: string,
+  priority: number,
+  strategyType = "buyer_scenario"
+) {
   return {
     query,
     country,
@@ -290,20 +307,71 @@ function aiSearchQuery(query: string, country: string, priority: number) {
     operatorSource: "brave_official",
     executionStatus: "supported",
     rationale: "Targets telecom infrastructure buyers",
+    strategyType,
+    buyerIntent: "telecom maintenance buyer",
+    productEvidence: ["telecom equipment"],
+    customerEvidence: ["telecom maintenance contractor"],
     priority
   };
 }
 
 function simpleAiQueriesForMarkets(markets: string[]) {
-  return Array.from({ length: 15 }, (_, index) => {
+  const strategyTypes = [
+    ...Array.from({ length: 12 }, () => "buyer_scenario"),
+    ...Array.from({ length: 9 }, () => "product_group"),
+    ...Array.from({ length: 3 }, () => "brand_ecosystem"),
+    ...Array.from({ length: 6 }, () => "model_specific")
+  ];
+
+  return Array.from({ length: 30 }, (_, index) => {
     const country = markets[index % markets.length] ?? "Canada";
-    const buyerTerm =
-      index % 3 === 0
-        ? "base station maintenance"
-        : index % 3 === 1
-          ? "ISP network operations"
-          : "tower maintenance";
-    return aiSearchQuery(`"${buyerTerm}" ${country} telecom -jobs -news`, country, index + 1);
+    const roleTerms = [
+      "base station maintenance",
+      "RAN maintenance",
+      "tower maintenance",
+      "telecom power maintenance",
+      "FTTH network operations",
+      "DAS integrator",
+      "microwave backhaul contractor",
+      "private 5G integrator",
+      "cell site maintenance",
+      "operator procurement"
+    ];
+    const productTerms = [
+      "RRU BBU",
+      "base station equipment",
+      "5G telecom equipment",
+      "rectifier module",
+      "OLT equipment",
+      "SFP optical module",
+      "AAU radio unit",
+      "microwave backhaul",
+      "telecom power module",
+      "RAN equipment",
+      "remote radio unit",
+      "baseband unit",
+      "Huawei R4850N6",
+      "Ericsson AIR 6488",
+      "Nokia FBBC board",
+      "ZTE R8882 RRU",
+      "Eltek rectifier",
+      "Huawei OLT MA5800",
+      "SFP transceiver",
+      "telecom cable materials",
+      "DAS small cell",
+      "private 5G equipment",
+      "microwave radio",
+      "cell site power",
+      "base station spare parts",
+      "RAN spare parts",
+      "BBU board",
+      "AAU antenna",
+      "telecom optical module",
+      "network power system"
+    ];
+    const entry = index % 4 === 0 ? "contact" : index % 4 === 1 ? "services" : "projects";
+    const phrase = `"${roleTerms[index % roleTerms.length]}" "${productTerms[index]}" "5G telecom equipment" ${country} ${entry}`;
+    return aiSearchQuery(phrase, country, index + 1, strategyTypes[index] ?? "buyer_scenario");
   });
 }
 
@@ -351,7 +419,16 @@ describe("AgentWorkflowService", () => {
 
   it("creates a task and writes the full agent_steps timeline", async () => {
     const prisma = createPrismaMock();
-    const service = new AgentWorkflowService(prisma as any);
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
 
     const result = await service.createTaskWithTimeline("user-1", {
       prompt: "Find UAE telecom distributors",
@@ -411,7 +488,16 @@ describe("AgentWorkflowService", () => {
       crmSampleIds: [],
       notes: "telecom distributors"
     });
-    const service = new AgentWorkflowService(prisma as any);
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
 
     const result = await service.createTaskWithTimeline("user-1", {
       prompt: "Find telecom equipment buyers in Germany, Poland, and Oman",
@@ -488,6 +574,88 @@ describe("AgentWorkflowService", () => {
     });
   });
 
+  it("sends a compact buyer-led search planning input to GPT instead of the full product pool", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    ai.analyzeProductProfile.mockResolvedValueOnce({
+      brandName: "TeleCoreNet",
+      websiteUrl: "https://telecorenet.com/",
+      productCategories: Array.from({ length: 20 }, (_, index) => `Category ${index + 1}`),
+      keyProducts: Array.from({ length: 158 }, (_, index) => `Generic SKU ${index + 1}`),
+      targetUseCases: Array.from({ length: 30 }, (_, index) => `Use case ${index + 1}`),
+      buyerPainPoints: Array.from({ length: 20 }, (_, index) => `Pain ${index + 1}`),
+      supplyCapabilities: Array.from({ length: 20 }, (_, index) => `Capability ${index + 1}`),
+      searchKeywords: Array.from({ length: 80 }, (_, index) => `keyword ${index + 1}`),
+      negativeKeywords: ["jobs", "training", "phone"],
+      confidence: 0.8,
+      evidence: Array.from({ length: 20 }, (_, index) => `Evidence ${index + 1}`)
+    });
+    ai.expandKeywords.mockResolvedValueOnce({
+      primaryProducts: [
+        "telecom equipment",
+        "RRU",
+        "BBU",
+        "AAU",
+        "OLT",
+        "SFP",
+        "rectifier module",
+        "microwave backhaul",
+        "DAS equipment",
+        "small cell equipment",
+        "communication cables",
+        "industrial network"
+      ],
+      relatedProducts: Array.from({ length: 40 }, (_, index) => `Huawei RRU ${3900 + index}`),
+      longTailProducts: Array.from({ length: 60 }, (_, index) => `Ericsson AIR ${6400 + index}`),
+      upstreamDownstreamTerms: [
+        "base station maintenance",
+        "FTTH operations",
+        "vendor registration",
+        "procurement portal"
+      ],
+      purchaseIntentTerms: [
+        "telecom maintenance contractor",
+        "ISP network operations",
+        "RFQ",
+        "tender",
+        "procurement"
+      ],
+      targetMarketTerms: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"],
+      industryScenarioTerms: [
+        "5G network maintenance",
+        "cell site power maintenance",
+        "RFQ portal"
+      ],
+      exclusionTerms: ["jobs", "careers", "news", "phone", "email"]
+    });
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    await service.createTaskWithTimeline("user-1", {
+      prompt: "Find 5G telecom equipment customers",
+      targetCount: 20
+    });
+
+    const aiInput = ai.generateSearchStrategy.mock.calls[0]?.[0] as any;
+    expect(aiInput.productProfile.keyProducts).toHaveLength(24);
+    expect(aiInput.productProfile.productCategories).toHaveLength(8);
+    expect(aiInput.keywordGroups.primaryProducts.length).toBeLessThanOrEqual(8);
+    expect(aiInput.keywordGroups.relatedProducts.length).toBeLessThanOrEqual(14);
+    expect(aiInput.keywordGroups.longTailProducts.length).toBeLessThanOrEqual(16);
+    expect(aiInput.keywordGroups.purchaseIntentTerms.join(" ")).not.toMatch(
+      /\b(?:rfq|tender|procurement)\b/i
+    );
+    expect(aiInput.keywordGroups.exclusionTerms.join(" ")).not.toMatch(/\b(?:phone|email|news)\b/i);
+    expect(aiInput.operatorLibrary.templates).toEqual([]);
+  });
+
   it("lets explicit prompt markets override saved profile target regions for AI planning", async () => {
     const prisma = createPrismaMock();
     prisma.customerProfile.findUnique.mockResolvedValue({
@@ -542,6 +710,162 @@ describe("AgentWorkflowService", () => {
         })
       })
     });
+  });
+
+  it("fails planning instead of filling deterministic fallback when GPT returns manual-only queries", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets).map((query) => ({
+        ...query,
+        executionStatus: "manual_only"
+      }))
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt: "Find 5G telecom equipment customers",
+      targetCount: 20
+    });
+
+    expect(result.searchQueries).toHaveLength(0);
+    expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
+    expect(prisma.agentStep.updateMany).toHaveBeenCalledWith({
+      where: { taskId: "task-1", nodeName: "plan_search_queries" },
+      data: expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("No deterministic fallback queries were added")
+      })
+    });
+    expect(prisma.leadTask.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        inputPayload: expect.objectContaining({
+          profileSignals: expect.objectContaining({
+            aiPlanning: expect.objectContaining({
+              gptSearchQueryCount: 0,
+              fallbackQueryCount: 0,
+              rejectedQueryCount: 30
+            })
+          })
+        })
+      })
+    });
+  });
+
+  it("asks GPT for a refill when valid long-tail queries are rejected before reaching 30", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => {
+      if (input.refillContext) {
+        return {
+          queries: [
+            aiSearchQuery('"Huawei OLT MA5800" replacement UAE contact', "UAE", 1, "model_specific"),
+            aiSearchQuery(
+              '"Ericsson Baseband 6648" replacement "Saudi Arabia" contact',
+              "Saudi Arabia",
+              2,
+              "model_specific"
+            ),
+            aiSearchQuery(
+              '"Ericsson AIR 6488 B42" replacement UAE contact',
+              "UAE",
+              3,
+              "model_specific"
+            ),
+            aiSearchQuery(
+              '"remote radio unit" maintenance "Saudi Arabia" contact',
+              "Saudi Arabia",
+              4,
+              "model_specific"
+            ),
+            aiSearchQuery(
+              '"waterproof insulating tape" telecom site UAE contact',
+              "UAE",
+              5,
+              "model_specific"
+            ),
+            aiSearchQuery(
+              '"telecom boards" cards maintenance "Saudi Arabia" contact',
+              "Saudi Arabia",
+              6,
+              "model_specific"
+            ),
+            aiSearchQuery(
+              '"RAN equipment" maintenance UAE services',
+              "UAE",
+              7,
+              "brand_ecosystem"
+            ),
+            aiSearchQuery(
+              '"telecom spare parts" replenishment "Saudi Arabia" contact',
+              "Saudi Arabia",
+              8,
+              "brand_ecosystem"
+            )
+          ]
+        };
+      }
+
+      return {
+        queries: [
+          ...simpleAiQueriesForMarkets(input.targetMarkets).slice(0, 22),
+          ...Array.from({ length: 8 }, (_, index) =>
+            aiSearchQuery(
+              `infrastructure equipment service ${input.targetMarkets[index % input.targetMarkets.length]}`,
+              input.targetMarkets[index % input.targetMarkets.length] ?? "UAE",
+              index + 23,
+              "model_specific"
+            )
+          )
+        ]
+      };
+    });
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt: "Find 5G telecom equipment customers",
+      targetCount: 20
+    });
+    const queryText = result.searchQueries.map((query) => query.query).join("\n");
+    const persistedPayload = prisma.leadTask.create.mock.calls[0]?.[0].data.inputPayload;
+
+    expect(ai.generateSearchStrategy).toHaveBeenCalledTimes(2);
+    expect(ai.generateSearchStrategy.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        refillContext: expect.objectContaining({
+          requiredAdditionalQueries: 8,
+          acceptedQueries: expect.arrayContaining([
+            expect.objectContaining({ query: expect.stringContaining("base station maintenance") })
+          ]),
+          rejectedQueries: expect.arrayContaining([
+            expect.objectContaining({ reason: "missing_product_customer_or_market_signal" })
+          ])
+        })
+      })
+    );
+    expect(result.searchQueries).toHaveLength(30);
+    expect(queryText).toContain('"Huawei OLT MA5800" replacement UAE contact');
+    expect(queryText).toContain('"waterproof insulating tape" telecom site UAE contact');
+    expect(queryText).not.toContain("infrastructure equipment service");
+    expect(persistedPayload.profileSignals.aiPlanning).toEqual(
+      expect.objectContaining({
+        querySource: "gpt55_only",
+        gptSearchQueryCount: 30,
+        gptRefillAttempts: 1,
+        gptRefillAcceptedCount: 8,
+        fallbackQueryCount: 0
+      })
+    );
   });
 
   it("sanitizes or rejects mixed-country GPT search queries before persisting them", async () => {
@@ -620,11 +944,15 @@ describe("AgentWorkflowService", () => {
   it("reads profile websites and stores evidence-based analysis in the task payload", async () => {
     const prisma = createPrismaMock();
     const websiteContent = createWebsiteContentMock();
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
     const service = new AgentWorkflowService(
       prisma as any,
       undefined,
       undefined,
-      websiteContent as any
+      websiteContent as any,
+      ai as any
     );
 
     const result = await service.createTaskWithTimeline("user-1", {
@@ -653,16 +981,19 @@ describe("AgentWorkflowService", () => {
             summary: { attempted: 3, read: 2, failed: 1 }
           }),
           productProfileAnalysis: expect.objectContaining({
-            source: "website_content",
-            keyProducts: expect.arrayContaining(["Ericsson AIR", "Huawei WBBP"])
+            keyProducts: expect.arrayContaining(["RRU", "BBU"])
           }),
           customerProfileAnalysis: expect.objectContaining({
-            source: "website_content",
-            idealCustomerTypes: expect.arrayContaining(["telecom system integrator"])
+            idealCustomerTypes: expect.arrayContaining(["telecom maintenance contractor"])
           }),
           profileSignals: expect.objectContaining({
             productUrlsRead: ["https://telecorenet.com/products"],
-            failedUrlCount: 1
+            failedUrlCount: 1,
+            aiPlanning: expect.objectContaining({
+              querySource: "gpt55_only",
+              gptSearchQueryCount: 30,
+              fallbackQueryCount: 0
+            })
           })
         })
       })
@@ -673,7 +1004,16 @@ describe("AgentWorkflowService", () => {
     const prisma = createPrismaMock();
     prisma.productProfile.findUnique.mockResolvedValue(null);
     prisma.customerProfile.findUnique.mockResolvedValue(null);
-    const service = new AgentWorkflowService(prisma as any);
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
 
     const result = await service.createTaskWithTimeline("user-1", {
       prompt: "Find Qatar microwave backhaul integrators"
@@ -917,6 +1257,99 @@ describe("AgentWorkflowService", () => {
     });
   });
 
+  it("passes full target-market context to qualification instead of only the query country pool", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValueOnce({
+      id: "task-1",
+      userId: "user-1",
+      inputPayload: {
+        customerProfile: {
+          targetRegions: ["Middle East", "Africa", "Brazil", "Russia", "Ukraine"]
+        },
+        keywordGroups: {
+          productTerms: ["telecom equipment", "RRU", "BBU"],
+          longTailProductTerms: ["Huawei RRU spare parts"],
+          customerIntentTerms: ["telecom contractor", "tower maintenance"],
+          marketTerms: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"]
+        }
+      },
+      searchQueries: [
+        {
+          id: "query-1",
+          query: "telecom contractor Oman contact",
+          country: "Oman",
+          createdAt: new Date("2026-04-30T01:00:00.000Z")
+        }
+      ]
+    });
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    expect(leadQualification.saveCandidates).toHaveBeenCalledWith(
+      "task-1",
+      expect.any(Array),
+      expect.objectContaining({
+        targetRegions: expect.arrayContaining([
+          "UAE",
+          "Saudi Arabia",
+          "Qatar",
+          "Oman",
+          "Kuwait",
+          "Middle East",
+          "Africa",
+          "Brazil",
+          "Russia",
+          "Ukraine"
+        ])
+      }),
+      "Oman"
+    );
+  });
+
+  it("does not count macro-market countries as country issues in the first-stage quality gate", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findUnique.mockResolvedValueOnce({
+      inputPayload: {
+        customerProfile: {
+          targetRegions: ["Middle East", "Africa", "Brazil", "Russia", "Ukraine"]
+        },
+        keywordGroups: {
+          productTerms: ["telecom equipment", "RRU", "BBU"],
+          customerIntentTerms: ["telecom contractor", "tower maintenance"],
+          marketTerms: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"]
+        }
+      }
+    });
+    prisma.leadCandidate.findMany.mockResolvedValueOnce([
+      {
+        status: "review",
+        country: "BAHRAIN",
+        countryConfidence: "high",
+        countryConflict: false
+      },
+      {
+        status: "qualified",
+        country: "SAUDI ARABIA",
+        countryConfidence: "high",
+        countryConflict: false
+      }
+    ]);
+    prisma.searchQuery.count.mockResolvedValueOnce(15);
+    const service = new AgentWorkflowService(prisma as any);
+
+    const result = await (service as any).evaluateFirstStageSearchQuality("task-1");
+
+    expect(result.countryIssueCandidates).toBe(0);
+    expect(result.shouldStop).toBe(false);
+  });
+
   it("marks failed Brave searches without breaking the whole task endpoint", async () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
@@ -1049,7 +1482,7 @@ describe("AgentWorkflowService", () => {
     expect(leadQualification.saveCandidates.mock.calls[0]?.[1]).toHaveLength(20);
   });
 
-  it("preserves pending queries and records fallback suggestions when the first-stage quality gate trips", async () => {
+  it("preserves pending queries without generating fallback suggestions when the first-stage quality gate trips", async () => {
     const prisma = createPrismaMock();
     prisma.leadTask.findUnique.mockResolvedValueOnce({
       inputPayload: {
@@ -1116,15 +1549,8 @@ describe("AgentWorkflowService", () => {
       remainingQueries: 2,
       reasons: ["country_issue_ratio_high"]
     });
-    expect(result.suggestedFallbackQueryCount).toBeGreaterThan(0);
-    expect(result.suggestedFallbackQueries).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          batchType: "quality_fallback_suggestion",
-          query: expect.stringMatching(/\b(Kenya|Morocco)\b/)
-        })
-      ])
-    );
+    expect(result.suggestedFallbackQueryCount).toBeUndefined();
+    expect(result.suggestedFallbackQueries).toBeUndefined();
     expect(prisma.searchQuery.updateMany).not.toHaveBeenCalled();
     expect(prisma.searchQuery.deleteMany).not.toHaveBeenCalled();
     expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
@@ -1138,14 +1564,7 @@ describe("AgentWorkflowService", () => {
               pendingQueryCount: 2,
               remainingQueries: 2
             }),
-            qualityFallbackSuggestion: expect.objectContaining({
-              action: "quality_fallback_suggestion",
-              status: "suggestion_only",
-              queryCount: expect.any(Number),
-              sampleQueries: expect.arrayContaining([
-                expect.objectContaining({ batchType: "quality_fallback_suggestion" })
-              ])
-            })
+            qualityFallbackSuggestion: null
           })
         })
       })

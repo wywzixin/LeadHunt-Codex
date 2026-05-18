@@ -14,7 +14,6 @@ import {
   MemorySaver,
   createKeywordGroups,
   createInitialWorkflowState,
-  generateSearchQueries,
   getSearchStrategyLibrary,
   countryToSearchApiCode,
   countryToSite as marketToSite,
@@ -26,14 +25,13 @@ import {
   type LeadHuntWorkflowState,
   type WorkflowStepStatus,
   type WorkflowStep,
-  type GeneratedSearchQuery,
   type OperatorSource,
   createLeadHuntWorkflowGraph,
   createInitialWorkflowSteps,
   interrupt
 } from "@leadhunt/agent";
 import { Prisma } from "@prisma/client";
-import { LeadHuntAiService } from "../ai/leadhunt-ai.service.js";
+import { LeadHuntAiService, type SearchStrategyInput } from "../ai/leadhunt-ai.service.js";
 import type {
   CandidateBuyerEvaluationResult,
   CustomerProfileAnalysis,
@@ -135,6 +133,14 @@ type EmailReviewResume = {
 const MAX_SYNC_SEARCH_QUERY_LIMIT = 500;
 const MAX_CANDIDATE_RESULTS_PER_QUERY = 20;
 const DEFAULT_SEARCH_QUERY_COUNT = 30;
+const SEARCH_STRATEGY_INITIAL_QUERY_COUNT = 15;
+const MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT = SEARCH_STRATEGY_INITIAL_QUERY_COUNT;
+const SEARCH_STRATEGY_MAX_REFILL_ATTEMPTS = 2;
+const PRODUCT_PROFILE_TIMEOUT_MS = 75_000;
+const CUSTOMER_PROFILE_TIMEOUT_MS = 75_000;
+const KEYWORD_EXPANSION_TIMEOUT_MS = 90_000;
+const SEARCH_STRATEGY_TIMEOUT_MS = 90_000;
+const SEARCH_STRATEGY_REFILL_TIMEOUT_MS = 30_000;
 const FIRST_STAGE_SEARCH_QUERY_LIMIT = 15;
 const RUNNING_TASK_RECOVERY_LIMIT = 5;
 const RUNNING_TASK_RECOVERY_WINDOW_HOURS = 24;
@@ -457,7 +463,17 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
     this.autonomousTaskIds.add(taskId);
     void this.runAutonomousLeadDiscovery(userId, taskId, input, options)
-      .catch((error) => this.markAutonomousDiscoveryFailed(taskId, error, "brave_search"))
+      .catch(async (error) => {
+        const hasQueries = await this.prisma.searchQuery
+          .count({ where: { taskId } })
+          .then((count) => count > 0)
+          .catch(() => false);
+        if (hasQueries) {
+          await this.markAutonomousDiscoveryFailed(taskId, error, "brave_search");
+        } else {
+          await this.markPlanningWorkflowFailed(taskId, error);
+        }
+      })
       .finally(() => {
         this.autonomousTaskIds.delete(taskId);
       });
@@ -583,11 +599,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         });
       }
 
-      await this.pauseAtHumanApproval(taskId, "human_approval");
+      const pausedWorkflow = await this.pauseWorkflowAt(taskId, "human_approval");
       await this.prisma.leadTask.update({
         where: { id: taskId },
         data: { status: "paused" }
       });
+      await this.persistWorkflowSnapshot(taskId, pausedWorkflow, "search-to-email");
     } catch (error) {
       if (!hasSearchPlan) {
         await this.markPlanningWorkflowFailed(taskId, error);
@@ -612,13 +629,32 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
   private async markPlanningWorkflowFailed(taskId: string, error: unknown) {
     const message = searchErrorMessage(error);
-    await Promise.all([
+    const results = await Promise.allSettled([
       this.markStepFailed(taskId, "plan_search_queries", message),
       this.prisma.leadTask.update({
         where: { id: taskId },
         data: { status: "failed" }
       })
     ]);
+    await this.persistWorkflowSnapshot(
+      taskId,
+      this.workflowFailedState("plan_search_queries", message) as LeadHuntWorkflowState,
+      "planning"
+    ).catch((snapshotError) => {
+      console.warn(
+        "LeadHunt planning failure snapshot update failed",
+        searchErrorMessage(snapshotError)
+      );
+    });
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") {
+      console.warn(
+        "LeadHunt planning failure status update failed",
+        searchErrorMessage(failed.reason),
+        "original:",
+        message
+      );
+    }
   }
 
   private async markAutonomousDiscoveryFailed(
@@ -634,6 +670,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         data: { status: "failed" }
       })
     ]);
+    await this.persistWorkflowSnapshot(
+      taskId,
+      this.workflowFailedState(nodeName, message) as LeadHuntWorkflowState,
+      nodeName === "plan_search_queries" ? "planning" : "search-to-email"
+    ).catch((snapshotError) => {
+      console.warn(
+        "LeadHunt discovery failure snapshot update failed",
+        searchErrorMessage(snapshotError)
+      );
+    });
   }
 
   private async runSemiManagedWorkflowToSearchPlan(
@@ -670,6 +716,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         this.completeWorkflowStep(taskId, "plan_search_queries", async () => {
           const existingCount = await this.prisma.searchQuery.count({ where: { taskId } });
           if (existingCount === 0) {
+            if (context.searchQueries.length < MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT) {
+              throw new Error(
+                `GPT-5.5 search plan produced ${context.searchQueries.length} executable queries; at least ${MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT} are required. No deterministic fallback queries were added.`
+              );
+            }
             await this.prisma.searchQuery.createMany({
               data: context.searchQueries.map((query) => ({
                 taskId,
@@ -688,7 +739,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
           return {
             queryCount: existingCount || context.searchQueries.length,
-            createdCount: existingCount === 0 ? context.searchQueries.length : 0
+            createdCount: existingCount === 0 ? context.searchQueries.length : 0,
+            aiPlanning: context.profileSignals.aiPlanning ?? null
           };
         })
     };
@@ -838,31 +890,134 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   async getTaskForUser(userId: string, taskId: string) {
     const task = await this.prisma.leadTask.findFirst({
       where: { id: taskId, userId },
-      include: {
+      select: {
+        id: true,
+        userId: true,
+        mode: true,
+        status: true,
+        targetCount: true,
+        inputPayload: true,
+        createdAt: true,
+        updatedAt: true,
         agentSteps: {
+          select: {
+            id: true,
+            taskId: true,
+            nodeName: true,
+            status: true,
+            input: true,
+            output: true,
+            error: true,
+            startedAt: true,
+            endedAt: true,
+            createdAt: true
+          },
           orderBy: { createdAt: "asc" }
         },
         searchQueries: {
-          include: {
-            searchResults: true
+          select: {
+            id: true,
+            taskId: true,
+            provider: true,
+            operatorSource: true,
+            executionStatus: true,
+            operatorName: true,
+            strategyTemplate: true,
+            query: true,
+            keywordGroups: true,
+            country: true,
+            resultCount: true,
+            qualifiedCount: true,
+            effectivenessScore: true,
+            createdAt: true,
+            searchResults: {
+              select: {
+                id: true,
+                title: true,
+                url: true,
+                snippet: true,
+                domain: true,
+                createdAt: true
+              },
+              orderBy: { createdAt: "asc" },
+              take: 8
+            }
           },
           orderBy: { createdAt: "asc" }
         },
         leadCandidates: {
-          include: {
-            contacts: true,
-            icpScore: true,
-            crmLead: true,
+          select: {
+            id: true,
+            taskId: true,
+            companyName: true,
+            website: true,
+            country: true,
+            queryCountry: true,
+            inferredCountry: true,
+            countryEvidence: true,
+            countryConfidence: true,
+            countryConflict: true,
+            sourceUrl: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+            contacts: {
+              select: {
+                id: true,
+                type: true,
+                value: true,
+                sourceUrl: true,
+                createdAt: true
+              },
+              orderBy: { createdAt: "asc" },
+              take: 24
+            },
+            icpScore: {
+              select: {
+                id: true,
+                score: true,
+                grade: true,
+                reasons: true,
+                createdAt: true
+              }
+            },
+            crmLead: {
+              select: {
+                id: true,
+                stage: true
+              }
+            },
             followupTasks: {
-              orderBy: { dueAt: "asc" }
+              select: {
+                id: true,
+                type: true,
+                status: true,
+                dueAt: true,
+                note: true
+              },
+              orderBy: { dueAt: "asc" },
+              take: 5
             },
             outreachDrafts: {
-              include: {
+              select: {
+                id: true,
+                status: true,
+                subject: true,
+                createdAt: true,
+                updatedAt: true,
                 sendLogs: {
-                  orderBy: { createdAt: "desc" }
+                  select: {
+                    id: true,
+                    status: true,
+                    sentAt: true,
+                    createdAt: true
+                  },
+                  orderBy: { createdAt: "desc" },
+                  take: 3
                 }
               },
-              orderBy: { createdAt: "desc" }
+              orderBy: { createdAt: "desc" },
+              take: 3
             }
           },
           orderBy: { createdAt: "asc" }
@@ -874,7 +1029,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException("Lead task not found");
     }
 
-    return task;
+    return compactTaskForClient(task);
   }
 
   async getTaskEventsForUser(userId: string, taskId: string) {
@@ -1407,25 +1562,6 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     const pendingQueries = task.searchQueries.filter(
       (query) => query.executionStatus === "pending"
     );
-    const payload = parseTaskPayload(task.inputPayload);
-    const criteria = buildIcpCriteria(payload);
-    const countryPool = normalizeTargetMarkets(criteria.targetRegions) ??
-      normalizeTargetMarkets(asStringArray(payload.keywordGroups?.marketTerms)) ?? ["UAE"];
-    const keywordGroups = keywordGroupsFromPayload(payload, countryPool);
-    const channelCustomersRequested = isChannelCustomerRequest(payload.prompt ?? "");
-    const existingQueryTexts = new Set(
-      task.searchQueries.map((query) => query.query.toLowerCase())
-    );
-    const suggestedFallbackQueries = pendingQueries.length
-      ? buildQualityFallbackSearchQueries(
-          keywordGroups,
-          countryPool,
-          channelCustomersRequested,
-          pendingQueries.length,
-          existingQueryTexts
-        )
-      : [];
-
     const remainingQueries = await this.countPendingSearchQueries(taskId);
     await this.updateTaskPayloadAfterQualityGatePreservation(taskId, task.inputPayload, {
       pendingQueries: pendingQueries.map((query) => ({
@@ -1434,7 +1570,6 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         strategyTemplate: query.strategyTemplate,
         operatorName: query.operatorName
       })),
-      suggestedFallbackQueries,
       qualityGate,
       remainingQueries
     });
@@ -1446,14 +1581,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       preservedPendingCount: pendingQueries.length,
       remainingQueries,
       reasons: qualityGate.reasons,
-      suggestedFallbackQueryCount: suggestedFallbackQueries.length,
       countries: uniqueStrings(pendingQueries.map((query) => query.country ?? "").filter(Boolean)),
-      sampleQueries: pendingQueries.slice(0, 5).map((query) => query.query),
-      suggestedFallbackQueries: suggestedFallbackQueries.slice(0, 5).map((query) => ({
-        query: query.query,
-        country: query.country,
-        batchType: "quality_fallback_suggestion"
-      }))
+      sampleQueries: pendingQueries.slice(0, 5).map((query) => query.query)
     };
   }
 
@@ -1467,7 +1596,6 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         strategyTemplate: string | null;
         operatorName: string | null;
       }>;
-      suggestedFallbackQueries: PlannedSearchQuery[];
       qualityGate: { reasons: string[]; executedQueryCount: number };
       remainingQueries: number;
     }
@@ -1490,16 +1618,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
               remainingQueries: fallback.remainingQueries,
               samplePendingQueries: fallback.pendingQueries.slice(0, 10)
             },
-            qualityFallbackSuggestion: {
-              action: "quality_fallback_suggestion",
-              status: "suggestion_only",
-              queryCount: fallback.suggestedFallbackQueries.length,
-              sampleQueries: fallback.suggestedFallbackQueries.slice(0, 10).map((query) => ({
-                query: query.query,
-                country: query.country,
-                batchType: "quality_fallback_suggestion"
-              }))
-            }
+            qualityFallbackSuggestion: null
           }
         }) as Prisma.InputJsonValue
       }
@@ -1891,10 +2010,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     await this.pauseAtHumanApproval(taskId, nodeName);
 
     return {
+      taskId,
       status: "paused" as const,
       currentNode: nodeName,
       pausedAt: nodeName,
-      steps: [this.workflowStep(nodeName, "waiting", { waitingForHuman: true })]
+      steps: [this.workflowStep(nodeName, "waiting", { waitingForHuman: true })],
+      error: null
     };
   }
 
@@ -2111,10 +2232,6 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     const ruleKeywordGroups = createKeywordGroups({
       ...profileKeywordInput
     });
-    const ruleSearchQueries = generateSearchQueries({
-      ...profileKeywordInput,
-      minQueryCount: DEFAULT_SEARCH_QUERY_COUNT
-    });
     const aiPlanning = await this.buildAiPlanningContext({
       taskId,
       input,
@@ -2125,7 +2242,6 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       ruleProductProfileAnalysis,
       ruleCustomerProfileAnalysis,
       ruleKeywordGroups,
-      ruleSearchQueries,
       targetMarkets
     });
     const productProfileAnalysis = aiPlanning.productProfileAnalysis;
@@ -2190,7 +2306,6 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     ruleProductProfileAnalysis: Record<string, unknown>;
     ruleCustomerProfileAnalysis: Record<string, unknown>;
     ruleKeywordGroups: KeywordGroups;
-    ruleSearchQueries: GeneratedSearchQuery[];
     targetMarkets?: string[];
   }) {
     const fallbackReasons: string[] = [];
@@ -2201,11 +2316,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       input.ruleKeywordGroups,
       channelCustomersRequested
     );
-    let searchQueries = limitPlannedSearchQueries(
-      mapGeneratedSearchQueries(input.ruleSearchQueries)
-    );
+    let searchQueries: PlannedSearchQuery[] = [];
     let aiKeywordExpansion: KeywordExpansionResult | null = null;
     let aiQueryCount = 0;
+    let gptRefillAttempts = 0;
+    let gptRefillAcceptedCount = 0;
     let rejectedAiQueries: Array<{ query: string; country: string; reason: string }> = [];
 
     if (!this.leadHuntAiService) {
@@ -2216,8 +2331,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         searchQueries,
         profileSignals: {
           enabled: false,
-          querySource: "deterministic_fallback",
-          fallbackReasons: ["LeadHuntAiService is not available in AgentModule"]
+          querySource: "gpt55_unavailable",
+          fallbackQueryCount: 0,
+          fallbackReasons: ["LeadHuntAiService is required for search planning"]
         }
       };
     }
@@ -2234,12 +2350,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.markOptionalPlanningStepRunning(input.taskId, "analyze_product_profile");
       if (input.product?.websiteUrl) {
-        productProfileAnalysis = await this.leadHuntAiService.analyzeProductProfile({
-          websiteUrl: input.product.websiteUrl,
-          productPageUrl: input.product.productPageUrl,
-          documentUrls: input.product.documentUrls ?? [],
-          notes: productEvidenceNotes
-        });
+        productProfileAnalysis = await withTimeout(
+          this.leadHuntAiService.analyzeProductProfile({
+            websiteUrl: input.product.websiteUrl,
+            productPageUrl: input.product.productPageUrl,
+            documentUrls: input.product.documentUrls ?? [],
+            notes: productEvidenceNotes
+          }),
+          PRODUCT_PROFILE_TIMEOUT_MS,
+          "GPT-5.5 product profile analysis"
+        );
       } else {
         fallbackReasons.push(
           "No product website URL was saved; product analysis used deterministic evidence."
@@ -2262,14 +2382,18 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         input.customer?.referenceCustomerUrls?.length ||
         input.customer?.notes
       ) {
-        customerProfileAnalysis = await this.leadHuntAiService.analyzeCustomerProfile({
-          targetRegions: input.targetMarkets?.length
-            ? input.targetMarkets
-            : (input.customer?.targetRegions ?? ["Global"]),
-          referenceCustomerUrls: input.customer?.referenceCustomerUrls ?? [],
-          crmSampleIds: input.customer?.crmSampleIds ?? [],
-          notes: customerEvidenceNotes
-        });
+        customerProfileAnalysis = await withTimeout(
+          this.leadHuntAiService.analyzeCustomerProfile({
+            targetRegions: input.targetMarkets?.length
+              ? input.targetMarkets
+              : (input.customer?.targetRegions ?? ["Global"]),
+            referenceCustomerUrls: input.customer?.referenceCustomerUrls ?? [],
+            crmSampleIds: input.customer?.crmSampleIds ?? [],
+            notes: customerEvidenceNotes
+          }),
+          CUSTOMER_PROFILE_TIMEOUT_MS,
+          "GPT-5.5 customer profile analysis"
+        );
       } else {
         fallbackReasons.push(
           "No customer profile was saved; customer analysis used deterministic defaults."
@@ -2287,11 +2411,15 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.markOptionalPlanningStepRunning(input.taskId, "expand_keywords");
-      aiKeywordExpansion = await this.leadHuntAiService.expandKeywords({
-        userTask: input.input.prompt,
-        productProfile: productProfileAnalysis as ProductProfileAnalysis,
-        customerProfile: customerProfileAnalysis as CustomerProfileAnalysis
-      });
+      aiKeywordExpansion = await withTimeout(
+        this.leadHuntAiService.expandKeywords({
+          userTask: input.input.prompt,
+          productProfile: productProfileAnalysis as ProductProfileAnalysis,
+          customerProfile: customerProfileAnalysis as CustomerProfileAnalysis
+        }),
+        KEYWORD_EXPANSION_TIMEOUT_MS,
+        "GPT-5.5 keyword expansion"
+      );
       keywordGroups = mergeKeywordGroups(
         keywordGroupsFromAiExpansion(aiKeywordExpansion, input.targetMarkets),
         input.ruleKeywordGroups
@@ -2314,29 +2442,89 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       const searchTargetMarkets = input.targetMarkets?.length
         ? input.targetMarkets
         : keywordGroups.marketTerms;
-      const searchPlan = await this.leadHuntAiService.generateSearchStrategy({
-        keywordGroups: aiKeywordExpansion ?? keywordExpansionFromKeywordGroups(keywordGroups),
+      const searchStrategyInput = buildSearchStrategyInput({
+        keywordGroups,
+        aiKeywordExpansion,
+        productProfileAnalysis: productProfileAnalysis as ProductProfileAnalysis,
+        customerProfileAnalysis: customerProfileAnalysis as CustomerProfileAnalysis,
         targetMarkets: searchTargetMarkets,
-        operatorLibrary: compactOperatorLibrary(channelCustomersRequested),
-        minQueryCount: DEFAULT_SEARCH_QUERY_COUNT
+        operatorLibrary: compactOperatorLibrary(),
+        minQueryCount: SEARCH_STRATEGY_INITIAL_QUERY_COUNT
       });
-      const normalization = normalizeAiSearchPlan(
+      const searchPlan = await withTimeout(
+        this.leadHuntAiService.generateSearchStrategy(searchStrategyInput),
+        SEARCH_STRATEGY_TIMEOUT_MS,
+        "GPT-5.5 search strategy generation"
+      );
+      let normalization = normalizeAiSearchPlan(
         searchPlan,
         keywordGroups,
-        input.ruleSearchQueries,
         DEFAULT_SEARCH_QUERY_COUNT,
         searchTargetMarkets,
         channelCustomersRequested
       );
-      const aiQueries = limitPlannedSearchQueries(normalization.queries);
+      let aiQueries = limitPlannedSearchQueries(normalization.queries);
       rejectedAiQueries = normalization.rejected;
+
+      while (
+        aiQueries.length > 0 &&
+        aiQueries.length < DEFAULT_SEARCH_QUERY_COUNT &&
+        gptRefillAttempts < SEARCH_STRATEGY_MAX_REFILL_ATTEMPTS
+      ) {
+        const queryCountBeforeRefill = aiQueries.length;
+        gptRefillAttempts += 1;
+        try {
+          const requiredAdditionalQueries = DEFAULT_SEARCH_QUERY_COUNT - aiQueries.length;
+          const refillPlan = await withTimeout(
+            this.leadHuntAiService.generateSearchStrategy({
+              ...searchStrategyInput,
+              minQueryCount: Math.max(
+                10,
+                Math.min(SEARCH_STRATEGY_INITIAL_QUERY_COUNT, requiredAdditionalQueries)
+              ),
+              refillContext: {
+                requiredAdditionalQueries,
+                acceptedQueries: aiQueries.map((query) => ({
+                  query: query.query,
+                  country: query.country,
+                  strategyType: query.strategyType
+                })),
+                rejectedQueries: rejectedAiQueries
+              }
+            }),
+            SEARCH_STRATEGY_REFILL_TIMEOUT_MS,
+            "GPT-5.5 search strategy refill"
+          );
+          normalization = normalizeAiSearchPlan(
+            refillPlan,
+            keywordGroups,
+            DEFAULT_SEARCH_QUERY_COUNT,
+            searchTargetMarkets,
+            channelCustomersRequested,
+            aiQueries
+          );
+          aiQueries = limitPlannedSearchQueries(normalization.queries);
+          gptRefillAcceptedCount += Math.max(0, aiQueries.length - queryCountBeforeRefill);
+          rejectedAiQueries = uniqueRejectedAiQueries([
+            ...rejectedAiQueries,
+            ...normalization.rejected
+          ]);
+          if (aiQueries.length <= queryCountBeforeRefill) {
+            break;
+          }
+        } catch (error) {
+          fallbackReasons.push(`GPT search refill failed: ${searchErrorMessage(error)}`);
+          break;
+        }
+      }
+
       aiQueryCount = aiQueries.filter(
         (query) => query.templateId === "gpt55_search_strategy"
       ).length;
       searchQueries = aiQueries;
     } catch (error) {
       fallbackReasons.push(`GPT search strategy failed: ${searchErrorMessage(error)}`);
-      searchQueries = limitPlannedSearchQueries(mapGeneratedSearchQueries(input.ruleSearchQueries));
+      searchQueries = [];
     }
 
     return {
@@ -2346,9 +2534,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       searchQueries,
       profileSignals: {
         enabled: true,
-        querySource: aiQueryCount ? "gpt55_with_deterministic_fallback" : "deterministic_fallback",
+        querySource: aiQueryCount ? "gpt55_only" : "gpt55_failed_or_rejected",
         gptSearchQueryCount: aiQueryCount,
-        fallbackQueryCount: searchQueries.length - aiQueryCount,
+        gptRefillAttempts,
+        gptRefillAcceptedCount,
+        fallbackQueryCount: 0,
         rejectedQueryCount: rejectedAiQueries.length,
         rejectedQueries: rejectedAiQueries,
         fallbackReasons
@@ -2424,23 +2614,29 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   }
 }
 
-function mapGeneratedSearchQueries(queries: GeneratedSearchQuery[]): PlannedSearchQuery[] {
-  return queries.map((query) => ({
-    provider: query.provider,
-    operatorSource: query.operatorSource,
-    executionStatus: query.executionStatus,
-    operatorName: query.operatorName,
-    strategyTemplate: query.strategyTemplate,
-    query: query.query,
-    keywordGroups: query.keywordGroups,
-    country: query.country,
-    effectivenessScore: query.effectivenessScore,
-    templateId: query.templateId
-  }));
-}
-
 function limitPlannedSearchQueries(queries: PlannedSearchQuery[]) {
   return queries.slice(0, DEFAULT_SEARCH_QUERY_COUNT);
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function keywordGroupsFromAiExpansion(
@@ -2480,6 +2676,227 @@ function keywordExpansionFromKeywordGroups(keywordGroups: KeywordGroups): Keywor
     industryScenarioTerms: keywordGroups.scenarioTerms.slice(0, 20),
     exclusionTerms: keywordGroups.excludeTerms.slice(0, 20)
   };
+}
+
+function buildSearchStrategyInput(input: {
+  keywordGroups: KeywordGroups;
+  aiKeywordExpansion: KeywordExpansionResult | null;
+  productProfileAnalysis: ProductProfileAnalysis;
+  customerProfileAnalysis: CustomerProfileAnalysis;
+  targetMarkets: string[];
+  operatorLibrary: unknown;
+  minQueryCount: number;
+}): SearchStrategyInput {
+  const compactKeywordGroups = compactKeywordExpansionForSearchStrategy(
+    input.aiKeywordExpansion ?? keywordExpansionFromKeywordGroups(input.keywordGroups),
+    input.keywordGroups
+  );
+
+  return {
+    keywordGroups: compactKeywordGroups,
+    productProfile: compactProductProfileForSearchStrategy(
+      input.productProfileAnalysis,
+      compactKeywordGroups
+    ),
+    customerProfile: compactCustomerProfileForSearchStrategy(
+      input.customerProfileAnalysis,
+      compactKeywordGroups
+    ),
+    targetMarkets: input.targetMarkets,
+    operatorLibrary: input.operatorLibrary,
+    minQueryCount: input.minQueryCount
+  };
+}
+
+function compactKeywordExpansionForSearchStrategy(
+  expansion: KeywordExpansionResult,
+  keywordGroups: KeywordGroups
+): KeywordExpansionResult {
+  const productGroups = selectSearchPlanningProductGroups(expansion, keywordGroups);
+  const modelTerms = selectSearchPlanningModelTerms(expansion, keywordGroups);
+  const scenarioTerms = selectSearchPlanningScenarioTerms(expansion, keywordGroups);
+  const buyerTerms = selectSearchPlanningBuyerTerms(expansion, keywordGroups);
+
+  return {
+    primaryProducts: ensureNonEmpty(productGroups.slice(0, 8), expansion.primaryProducts),
+    relatedProducts: ensureNonEmpty(
+      uniqueStrings([...productGroups.slice(8, 14), ...modelTerms.slice(0, 6)]),
+      expansion.relatedProducts
+    ).slice(0, 14),
+    longTailProducts: ensureNonEmpty(modelTerms, expansion.longTailProducts).slice(0, 16),
+    upstreamDownstreamTerms: ensureNonEmpty(scenarioTerms, expansion.upstreamDownstreamTerms).slice(
+      0,
+      12
+    ),
+    purchaseIntentTerms: ensureNonEmpty(buyerTerms, expansion.purchaseIntentTerms).slice(0, 14),
+    targetMarketTerms: ensureNonEmpty(
+      uniqueStrings([...keywordGroups.marketTerms, ...expansion.targetMarketTerms]),
+      ["UAE"]
+    ).slice(0, 8),
+    industryScenarioTerms: ensureNonEmpty(scenarioTerms, expansion.industryScenarioTerms).slice(
+      0,
+      12
+    ),
+    exclusionTerms: uniqueStrings(expansion.exclusionTerms)
+      .filter((term) => isSafeQueryNegativeTerm(term))
+      .filter((term) => !isMainCustomerIntelligenceQuery(term))
+      .slice(0, 12)
+  };
+}
+
+function compactProductProfileForSearchStrategy(
+  profile: ProductProfileAnalysis,
+  keywordGroups: KeywordExpansionResult
+): ProductProfileAnalysis {
+  return {
+    ...profile,
+    productCategories: compactStringList(asStringArray(profile.productCategories), 8),
+    keyProducts: compactStringList(
+      uniqueStrings([
+        ...keywordGroups.primaryProducts,
+        ...keywordGroups.relatedProducts,
+        ...keywordGroups.longTailProducts,
+        ...asStringArray(profile.keyProducts)
+      ]),
+      24
+    ),
+    targetUseCases: compactStringList(asStringArray(profile.targetUseCases), 10),
+    buyerPainPoints: compactStringList(asStringArray(profile.buyerPainPoints), 8),
+    supplyCapabilities: compactStringList(asStringArray(profile.supplyCapabilities), 8),
+    searchKeywords: compactStringList(
+      uniqueStrings([...keywordGroups.primaryProducts, ...keywordGroups.relatedProducts]),
+      20
+    ),
+    negativeKeywords: compactStringList(
+      asStringArray(profile.negativeKeywords).filter((term) => isSafeQueryNegativeTerm(term)),
+      10
+    ),
+    evidence: compactStringList(asStringArray(profile.evidence), 6, 180)
+  };
+}
+
+function compactCustomerProfileForSearchStrategy(
+  profile: CustomerProfileAnalysis,
+  keywordGroups: KeywordExpansionResult
+): CustomerProfileAnalysis {
+  return {
+    ...profile,
+    targetRegions: compactStringList(asStringArray(profile.targetRegions), 8),
+    idealCustomerTypes: compactStringList(asStringArray(profile.idealCustomerTypes), 12),
+    buyingSignals: compactStringList(asStringArray(profile.buyingSignals), 10, 180),
+    referenceCompanies: compactStringList(asStringArray(profile.referenceCompanies), 6),
+    industries: compactStringList(asStringArray(profile.industries), 10),
+    searchKeywords: compactStringList(
+      uniqueStrings([
+        ...keywordGroups.purchaseIntentTerms,
+        ...keywordGroups.upstreamDownstreamTerms,
+        ...asStringArray(profile.searchKeywords)
+      ]).filter((term) => !isMainCustomerIntelligenceQuery(term)),
+      18
+    ),
+    disqualifiers: compactStringList(asStringArray(profile.disqualifiers), 10),
+    evidence: compactStringList(asStringArray(profile.evidence), 6, 180)
+  };
+}
+
+function selectSearchPlanningProductGroups(
+  expansion: KeywordExpansionResult,
+  keywordGroups: KeywordGroups
+) {
+  const preferred = [
+    "5G telecom equipment",
+    "RAN equipment",
+    "base station equipment",
+    "RRU radio unit",
+    "remote radio unit",
+    "BBU baseband unit",
+    "baseband unit",
+    "AAU active antenna unit",
+    "OLT equipment",
+    "rectifier module",
+    "telecom power module",
+    "SFP optical module",
+    "microwave backhaul equipment",
+    "DAS equipment",
+    "small cell equipment",
+    "private 5G equipment",
+    "communication cables",
+    "telecom boards"
+  ];
+  const values = uniqueStrings([
+    ...preferred,
+    ...expansion.primaryProducts,
+    ...expansion.relatedProducts,
+    ...keywordGroups.productTerms
+  ]);
+
+  return values
+    .filter((term) => isSearchPlanningProductGroup(term))
+    .filter((term) => !isChannelCustomerTerm(term))
+    .slice(0, 18);
+}
+
+function selectSearchPlanningModelTerms(
+  expansion: KeywordExpansionResult,
+  keywordGroups: KeywordGroups
+) {
+  return uniqueStrings([
+    ...expansion.longTailProducts,
+    ...keywordGroups.longTailProductTerms,
+    ...keywordGroups.productTerms
+  ])
+    .filter((term) => hasSpecificModelOrSkuSignal(term) || /\b(?:huawei|zte|ericsson|nokia|eltek|alcatel-lucent)\b/i.test(term))
+    .filter((term) => !isMainCustomerIntelligenceQuery(term))
+    .slice(0, 16);
+}
+
+function selectSearchPlanningScenarioTerms(
+  expansion: KeywordExpansionResult,
+  keywordGroups: KeywordGroups
+) {
+  return uniqueStrings([
+    ...expansion.upstreamDownstreamTerms,
+    ...expansion.industryScenarioTerms,
+    ...keywordGroups.scenarioTerms
+  ])
+    .filter((term) => !isMainCustomerIntelligenceQuery(term))
+    .filter((term) => !/\b(?:procurement|rfq|tender|vendor registration)\b/i.test(term))
+    .slice(0, 14);
+}
+
+function selectSearchPlanningBuyerTerms(
+  expansion: KeywordExpansionResult,
+  keywordGroups: KeywordGroups
+) {
+  return uniqueStrings([...expansion.purchaseIntentTerms, ...keywordGroups.customerIntentTerms])
+    .filter((term) => !isMainCustomerIntelligenceQuery(term))
+    .filter((term) => !isChannelCustomerTerm(term))
+    .filter((term) => !/\b(?:procurement|purchasing|rfq|tender|vendor registration|supplier registration)\b/i.test(term))
+    .slice(0, 14);
+}
+
+function isSearchPlanningProductGroup(term: string) {
+  const normalized = term.trim().toLowerCase();
+  if (!normalized || normalized.length > 70 || isMainCustomerIntelligenceQuery(normalized)) {
+    return false;
+  }
+
+  return (
+    hasSpecificIndustryQueryContext(normalized) ||
+    /\b(?:huawei|zte|ericsson|nokia|eltek|alcatel-lucent)\b/i.test(normalized)
+  );
+}
+
+function compactStringList(values: string[], limit: number, maxLength = 90) {
+  return uniqueStrings(values)
+    .map((value) => value.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .map((value) => (value.length > maxLength ? `${value.slice(0, maxLength).trim()}...` : value))
+    .slice(0, limit);
+}
+
+function ensureNonEmpty(values: string[], fallback: string[]) {
+  return values.length ? values : fallback.slice(0, 1);
 }
 
 function mergeKeywordGroups(primary: KeywordGroups, fallback: KeywordGroups): KeywordGroups {
@@ -2557,8 +2974,6 @@ function isChannelOnlyQuery(query: string) {
   );
 }
 
-const channelTemplateIds = new Set(["direct_distributor_country", "distributor_exact_scenario"]);
-
 function constrainKeywordGroupMarkets(
   keywordGroups: KeywordGroups,
   targetMarkets: string[] | undefined
@@ -2574,18 +2989,17 @@ function constrainKeywordGroupMarkets(
   };
 }
 
-function compactOperatorLibrary(channelCustomersRequested = false) {
+function compactOperatorLibrary() {
   const library = getSearchStrategyLibrary();
   return {
     version: library.version,
-    operators: library.operators.map(compactStrategyTemplate),
-    templates: library.templates
+    operators: library.operators
       .filter(
-        (template) =>
-          template.executionStatus === "supported" || template.executionStatus === "experimental"
+        (operator) =>
+          operator.executionStatus === "supported" || operator.executionStatus === "experimental"
       )
-      .filter((template) => channelCustomersRequested || !channelTemplateIds.has(template.id))
-      .map(compactStrategyTemplate)
+      .map(compactStrategyTemplate),
+    templates: []
   };
 }
 
@@ -2610,10 +3024,10 @@ function compactStrategyTemplate(template: {
 function normalizeAiSearchPlan(
   plan: SearchStrategyPlan,
   keywordGroups: KeywordGroups,
-  fallbackQueries: GeneratedSearchQuery[],
   minQueryCount: number,
   targetMarkets: string[] | undefined,
-  channelCustomersRequested = false
+  channelCustomersRequested = false,
+  existingQueries: PlannedSearchQuery[] = []
 ): {
   queries: PlannedSearchQuery[];
   rejected: Array<{ query: string; country: string; reason: string }>;
@@ -2621,8 +3035,8 @@ function normalizeAiSearchPlan(
   const countryPool = normalizeTargetMarkets(targetMarkets) ??
     normalizeTargetMarkets(keywordGroups.marketTerms) ?? ["UAE"];
   const supportedStatuses = new Set(["supported", "experimental"]);
-  const seen = new Set<string>();
-  const output: PlannedSearchQuery[] = [];
+  const seen = new Set<string>(existingQueries.map((query) => query.query.toLowerCase()));
+  const output: PlannedSearchQuery[] = [...existingQueries];
   const rejected: Array<{ query: string; country: string; reason: string }> = [];
 
   for (const query of [...plan.queries].sort(compareAiSearchQueries)) {
@@ -2680,6 +3094,15 @@ function normalizeAiSearchPlan(
       continue;
     }
 
+    if (isMainCustomerIntelligenceQuery(queryText)) {
+      rejected.push({
+        query: query.query,
+        country: query.country,
+        reason: "intelligence_query_not_main_customer_search"
+      });
+      continue;
+    }
+
     if (!hasEnoughQuerySignals(queryText, keywordGroups, country)) {
       rejected.push({
         query: query.query,
@@ -2718,44 +3141,23 @@ function normalizeAiSearchPlan(
     }
   }
 
-  for (const fallback of mapGeneratedSearchQueries(fallbackQueries)) {
-    if (output.length >= minQueryCount) {
-      break;
-    }
-    if (
-      fallback.country &&
-      !countryPool.some((country) => marketMatches(country, fallback.country ?? ""))
-    ) {
-      continue;
-    }
-    if (!channelCustomersRequested && isChannelOnlyQuery(fallback.query)) {
-      continue;
-    }
-    const key = fallback.query.toLowerCase();
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    output.push(fallback);
-  }
-
-  for (const supplemental of buildSupplementalBuyerSearchQueries(
-    keywordGroups,
-    countryPool,
-    channelCustomersRequested
-  )) {
-    if (output.length >= minQueryCount) {
-      break;
-    }
-    const key = supplemental.query.toLowerCase();
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    output.push(supplemental);
-  }
-
   return { queries: output, rejected };
+}
+
+function uniqueRejectedAiQueries(
+  rejected: Array<{ query: string; country: string; reason: string }>
+) {
+  const seen = new Set<string>();
+  const output: Array<{ query: string; country: string; reason: string }> = [];
+  for (const item of rejected) {
+    const key = `${item.query.toLowerCase()}|${item.country.toLowerCase()}|${item.reason}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(item);
+  }
+  return output;
 }
 
 function compareAiSearchQueries(
@@ -2805,7 +3207,7 @@ function isStrategyTypeWithinBudget(
     product_group: 9,
     brand_ecosystem: 3,
     model_specific: 6,
-    procurement_event: 3,
+    procurement_event: 0,
     channel: channelCustomersRequested ? 4 : 0,
     unknown: 6
   };
@@ -2851,211 +3253,6 @@ function resolveAiQueryCountry(
     : { country: null, reason: "no_target_market_available" };
 }
 
-function buildSupplementalBuyerSearchQueries(
-  keywordGroups: KeywordGroups,
-  countryPool: string[],
-  channelCustomersRequested: boolean
-): PlannedSearchQuery[] {
-  const countries = countryPool.length ? countryPool : ["UAE"];
-  const productGroups = selectSupplementalProductGroups(keywordGroups);
-  const modelTerms = selectSupplementalModelTerms(keywordGroups);
-  const coreProduct = productGroups[0] ?? keywordGroups.productTerms[0] ?? "equipment";
-  const secondaryProduct = productGroups[1] ?? coreProduct;
-  const queryFactories: Array<{
-    strategyType: string;
-    render: (country: string) => string;
-  }> = [
-    ...[
-      `"maintenance company" "${coreProduct}" {country} contact`,
-      `"field service company" "${coreProduct}" {country} contact`,
-      `"system integrator" "${coreProduct}" {country} contact`,
-      `"engineering contractor" "${coreProduct}" {country} contact`,
-      `"installation contractor" "${coreProduct}" {country} contact`,
-      `"operator" "${coreProduct}" procurement {country}`,
-      `"service provider" "${coreProduct}" {country} contact`,
-      `"vendor registration" "${coreProduct}" {country}`,
-      `"project contractor" "${secondaryProduct}" {country} contact`,
-      `"repair service" "${secondaryProduct}" {country} contact`,
-      `"network operations" "${secondaryProduct}" {country} contact`,
-      `"procurement" "${secondaryProduct}" {country}`
-    ].map((templateText) => ({
-      strategyType: "buyer_scenario",
-      render: (country: string) => templateText.replace("{country}", country)
-    })),
-    ...productGroups.map((product) => ({
-      strategyType: "product_group",
-      render: (country: string) => `"${product}" maintenance ${country} contact`
-    })),
-    ...productGroups.slice(0, 8).map((product) => ({
-      strategyType: "product_group",
-      render: (country: string) => `"${product}" replacement ${country} contact`
-    })),
-    ...modelTerms.map((model) => ({
-      strategyType: "model_specific",
-      render: (country: string) => `"${model}" replacement ${country} contact`
-    })),
-    ...[
-      `"${coreProduct}" RFQ {country}`,
-      `"${coreProduct}" procurement {country}`,
-      `"${coreProduct}" "vendor registration" {country}`,
-      `"${secondaryProduct}" tender {country}`,
-      `"${secondaryProduct}" "request for quotation" {country}`
-    ].map((templateText) => ({
-      strategyType: "procurement_event",
-      render: (country: string) => templateText.replace("{country}", country)
-    })),
-    ...(channelCustomersRequested
-      ? [
-          {
-            strategyType: "channel",
-            render: (country: string) => `"${coreProduct}" distributor ${country} contact`
-          },
-          {
-            strategyType: "channel",
-            render: (country: string) => `"${secondaryProduct}" stockist ${country} contact`
-          }
-        ]
-      : [])
-  ];
-  const queries: PlannedSearchQuery[] = [];
-
-  for (let index = 0; index < queryFactories.length * countries.length; index += 1) {
-    const country = countries[index % countries.length] ?? countries[0] ?? "UAE";
-    const factory = queryFactories[Math.floor(index / countries.length) % queryFactories.length];
-    if (!factory) {
-      break;
-    }
-    const query = appendSafeNegativeTerms(factory.render(country), keywordGroups.excludeTerms);
-    queries.push({
-      provider: "brave",
-      operatorSource: "brave_official",
-      executionStatus: "experimental",
-      operatorName: "Supplemental buyer-led search",
-      strategyTemplate: `supplemental:${factory.strategyType}`,
-      strategyType: factory.strategyType,
-      query,
-      keywordGroups,
-      country,
-      effectivenessScore: 0.66,
-      templateId: `supplemental_${factory.strategyType}`
-    });
-  }
-
-  return queries;
-}
-
-function buildQualityFallbackSearchQueries(
-  keywordGroups: KeywordGroups,
-  countryPool: string[],
-  channelCustomersRequested: boolean,
-  limit: number,
-  existingQueryTexts: Set<string>
-): PlannedSearchQuery[] {
-  const countries = countryPool.length ? countryPool : ["UAE"];
-  const productGroups = selectSupplementalProductGroups(keywordGroups).slice(0, 8);
-  const coreProduct = productGroups[0] ?? keywordGroups.productTerms[0] ?? "equipment";
-  const secondaryProduct = productGroups[1] ?? coreProduct;
-  const templates: Array<{
-    strategyType: string;
-    render: (country: string) => string;
-  }> = [
-    ...[
-      `"maintenance company" "${coreProduct}" {country} contact`,
-      `"field service company" "${coreProduct}" {country} "contact us"`,
-      `"system integrator" "${coreProduct}" {country} contact`,
-      `"engineering contractor" "${coreProduct}" {country} contact`,
-      `"installation contractor" "${coreProduct}" {country} contact`,
-      `"operator" "${coreProduct}" procurement {country}`,
-      `"service provider" "${coreProduct}" {country} contact`,
-      `"vendor registration" "${coreProduct}" {country}`,
-      `"project contractor" "${secondaryProduct}" {country} contact`,
-      `"repair service" "${secondaryProduct}" {country} contact`,
-      `"network operations" "${secondaryProduct}" {country} contact`,
-      `"procurement" "${secondaryProduct}" {country}`
-    ].map((templateText) => ({
-      strategyType: "quality_fallback_buyer",
-      render: (country: string) => templateText.replace("{country}", country)
-    })),
-    ...productGroups.map((product) => ({
-      strategyType: "quality_fallback_product",
-      render: (country: string) => `"${product}" maintenance ${country} contact`
-    })),
-    ...[
-      `"${coreProduct}" RFQ {country}`,
-      `"${coreProduct}" procurement {country}`,
-      `"${coreProduct}" "vendor registration" {country}`,
-      `"${secondaryProduct}" tender {country}`,
-      `"${secondaryProduct}" "request for quotation" {country}`,
-      `"${coreProduct}" maintenance {country} contact`,
-      `"${secondaryProduct}" replacement {country} contact`
-    ].map((templateText) => ({
-      strategyType: "quality_fallback_category",
-      render: (country: string) => templateText.replace("{country}", country)
-    })),
-    ...(channelCustomersRequested
-      ? [
-          {
-            strategyType: "quality_fallback_channel",
-            render: (country: string) => `"${coreProduct}" reseller ${country} contact`
-          }
-        ]
-      : [])
-  ];
-  const queries: PlannedSearchQuery[] = [];
-  const seen = new Set(existingQueryTexts);
-
-  for (
-    let index = 0;
-    queries.length < limit && index < templates.length * countries.length;
-    index += 1
-  ) {
-    const country = countries[index % countries.length] ?? countries[0] ?? "UAE";
-    const template = templates[Math.floor(index / countries.length) % templates.length];
-    if (!template) {
-      break;
-    }
-    const query = appendSafeNegativeTerms(template.render(country), keywordGroups.excludeTerms);
-    const normalizedQuery =
-      normalizeAiQueryText(query, country, keywordGroups, countries).query || query;
-    const key = normalizedQuery.toLowerCase();
-    if (seen.has(key) || (!channelCustomersRequested && isChannelOnlyQuery(normalizedQuery))) {
-      continue;
-    }
-    seen.add(key);
-    queries.push({
-      provider: "brave",
-      operatorSource: "brave_official",
-      executionStatus: "experimental",
-      operatorName: "Quality fallback suggestion",
-      strategyTemplate: `quality_fallback_suggestion:${template.strategyType}`,
-      strategyType: template.strategyType,
-      query: normalizedQuery,
-      keywordGroups,
-      country,
-      effectivenessScore: 0.72,
-      templateId: `quality_fallback_suggestion_${template.strategyType}`
-    });
-  }
-
-  return queries;
-}
-
-function serializePlannedSearchQuery(query: PlannedSearchQuery) {
-  return {
-    provider: query.provider,
-    operatorSource: query.operatorSource,
-    executionStatus: query.executionStatus,
-    operatorName: query.operatorName,
-    strategyTemplate: query.strategyTemplate,
-    strategyType: query.strategyType ?? null,
-    query: query.query,
-    keywordGroups: query.keywordGroups,
-    country: query.country,
-    effectivenessScore: query.effectivenessScore,
-    templateId: query.templateId
-  };
-}
-
 function keywordGroupsFromPayload(
   payload: ReturnType<typeof parseTaskPayload>,
   marketTerms: string[]
@@ -3074,45 +3271,6 @@ function keywordGroupsFromPayload(
     scenarioTerms: asStringArray(groups.scenarioTerms),
     excludeTerms: asStringArray(groups.excludeTerms)
   };
-}
-
-function selectSupplementalProductGroups(keywordGroups: KeywordGroups) {
-  const preferred = [
-    "equipment",
-    "components",
-    "spare parts",
-    "industrial equipment",
-    "maintenance parts",
-    "replacement parts",
-    "RRU",
-    "BBU",
-    "AAU",
-    "OLT",
-    "rectifier",
-    "power module",
-    "SFP",
-    "optical module",
-    "base station equipment",
-    "RAN equipment",
-    "telecom spare parts",
-    "microwave backhaul"
-  ];
-  return uniqueStrings([...keywordGroups.productTerms, ...preferred])
-    .filter((term) => !isChannelCustomerTerm(term))
-    .slice(0, 15);
-}
-
-function selectSupplementalModelTerms(keywordGroups: KeywordGroups) {
-  return uniqueStrings([...keywordGroups.productTerms, ...keywordGroups.longTailProductTerms])
-    .filter(
-      (term) =>
-        /\d/.test(term) ||
-        /\b(?:rru|bbu|aau|olt|sfp|umpt|ubbp|wbbp|r8882|r8862|r4850|baseband)\b/i.test(term)
-    )
-    .filter(
-      (term) => !/\b(?:supplier|distributor|stockist|reseller|wholesale|manufacturer)\b/i.test(term)
-    )
-    .slice(0, 10);
 }
 
 function normalizeCountryAlias(value: string) {
@@ -3303,11 +3461,10 @@ function siteCountryConflict(query: string, country: string) {
 
 function reduceQueryComplexity(query: string) {
   let output = query.replace(/\s+/g, " ").trim();
-  output = keepFirstOrGroup(output);
+  output = compactOrGroups(output);
   output = limitNegativeTerms(output, 3);
   while (output.length > 160) {
     const shortened = output
-      .replace(/\s+\([^()]*\bOR\b[^()]*\)/i, "")
       .replace(/\s+-[^\s]+(?=(?:\s+-[^\s]+)*$)/, "")
       .trim();
     if (!shortened || shortened === output) {
@@ -3324,14 +3481,9 @@ function reduceQueryComplexity(query: string) {
     : output;
 }
 
-function keepFirstOrGroup(query: string) {
-  let seenOrGroup = false;
+function compactOrGroups(query: string) {
   return query
     .replace(/\(([^()]*\bOR\b[^()]*)\)/gi, (match, group: string) => {
-      if (seenOrGroup) {
-        return "";
-      }
-      seenOrGroup = true;
       const terms = group
         .split(/\s+OR\s+/i)
         .map((term) => term.trim())
@@ -3363,8 +3515,8 @@ function limitNegativeTerms(query: string, maxTerms: number) {
 }
 
 function appendSafeNegativeTerms(query: string, excludeTerms: string[]) {
-  const safeTerms = ["jobs", "careers", "training", "course", "marketplace", "wikipedia"];
-  const configuredSafeTerms = excludeTerms.filter((term) => safeTerms.includes(term.toLowerCase()));
+  const safeTerms = ["jobs", "careers", "training", "course", "forum", "wikipedia"];
+  const configuredSafeTerms = excludeTerms.filter((term) => isSafeQueryNegativeTerm(term));
   const terms = uniqueStrings([...safeTerms.slice(0, 5), ...configuredSafeTerms]).slice(0, 5);
   const missingTerms = terms
     .filter((term) => !new RegExp(`-${quoteRegExp(term)}\\b`, "i").test(query))
@@ -3375,15 +3527,31 @@ function appendSafeNegativeTerms(query: string, excludeTerms: string[]) {
 
 function stripEvidenceNegativeTerms(query: string) {
   return query
-    .replace(/\s-(?:pdf|news|blog|blogs|article|articles|report|reports)\b/gi, "")
+    .replace(
+      /\s-(?:"(?:pdf|news|blog|blogs|article|articles|report|reports|phone|contact|tel|email|mail|fax|address|mobile|whatsapp)"|(?:pdf|news|blog|blogs|article|articles|report|reports|phone|contact|tel|email|mail|fax|address|mobile|whatsapp)\b)/gi,
+      ""
+    )
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isSafeQueryNegativeTerm(term: string) {
+  return /^(?:jobs?|careers?|hiring|recruitment|training|course|courses|forum|forums|wikipedia)$/i.test(
+    term.trim()
+  );
 }
 
 function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, country: string) {
   const lower = query.toLowerCase();
   const hasCountry = queryMentionsCountry(query, country);
-  const hasProduct = keywordGroups.productTerms.some((term) => lower.includes(term.toLowerCase()));
+  const productSignalTerms = uniqueStrings([
+    ...keywordGroups.productTerms,
+    ...keywordGroups.longTailProductTerms
+  ]);
+  const hasProduct = productSignalTerms.some(
+    (term) => isConcreteQueryProductTerm(term) && lower.includes(term.toLowerCase())
+  );
+  const hasModelOrSku = hasSpecificModelOrSkuSignal(query);
   const hasCustomer = keywordGroups.customerIntentTerms.some((term) =>
     lower.includes(term.toLowerCase())
   );
@@ -3395,13 +3563,27 @@ function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, coun
   const hasEntryPoint = queryEntryPointTerms.some((term) => lower.includes(term));
   const hasSellerOnlyTrap =
     querySellerOnlyTerms.some((term) => lower.includes(term)) && !hasBuyerRole;
-  const hasProductOrIndustryContext = hasProduct || hasScenario || hasTelecomQueryContext(lower);
+  const hasProductOrIndustryContext =
+    hasProduct || hasModelOrSku || hasSpecificIndustryQueryContext(lower);
 
   return (
     hasCountry &&
     !hasSellerOnlyTrap &&
     hasProductOrIndustryContext &&
-    (hasBuyerRole || hasEntryPoint)
+    hasBuyerRole &&
+    hasEntryPoint
+  );
+}
+
+function isConcreteQueryProductTerm(term: string) {
+  const normalized = term.trim().toLowerCase();
+  if (!normalized || genericQueryProductTerms.has(normalized)) {
+    return false;
+  }
+
+  return (
+    normalized.length >= 4 ||
+    /\b(?:rru|bbu|aau|olt|sfp|das)\b/i.test(normalized)
   );
 }
 
@@ -3424,26 +3606,54 @@ function quoteRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function hasTelecomQueryContext(query: string) {
-  return /\b(telecom|telecommunication|5g|4g|ran|open ran|rru|bbu|aau|olt|onu|ont|sfp|das|small cell|private 5g|microwave|backhaul|cell site|base station|towerco|tower company|fiber|ftth|wisp|isp|equipment|components|spare parts|power module|rectifier|maintenance|procurement|contractor|integrator|operator|carrier|service provider|industrial network)\b/i.test(
+function hasSpecificIndustryQueryContext(query: string) {
+  return /\b(telecom equipment|telecom network|telecom power|telecom site|telecommunications?|5g|4g|ran|open ran|radio access|radio unit|remote radio|rru|bbu|baseband|aau|olt|onu|ont|sfp|das|small cell|private 5g|microwave|backhaul|cell site|base station|towerco|tower company|fiber|ftth|wisp|isp|power module|rectifier|telecom boards?|boards? and cards?|communication cables?|telecom cables?|cable labels?|metal labels?|waterproof insulating tape|insulating tape|industrial network)\b/i.test(
     query
   );
 }
+
+function hasSpecificModelOrSkuSignal(query: string) {
+  return /\b(?:huawei|zte|ericsson|nokia|alcatel-lucent|eltek)\b.{0,45}\b(?:[a-z]{0,5}\d{2,}[a-z0-9./-]*|\d{4,}[a-z0-9./-]*)\b|\b(?:r\d{4,}[a-z0-9./-]*|r4850n6|ma\d{4}[a-z0-9-]*|air\s*\d{4}|baseband\s*\d{4}|fbbc\s*\d*[a-z]?|aheb\s*\d*[a-z]?|ahca\s*\d*[a-z]?|aeqn\s*\d*[a-z]?|abio\s*\d*[a-z]?|r8882|r8862a?|cce1|cc16b|bpn2|bpl1|umptg?\d?|umpte?\d?|upba\d|wbbp[a-z0-9]*|\d{6}\.\d{3})\b/i.test(
+    query
+  );
+}
+
+function isMainCustomerIntelligenceQuery(query: string) {
+  const positiveQuery = query
+    .replace(/\s-"[^"]+"/g, " ")
+    .replace(/\s-\S+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return /\b(?:rfq|request for quotation|tender|bid|procurement notice|procurement portal|vendor registration|supplier registration|government procurement|filetype:pdf|filetype:doc|filetype:xls|linkedin\.com|yellow pages|directory|b2b marketplace|buyer board|buying lead|globalsources|indiamart|alibaba|tradeindia|ec21|exporthub|made-in-china|trademap|market report|industry report|research report|whitepaper|glossary|encyclopedia|wikipedia|news|press release|blog|article|case study|conference|exhibition|exhibitor list|whatsapp|wa\.me)\b/i.test(
+    positiveQuery
+  );
+}
+
+const genericQueryProductTerms = new Set([
+  "equipment",
+  "components",
+  "parts",
+  "spare parts",
+  "maintenance parts",
+  "replacement parts",
+  "network",
+  "service",
+  "services",
+  "infrastructure",
+  "industrial equipment",
+  "product"
+]);
 
 const queryEntryPointTerms = [
   "contact",
   "contact us",
   "about us",
   "services",
+  "solutions",
   "projects",
-  "procurement",
-  "purchasing",
-  "rfq",
-  "tender",
-  "vendor registration",
-  "supplier registration",
-  "quote",
-  "quotation",
+  "locations",
+  "offices",
+  "company",
   "inquiry",
   "enquiry"
 ];
@@ -3451,6 +3661,22 @@ const queryEntryPointTerms = [
 const queryBuyerRoleTerms = [
   "maintenance",
   "maintenance company",
+  "replacement",
+  "replace",
+  "repair",
+  "deployment",
+  "rollout",
+  "installation",
+  "install",
+  "integration",
+  "integrate",
+  "implementation",
+  "telecom site",
+  "cell site",
+  "site installation",
+  "spare parts replenishment",
+  "replenishment",
+  "o&m",
   "network operations",
   "operator",
   "service provider",
@@ -3466,8 +3692,6 @@ const queryBuyerRoleTerms = [
   "integrator",
   "field services",
   "repair service",
-  "procurement",
-  "purchasing",
   "distributor",
   "stockist",
   "reseller",
@@ -3541,6 +3765,381 @@ function getWorkflowInterrupts(workflow: LeadHuntWorkflowState): unknown[] {
 
 function toJsonValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function compactTaskForClient<T extends Record<string, unknown>>(task: T): T {
+  return {
+    ...task,
+    inputPayload: compactTaskInputPayloadForClient(task),
+    agentSteps: compactAgentStepsForClient(task.agentSteps),
+    searchQueries: compactSearchQueriesForClient(task.searchQueries),
+    leadCandidates: compactLeadCandidatesForClient(task.leadCandidates)
+  };
+}
+
+function compactTaskInputPayloadForClient(task: Record<string, unknown>) {
+  const originalPayload = task.inputPayload;
+  const payload = toPlainObject(originalPayload);
+  const graphWorkflow = normalizeGraphWorkflowForClient(payload.graphWorkflow, task);
+  const compacted: Record<string, unknown> = {
+    ...payload,
+    searchQueries: compactPayloadSearchQueriesForClient(payload.searchQueries),
+    ...(graphWorkflow ? { graphWorkflow } : {})
+  };
+
+  if (payload.siteEvidence) {
+    compacted.siteEvidence = compactSiteEvidenceForClient(payload.siteEvidence);
+  }
+
+  return originalPayload === null ? null : compacted;
+}
+
+function compactAgentStepsForClient(value: unknown) {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  return value.map((step) => {
+    const row = toPlainObject(step);
+    return {
+      ...row,
+      output: compactStepOutputForClient(row.output)
+    };
+  });
+}
+
+function compactStepOutputForClient(value: unknown) {
+  const output = toPlainObject(value);
+  if (!Object.keys(output).length) {
+    return value;
+  }
+
+  return {
+    ...output,
+    samplePendingQueries: Array.isArray(output.samplePendingQueries)
+      ? output.samplePendingQueries.slice(0, 5)
+      : output.samplePendingQueries,
+    qualityGate: compactQualityGateForClient(output.qualityGate)
+  };
+}
+
+function compactQualityGateForClient(value: unknown) {
+  const gate = toPlainObject(value);
+  if (!Object.keys(gate).length) {
+    return value;
+  }
+
+  const preservation = toPlainObject(gate.qualityGatePreservation);
+
+  return {
+    ...gate,
+    samplePendingQueries: Array.isArray(gate.samplePendingQueries)
+      ? gate.samplePendingQueries.slice(0, 5)
+      : gate.samplePendingQueries,
+    qualityGatePreservation: Object.keys(preservation).length
+      ? {
+          ...preservation,
+          samplePendingQueries: Array.isArray(preservation.samplePendingQueries)
+            ? preservation.samplePendingQueries.slice(0, 5)
+            : preservation.samplePendingQueries
+        }
+      : gate.qualityGatePreservation
+  };
+}
+
+function compactSearchQueriesForClient(value: unknown) {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  return value.map((query) => {
+    const row = toPlainObject(query);
+    return {
+      ...row,
+      keywordGroups: undefined,
+      searchResults: compactSearchResultsForClient(row.searchResults)
+    };
+  });
+}
+
+function compactPayloadSearchQueriesForClient(value: unknown) {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  return value.map((query) => {
+    const row = toPlainObject(query);
+    return {
+      provider: row.provider,
+      operatorSource: row.operatorSource,
+      executionStatus: row.executionStatus,
+      operatorName: row.operatorName,
+      strategyTemplate: row.strategyTemplate,
+      query: row.query,
+      country: row.country,
+      resultCount: row.resultCount,
+      qualifiedCount: row.qualifiedCount,
+      effectivenessScore: row.effectivenessScore
+    };
+  });
+}
+
+function compactSearchResultsForClient(value: unknown) {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  return value.slice(0, 8).map((result) => {
+    const row = toPlainObject(result);
+    return {
+      id: row.id,
+      title: compactString(row.title, 140),
+      url: compactString(row.url, 320),
+      domain: row.domain,
+      snippet: compactString(row.snippet, 260),
+      createdAt: row.createdAt
+    };
+  });
+}
+
+function compactLeadCandidatesForClient(value: unknown) {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  return value.map((lead) => {
+    const row = toPlainObject(lead);
+    return {
+      ...row,
+      countryEvidence: compactCountryEvidenceForClient(row.countryEvidence),
+      contacts: compactContactsForClient(row.contacts),
+      icpScore: compactIcpScoreForClient(row.icpScore),
+      outreachDrafts: compactOutreachDraftsForClient(row.outreachDrafts)
+    };
+  });
+}
+
+function compactIcpScoreForClient(value: unknown) {
+  const score = toPlainObject(value);
+  if (!Object.keys(score).length) {
+    return value;
+  }
+
+  return {
+    ...score,
+    reasons: compactIcpReasonsForClient(score.reasons)
+  };
+}
+
+function compactIcpReasonsForClient(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.slice(0, 8).map((reason) => compactString(reason, 220));
+  }
+
+  const payload = toPlainObject(value);
+  if (!Object.keys(payload).length) {
+    return value;
+  }
+
+  const aiEvaluation = toPlainObject(payload.aiEvaluation);
+
+  return {
+    ...payload,
+    reasons: Array.isArray(payload.reasons)
+      ? payload.reasons.slice(0, 8).map((reason) => compactString(reason, 220))
+      : payload.reasons,
+    risks: Array.isArray(payload.risks)
+      ? payload.risks.slice(0, 6).map((risk) => compactString(risk, 220))
+      : payload.risks,
+    summary: compactString(payload.summary, 500),
+    extractableCompanies: Array.isArray(payload.extractableCompanies)
+      ? payload.extractableCompanies.slice(0, 12).map((company) => compactString(company, 160))
+      : payload.extractableCompanies,
+    aiEvaluation: Object.keys(aiEvaluation).length
+      ? {
+          ...aiEvaluation,
+          matchedSignals: Array.isArray(aiEvaluation.matchedSignals)
+            ? aiEvaluation.matchedSignals.slice(0, 8).map((signal) => compactString(signal, 180))
+            : aiEvaluation.matchedSignals,
+          risks: Array.isArray(aiEvaluation.risks)
+            ? aiEvaluation.risks.slice(0, 6).map((risk) => compactString(risk, 180))
+            : aiEvaluation.risks
+        }
+      : payload.aiEvaluation
+  };
+}
+
+function compactContactsForClient(value: unknown) {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  const priority: Record<string, number> = { email: 0, phone: 1, social: 2 };
+  const seen = new Set<string>();
+
+  return [...value]
+    .map((contact) => toPlainObject(contact))
+    .sort((left, right) => {
+      const leftType = typeof left.type === "string" ? left.type : "";
+      const rightType = typeof right.type === "string" ? right.type : "";
+      return (priority[leftType] ?? 9) - (priority[rightType] ?? 9);
+    })
+    .filter((contact) => {
+      const key = `${contact.type ?? ""}:${String(contact.value ?? "").toLowerCase()}`;
+      if (!String(contact.value ?? "").trim() || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 12)
+    .map((contact) => ({
+      id: contact.id,
+      type: contact.type,
+      value: compactString(contact.value, 160),
+      sourceUrl: compactString(contact.sourceUrl, 320),
+      createdAt: contact.createdAt
+    }));
+}
+
+function compactCountryEvidenceForClient(value: unknown) {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  const confidencePriority: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  const typePriority: Record<string, number> = {
+    phone: 0,
+    website_domain: 1,
+    email_domain: 2,
+    service_area: 3,
+    official_text: 4
+  };
+
+  return [...value]
+    .map((item) => toPlainObject(item))
+    .sort((left, right) => {
+      const leftConfidence = typeof left.confidence === "string" ? left.confidence : "";
+      const rightConfidence = typeof right.confidence === "string" ? right.confidence : "";
+      const confidenceDelta =
+        (confidencePriority[leftConfidence] ?? 9) - (confidencePriority[rightConfidence] ?? 9);
+      if (confidenceDelta !== 0) return confidenceDelta;
+      const leftType = typeof left.type === "string" ? left.type : "";
+      const rightType = typeof right.type === "string" ? right.type : "";
+      return (typePriority[leftType] ?? 9) - (typePriority[rightType] ?? 9);
+    })
+    .slice(0, 8)
+    .map((item) => ({
+      ...item,
+      value: compactString(item.value, 180),
+      sourceUrl: compactString(item.sourceUrl, 320)
+    }));
+}
+
+function compactOutreachDraftsForClient(value: unknown) {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  return value.slice(0, 3).map((draft) => {
+    const row = toPlainObject(draft);
+    return {
+      id: row.id,
+      status: row.status,
+      subject: compactString(row.subject, 180),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      sendLogs: Array.isArray(row.sendLogs) ? row.sendLogs.slice(0, 3) : row.sendLogs
+    };
+  });
+}
+
+function compactSiteEvidenceForClient(value: unknown) {
+  const payload = toPlainObject(value);
+  if (!Object.keys(payload).length) {
+    return value;
+  }
+
+  return {
+    ...payload,
+    productSites: compactSiteEvidenceRows(payload.productSites),
+    referenceCustomerSites: compactSiteEvidenceRows(payload.referenceCustomerSites)
+  };
+}
+
+function compactSiteEvidenceRows(value: unknown) {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  return value.slice(0, 8).map((site) => {
+    const row = toPlainObject(site);
+    return {
+      ...row,
+      textSample: compactString(row.textSample, 500),
+      evidenceSnippets: Array.isArray(row.evidenceSnippets)
+        ? row.evidenceSnippets.slice(0, 5).map((snippet) => compactString(snippet, 240))
+        : row.evidenceSnippets
+    };
+  });
+}
+
+function normalizeGraphWorkflowForClient(value: unknown, task: Record<string, unknown>) {
+  const workflow = toPlainObject(value);
+  if (!Object.keys(workflow).length) {
+    return value;
+  }
+
+  const waitingStep = findAgentStep(task.agentSteps, "waiting");
+  if (task.status === "paused" && waitingStep?.nodeName) {
+    return {
+      ...workflow,
+      phase: workflow.phase === "planning" ? "search-to-email" : (workflow.phase ?? "search-to-email"),
+      status: "paused",
+      currentNode: waitingStep.nodeName,
+      pausedAt: waitingStep.nodeName,
+      error: null,
+      updatedAt: taskUpdatedAtIso(task)
+    };
+  }
+
+  const failedStep = findAgentStep(task.agentSteps, "failed");
+  if (task.status === "failed" && failedStep?.nodeName) {
+    return {
+      ...workflow,
+      status: "failed",
+      currentNode: failedStep.nodeName,
+      error: failedStep.error ?? workflow.error,
+      updatedAt: taskUpdatedAtIso(task)
+    };
+  }
+
+  return workflow;
+}
+
+function findAgentStep(value: unknown, status: string) {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return (
+    value
+      .map((step) => toPlainObject(step))
+      .find((step) => step.status === status && typeof step.nodeName === "string") ?? null
+  );
+}
+
+function taskUpdatedAtIso(task: Record<string, unknown>) {
+  const updatedAt = task.updatedAt;
+  return updatedAt instanceof Date ? updatedAt.toISOString() : String(updatedAt ?? new Date().toISOString());
+}
+
+function compactString(value: unknown, maxLength: number) {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
 function interruptNodeName(interrupts: unknown[]): LeadHuntWorkflowNode | null {
@@ -3929,7 +4528,7 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
   const keywordGroups = payload.keywordGroups ?? {};
   const marketTerms = asStringArray(keywordGroups.marketTerms).slice(0, 40);
   const profileRegions = asStringArray(payload.customerProfile?.targetRegions).slice(0, 40);
-  const targetRegions = marketTerms.length ? marketTerms : profileRegions;
+  const targetRegions = mergeQualificationTargetRegions(marketTerms, profileRegions);
   const productProfile = payload.productProfile;
   const ownDomains = domainsFromUrls([
     productProfile?.websiteUrl,
@@ -3963,6 +4562,21 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
       "TradeIndia"
     ]
   };
+}
+
+function mergeQualificationTargetRegions(marketTerms: string[], profileRegions: string[]) {
+  const combinedRegions = uniqueStrings([...marketTerms, ...profileRegions]);
+  const constrainedRegions = combinedRegions.filter(
+    (region) => !isGlobalQualificationMarket(region)
+  );
+
+  return constrainedRegions.length ? constrainedRegions : combinedRegions;
+}
+
+function isGlobalQualificationMarket(region: string) {
+  return ["global", "worldwide", "all", "all countries", "all markets"].includes(
+    normalizeMarketKey(region)
+  );
 }
 
 function domainsFromUrls(urls: Array<string | null | undefined>) {
@@ -4167,7 +4781,9 @@ function countryMatchesAnyTarget(country: string, targetRegions: string[]) {
       return true;
     }
 
-    return resolveCountry(target)?.code === countryCode;
+    return expandSearchTargetMarket(target)
+      .map(normalizeSearchTargetCountry)
+      .some((market) => resolveCountry(market)?.code === countryCode);
   });
 }
 

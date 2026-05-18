@@ -124,6 +124,35 @@ describe("LeadHuntAiService", () => {
         industryScenarioTerms: ["4G"],
         exclusionTerms: ["job"]
       },
+      productProfile: {
+        brandName: "TeleCoreNet",
+        websiteUrl: "https://telecorenet.com/",
+        productCategories: ["Telecom equipment"],
+        keyProducts: ["RRU", "BBU"],
+        targetUseCases: ["tower maintenance"],
+        buyerPainPoints: ["replacement demand"],
+        supplyCapabilities: ["spare parts"],
+        searchKeywords: ["telecom equipment", "RRU", "BBU", "spare parts", "maintenance"],
+        negativeKeywords: [],
+        confidence: 0.8
+      },
+      customerProfile: {
+        targetRegions: ["UAE"],
+        idealCustomerTypes: ["telecom maintenance contractor"],
+        buyingSignals: ["tower maintenance"],
+        referenceCompanies: [],
+        industries: ["telecommunications"],
+        searchKeywords: [
+          "telecom maintenance contractor",
+          "tower maintenance",
+          "system integrator",
+          "network operations",
+          "procurement"
+        ],
+        disqualifiers: [],
+        evidence: [],
+        confidence: 0.8
+      },
       targetMarkets: ["UAE"],
       operatorLibrary: {}
     });

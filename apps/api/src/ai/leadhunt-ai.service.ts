@@ -55,9 +55,24 @@ export type KeywordExpansionInput = {
 
 export type SearchStrategyInput = {
   keywordGroups: KeywordExpansionResult;
+  productProfile: ProductProfileAnalysis | ProductProfileAnalysisInput;
+  customerProfile: CustomerProfileAnalysis | CustomerProfileAnalysisInput;
   targetMarkets: string[];
   operatorLibrary: unknown;
   minQueryCount?: number;
+  refillContext?: {
+    requiredAdditionalQueries: number;
+    acceptedQueries: Array<{
+      query: string;
+      country?: string | null;
+      strategyType?: string | null;
+    }>;
+    rejectedQueries: Array<{
+      query: string;
+      country: string;
+      reason: string;
+    }>;
+  };
 };
 
 export type IcpScoreInput = {
@@ -167,7 +182,7 @@ export class LeadHuntAiService {
       leadHuntPromptTemplates.searchStrategyGeneration,
       input,
       searchStrategyPlanSchema,
-      16384
+      8192
     );
   }
 

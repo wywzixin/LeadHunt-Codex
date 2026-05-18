@@ -166,6 +166,12 @@ describe("LeadQualificationService", () => {
           url: "https://www.stc.com.sa/wps/wcm/connect/english/business/wholesales/servicesAndSolutions/Collocation/SiteSharing",
           snippet: "Saudi telecom business connectivity and site sharing page.",
           source: "web"
+        },
+        {
+          title: "Created By spacetechnologies",
+          url: "https://alhazmservices.com/",
+          snippet: "Telecom services company in Oman.",
+          source: "web"
         }
       ],
       { taskId: "task-1" }
@@ -174,7 +180,8 @@ describe("LeadQualificationService", () => {
     expect(candidates.map((candidate) => candidate.companyName)).toEqual([
       "SFPS",
       "TelephonyME",
-      "STC"
+      "STC",
+      "Al Hazm Services"
     ]);
   });
 
@@ -344,9 +351,26 @@ describe("LeadQualificationService", () => {
       "UAE"
     );
 
-    expect(result.createdCount).toBe(1);
-    expect(result.skippedCount).toBe(2);
-    expect(prisma.leadCandidate.create).toHaveBeenCalledTimes(1);
+    expect(result.createdCount).toBe(2);
+    expect(result.skippedCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledTimes(2);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          companyName: "Noisy Telecom Page",
+          website: "https://www.linkedin.com/company/noisy-telecom-page",
+          status: "intelligence_review",
+          icpScore: {
+            create: expect.objectContaining({
+              score: expect.any(Number),
+              reasons: expect.objectContaining({
+                leadType: "intelligence"
+              })
+            })
+          }
+        })
+      })
+    );
     expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -699,7 +723,7 @@ describe("LeadQualificationService", () => {
           country: "GERMANY",
           queryCountry: "POLAND",
           countryConflict: false,
-          status: "country_conflict_review"
+          status: "rejected"
         })
       })
     );
@@ -741,7 +765,7 @@ describe("LeadQualificationService", () => {
           country: "UNITED STATES",
           inferredCountry: "UNITED STATES",
           countryConflict: false,
-          status: "country_conflict_review"
+          status: "rejected"
         })
       })
     );
@@ -802,6 +826,45 @@ describe("LeadQualificationService", () => {
         })
       })
     );
+  });
+
+  it("keeps macro-market countries in the main flow when discovered from a different query country", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Bahrain Tower Services - Telecom Site Maintenance Contractor",
+          url: "https://bahraintowerservices.bh/contact",
+          snippet:
+            "Bahrain telecom tower maintenance contractor for base station and RAN site support. Manama Bahrain. Phone +973 1712 3456. sales@bahraintowerservices.bh",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Oman", "Middle East"],
+        customerTypeKeywords: ["telecom tower maintenance", "telecom contractor", "field service"]
+      },
+      "Oman"
+    );
+
+    expect(result.createdCount).toBe(1);
+    const createdLead = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(createdLead).toEqual(
+      expect.objectContaining({
+        country: "BAHRAIN",
+        queryCountry: "OMAN",
+        inferredCountry: "BAHRAIN",
+        countryConfidence: "high",
+        countryConflict: false
+      })
+    );
+    expect(createdLead.status).not.toBe("country_conflict_review");
+    expect(createdLead.status).not.toBe("needs_country_review");
+    expect(createdLead.status).not.toBe("rejected");
   });
 
   it("matches macro target regions by member countries instead of treating them as global", () => {
@@ -889,9 +952,9 @@ describe("LeadQualificationService", () => {
 
     expect(uaeScore.status).not.toBe("rejected");
     expect(southAfricaScore.status).not.toBe("rejected");
-    expect(usScore.status).toBe("country_conflict_review");
+    expect(usScore.status).toBe("rejected");
     expect(usScore.risks).toContain(
-      "Verified candidate country is outside the selected target markets; kept for country-conflict review"
+      "Verified candidate country is outside the selected target markets; rejected instead of entering country review"
     );
   });
 
@@ -1867,6 +1930,9 @@ describe("LeadQualificationService", () => {
           <html><body>
             Email us: info@hashport.ae
             Template demo: suport@tecnologia.com
+            Template demo: support@yourmail.com
+            Template demo: info@your-domain.com
+            Template phone: +386 40 222 555
           </body></html>
         `
         : `
@@ -1916,6 +1982,19 @@ describe("LeadQualificationService", () => {
           contacts: {
             create: expect.arrayContaining([
               expect.objectContaining({ value: "suport@tecnologia.com" })
+            ])
+          }
+        })
+      })
+    );
+    expect(prisma.leadCandidate.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ value: "support@yourmail.com" }),
+              expect.objectContaining({ value: "info@your-domain.com" }),
+              expect.objectContaining({ value: "+386 40 222 555" })
             ])
           }
         })
@@ -1995,6 +2074,75 @@ describe("LeadQualificationService", () => {
       leadType: "intelligence",
       intelligenceType: "project_news",
       extractableCompanies: expect.arrayContaining(["ADNOC", "e&", "Nokia"])
+    });
+  });
+
+  it("keeps operator vendor-registration pages as intelligence instead of main customers", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "stc Kuwait Vendor Relations",
+          url: "https://www.stc.com.kw/en/about/vendor-relations",
+          snippet:
+            "stc Kuwait vendor registration and supplier registration for telecom procurement.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Kuwait"]
+      },
+      "Kuwait"
+    );
+
+    const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(createData.status).toBe("intelligence_review");
+    expect(createData.icpScore.create.score).toBeLessThanOrEqual(49);
+    expect(createData.icpScore.create.reasons).toMatchObject({
+      leadType: "intelligence",
+      intelligenceType: "operator_vendor_registration"
+    });
+  });
+
+  it("keeps B2B marketplace buyer requests as intelligence instead of hard rejecting them", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "5G telecom equipment buying lead UAE",
+          url: "https://www.alibaba.com/buying-leads/5g-telecom-equipment.html",
+          snippet:
+            "Buyer inquiry and RFQ for 5G telecom equipment in UAE. Looking for supplier.",
+          source: "web"
+        },
+        {
+          title: "Huawei RRU product supplier listing",
+          url: "https://www.alibaba.com/product-detail/huawei-rru.html",
+          snippet: "Product listing from a seller storefront.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE"]
+      },
+      "UAE"
+    );
+
+    expect(prisma.leadCandidate.create).toHaveBeenCalledTimes(1);
+    const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(createData.status).toBe("intelligence_review");
+    expect(createData.icpScore.create.score).toBeLessThanOrEqual(49);
+    expect(createData.icpScore.create.reasons).toMatchObject({
+      leadType: "intelligence",
+      intelligenceType: "rfq_notice"
     });
   });
 
@@ -2148,6 +2296,28 @@ describe("LeadQualificationService", () => {
 
     expect(score.score).toBeLessThanOrEqual(58);
     expect(score.status).toBe("evidence_review");
+  });
+
+  it("keeps glossary and vendor knowledge pages out of country-review customer candidates", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Baseband Unit | Glossary | EXFO",
+          url: "https://www.exfo.com/en/resources/glossary/baseband-unit/",
+          snippet:
+            "Glossary article explaining what a baseband unit is in telecom systems, BBU and RRU.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "Oman" }
+    );
+
+    const score = service.scoreCandidate(candidate!, criteria);
+
+    expect(score.status).not.toBe("needs_country_review");
+    expect(["qualified", "review"]).not.toContain(score.status);
+    expect(score.score).toBeLessThanOrEqual(49);
   });
 
   it("enriches missing contacts on existing duplicate candidates instead of only skipping them", async () => {

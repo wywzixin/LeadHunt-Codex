@@ -23,7 +23,7 @@ describe("search strategy library", () => {
     expect(new Set(queries.map((item) => item.country))).not.toContain("Nigeria");
     expect(queries[0]?.templateId).toBe("maintenance_company_contact");
     expect(queries[0]?.query).toContain("-job");
-    expect(queries[0]?.query).toContain("-marketplace");
+    expect(queries[0]?.query).not.toContain("-marketplace");
     expect(queries[0]?.query).not.toContain('-"yellow pages"');
     expect(queries[0]?.query).not.toContain('-"supplier directory"');
     expect(queries[0]?.query).not.toContain("-phone");
@@ -57,6 +57,36 @@ describe("search strategy library", () => {
     );
     expect(queries[0]?.keywordGroups.customerIntentTerms.join(" ")).not.toMatch(
       /\b(supplier|distributor|stockist|reseller|wholesale)\b/i
+    );
+  });
+
+  it("keeps broad intelligence-source templates out of the automatic buyer mix", () => {
+    const queries = generateSearchQueries({
+      taskText: "Find 5G telecom equipment customers in Kuwait",
+      targetMarkets: ["Kuwait"],
+      minQueryCount: 30
+    });
+    const templateIds = new Set(queries.map((query) => query.templateId));
+    const queryText = queries.map((query) => query.query).join("\n");
+    const library = getSearchStrategyLibrary();
+
+    expect(templateIds.has("linkedin_company_procurement")).toBe(false);
+    expect(templateIds.has("linkedin_decision_maker")).toBe(false);
+    expect(templateIds.has("local_directory_intelligence")).toBe(false);
+    expect(templateIds.has("b2b_buyer_intelligence")).toBe(false);
+    expect(templateIds.has("whatsapp_phone_code_contact")).toBe(false);
+    expect(queryText).not.toContain("site:linkedin.com");
+    expect(queryText).not.toContain("yellow pages");
+    expect(queryText).not.toContain("GlobalSources");
+    expect(queryText).not.toContain("wa.me/965");
+    expect(queryText).not.toMatch(/-(phone|contact|tel|email|mail|fax|address|mobile|whatsapp)\b/i);
+    expect(library.templates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "linkedin_decision_maker",
+          executionStatus: "manual_only"
+        })
+      ])
     );
   });
 
@@ -117,7 +147,7 @@ describe("search strategy library", () => {
         "base station maintenance company"
       ])
     );
-    expect(queries[0]?.keywordGroups.excludeTerms).toEqual(
+    expect(queries[0]?.keywordGroups.excludeTerms).not.toEqual(
       expect.arrayContaining(["Accio", "TradeWheel", "Alibaba", "directory", "yellow pages"])
     );
   });
@@ -250,13 +280,13 @@ describe("search strategy library", () => {
             "ISP network operations",
             "procurement"
           ]),
-          excludeTerms: expect.arrayContaining(["job", "directory", "yellow pages"])
+          excludeTerms: expect.arrayContaining(["job", "training", "course"])
         }),
         effectivenessScore: expect.any(Number)
       })
     );
     expect(query?.query).toContain("-job");
-    expect(query?.query).toContain("-directory");
+    expect(query?.query).not.toContain("-directory");
   });
 
   it("keeps common SEO manual-only and disabled templates out of automatic Brave execution", () => {

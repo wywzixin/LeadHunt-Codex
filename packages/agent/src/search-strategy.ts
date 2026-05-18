@@ -171,31 +171,13 @@ export const defaultKeywordGroups: KeywordGroups = {
     "training",
     "course",
     "forum",
-    "directory",
-    "yellow pages",
-    "supplier directory",
-    "company directory",
-    "trade directory",
     "youtube",
     "facebook",
-    "linkedin",
     "wiki",
     "consumer",
     "consumer phone",
     "phone accessories",
     "smartphone",
-    "marketplace",
-    "B2B marketplace",
-    "Alibaba",
-    "Accio",
-    "TradeWheel",
-    "Made-in-China",
-    "GlobalSources",
-    "IndiaMART",
-    "TradeIndia",
-    "EC21",
-    "ExportHub",
-    "Go4WorldBusiness",
     "Amazon",
     "AliExpress",
     "China",
@@ -297,7 +279,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "maintenance_company contact",
-    '("maintenance company" OR "field service" OR "network maintenance" OR "service provider") ({product_or}) {country} ("contact" OR "about us" OR services) {exclude}',
+    '("network maintenance" OR "field service" OR "base station maintenance") ({product_or}) {country} ("contact" OR services OR projects) {exclude}',
     ["scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.98
   ),
@@ -306,7 +288,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "ran_field_service buyer_profile",
-    '("field services" OR "maintenance services" OR "repair service") ({product_or}) {country} {exclude}',
+    '("RAN maintenance" OR "field services" OR "repair service") ({product_or}) {country} contact {exclude}',
     ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.97
   ),
@@ -315,7 +297,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "towerco_maintenance buyer_profile",
-    '("tower maintenance" OR "infrastructure services" OR "tower company" OR towerco) ({product_or}) {country} {exclude}',
+    '("tower maintenance" OR "tower company" OR towerco) ({product_or}) {country} contact {exclude}',
     ["scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.96
   ),
@@ -324,7 +306,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "power_maintenance buyer_profile",
-    '("power maintenance" OR "replacement" OR "spare parts") ({product_or}) {country} {exclude}',
+    '("telecom power maintenance" OR rectifier OR "power module") {country} contact {exclude}',
     ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.95
   ),
@@ -342,7 +324,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "isp_operations buyer_profile",
-    '(operator OR ISP OR WISP OR "service provider") ("network operations" OR maintenance OR procurement) ({product_or}) {country} {exclude}',
+    '(operator OR ISP OR WISP) ("network operations" OR maintenance OR procurement) ({product_or}) {country} {exclude}',
     ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.93
   ),
@@ -351,7 +333,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "operator_procurement buyer_signal",
-    '(operator OR carrier OR "service provider") ("vendor registration" OR "supplier registration" OR procurement OR purchasing) ({product_or}) {country} {exclude}',
+    '(operator OR carrier OR "service provider") ("vendor registration" OR procurement OR purchasing) ({product_or}) {country} {exclude}',
     ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.92
   ),
@@ -360,7 +342,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "direct_company contact",
-    '("system integrator" OR contractor OR installer OR consultant) {country} ("contact" OR "about" OR "services" OR "projects") {exclude}',
+    '("telecom system integrator" OR "network contractor" OR "wireless contractor") {country} ("contact" OR services OR projects) {exclude}',
     ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.91
   ),
@@ -369,7 +351,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "contact_page buyer_profile",
-    '("infrastructure" OR "equipment" OR "network" OR "service") ("contact" OR "about us" OR "services" OR "projects") {country} {exclude}',
+    '("telecom services" OR "network infrastructure" OR "wireless solutions") {country} ("contact" OR "about us" OR projects) {exclude}',
     ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.9
   ),
@@ -378,7 +360,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "radio_parts service_profile",
-    '("RRU" OR "BBU" OR "AAU" OR "board" OR "module") (maintenance OR repair OR replacement OR "spare parts management") ({product_or}) {country} {exclude}',
+    '("RRU" OR "BBU" OR "AAU") (maintenance OR repair OR replacement) {country} contact {exclude}',
     ["productTerms", "scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.89
   ),
@@ -387,7 +369,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "catalog_model service_profile",
-    '({specific_product_or}) (maintenance OR repair OR replacement OR "spare parts" OR procurement OR RFQ) {country} {exclude}',
+    '({specific_product_or}) ("spare parts" OR maintenance OR replacement) {country} contact {exclude}',
     ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.88
   ),
@@ -405,7 +387,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "project_delivery buyer_profile",
-    "(infrastructure OR rollout OR deployment OR project) ({product_or}) {country} {exclude}",
+    '("telecom project" OR rollout OR deployment) ({product_or}) {country} contact {exclude}',
     ["scenarioTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.86
   ),
@@ -423,7 +405,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "filetype company_profile",
-    'filetype:pdf (infrastructure OR equipment OR maintenance OR network) ("company profile" OR brochure OR contact OR projects) {country} {exclude}',
+    'filetype:pdf ("telecom" OR "network infrastructure" OR wireless) ("company profile" OR projects OR contact) {country} {exclude}',
     ["productTerms", "scenarioTerms", "marketTerms", "excludeTerms"],
     0.8
   ),
@@ -450,7 +432,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "brand_repair buyer_profile",
-    '({brand_or}) (repair OR refurbished OR maintenance OR "spare parts") ({product_or}) {country} {exclude}',
+    '({brand_or}) (repair OR maintenance OR "spare parts") {country} contact {exclude}',
     ["brandTerms", "productTerms", "marketTerms", "excludeTerms"],
     0.71
   ),
@@ -486,7 +468,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "contractor boolean_or",
-    '(contractor OR "field services" OR "network maintenance") {country} {exclude}',
+    '("telecom contractor" OR "field services" OR "network maintenance") {country} contact {exclude}',
     ["customerIntentTerms", "scenarioTerms", "marketTerms", "excludeTerms"],
     0.61
   ),
@@ -504,7 +486,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "site company_contact",
-    'site:{country_site} (infrastructure OR equipment OR maintenance OR contractor OR "system integrator" OR contact) {country} {exclude}',
+    'site:{country_site} (telecom OR wireless OR "network maintenance") ("contact" OR services OR projects) {country} {exclude}',
     ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.59
   ),
@@ -513,7 +495,7 @@ const executableTemplates: SearchStrategyTemplate[] = [
     "brave_official",
     "experimental",
     "site boolean_or",
-    '({brand_or}) ({product_or}) ("spare parts" OR "repair" OR replacement OR maintenance) site:{country_site} {country} {exclude}',
+    '({brand_or}) ("spare parts" OR repair OR maintenance) site:{country_site} {country} {exclude}',
     ["brandTerms", "productTerms", "marketTerms", "excludeTerms"],
     0.58
   ),
@@ -525,6 +507,51 @@ const executableTemplates: SearchStrategyTemplate[] = [
     'site:{country_site} (operator OR carrier OR "service provider") ("vendor registration" OR "supplier registration" OR procurement) ({product_or}) {country} {exclude}',
     ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
     0.57
+  ),
+  template(
+    "linkedin_company_procurement",
+    "brave_official",
+    "manual_only",
+    "linkedin_company procurement_intelligence",
+    'site:linkedin.com/company ("procurement" OR purchasing OR "supply chain") ({product_or}) {country} {exclude}',
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.56
+  ),
+  template(
+    "linkedin_decision_maker",
+    "brave_official",
+    "manual_only",
+    "linkedin_profile decision_maker_intelligence",
+    'site:linkedin.com/in ("procurement manager" OR purchasing OR "head of procurement") ({product_or}) {country} {exclude}',
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.55
+  ),
+  template(
+    "local_directory_intelligence",
+    "brave_official",
+    "manual_only",
+    "local_directory company_directory_intelligence",
+    '("yellow pages" OR "company directory" OR "business directory") ({product_or}) {country} (contractor OR integrator OR maintenance) {exclude}',
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.54
+  ),
+  template(
+    "b2b_buyer_intelligence",
+    "brave_official",
+    "manual_only",
+    "b2b_buyer rfq_intelligence",
+    '(buyer OR RFQ OR inquiry OR "buying lead") ({product_or}) {country} (GlobalSources OR IndiaMART OR Go4WorldBusiness) {exclude}',
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.53
+  ),
+  template(
+    "whatsapp_phone_code_contact",
+    "brave_official",
+    "manual_only",
+    "whatsapp_phone_code contact_intelligence",
+    '("WhatsApp" OR "wa.me/{country_phone_code}") ({product_or}) {country} (contractor OR integrator OR maintenance) {exclude}',
+    ["productTerms", "customerIntentTerms", "marketTerms", "excludeTerms"],
+    0.52
   )
 ];
 
@@ -734,29 +761,37 @@ function renderStrategyTemplate(
   const productTerms = keywordGroups.productTerms.length
     ? keywordGroups.productTerms
     : ["equipment", "maintenance parts"];
-  const brandTerms = keywordGroups.brandTerms.length ? keywordGroups.brandTerms : productTerms;
+  const fallbackBrandTerms = specificProductTerms(productTerms);
+  const brandTerms = keywordGroups.brandTerms.length
+    ? keywordGroups.brandTerms
+    : fallbackBrandTerms.length
+      ? fallbackBrandTerms
+      : productTerms;
   const scenarioTerms = keywordGroups.scenarioTerms.length
     ? keywordGroups.scenarioTerms
     : productTerms;
   const intentTerms = keywordGroups.customerIntentTerms.length
     ? keywordGroups.customerIntentTerms
     : scenarioTerms;
-  return templateText
+  return compactRenderedSearchQuery(
+    templateText
     .replaceAll(
       "{specific_product_or}",
       quoteOr(overrides.specificProductTerms ?? specificProductTerms(keywordGroups.productTerms))
     )
-    .replaceAll("{product_or}", quoteOr(productTerms.slice(0, 4)))
-    .replaceAll("{intent_or}", quoteOr(intentTerms.slice(0, 4)))
-    .replaceAll("{brand_or}", quoteOr(brandTerms.slice(0, 4)))
-    .replaceAll("{scenario_or}", quoteOr(scenarioTerms.slice(0, 4)))
+      .replaceAll("{product_or}", quoteOr(productTerms.slice(0, 3)))
+      .replaceAll("{intent_or}", quoteOr(intentTerms.slice(0, 3)))
+      .replaceAll("{brand_or}", quoteOr(brandTerms.slice(0, 3)))
+      .replaceAll("{scenario_or}", quoteOr(scenarioTerms.slice(0, 3)))
     .replaceAll("{country}", country)
     .replaceAll("{country_site}", countryToSite(country))
+    .replaceAll("{country_phone_code}", countryToPhoneCode(country))
     .replaceAll("{loc}", countryToLoc(country))
     .replaceAll("{exclude_terms}", excludeClause(keywordGroups.excludeTerms))
     .replaceAll("{exclude}", excludeClause(keywordGroups.excludeTerms))
     .replace(/\s+/g, " ")
-    .trim();
+      .trim()
+  );
 }
 
 function quoteOr(terms: string[]) {
@@ -764,7 +799,11 @@ function quoteOr(terms: string[]) {
 }
 
 function excludeClause(terms: string[]) {
-  return prioritizeExcludeTerms(terms).slice(0, 8).map(toNegativeSearchTerm).join(" ");
+  return prioritizeExcludeTerms(terms)
+    .slice(0, 3)
+    .map(toNegativeSearchTerm)
+    .filter(Boolean)
+    .join(" ");
 }
 
 function prioritizeExcludeTerms(terms: string[]) {
@@ -773,24 +812,19 @@ function prioritizeExcludeTerms(terms: string[]) {
     "jobs",
     "career",
     "careers",
-    "directory",
-    "marketplace",
     "training",
     "course",
     "forum",
-    "yellow pages",
-    "supplier directory",
     "wikipedia",
-    "Alibaba",
-    "Accio",
-    "TradeWheel",
-    "Made-in-China",
-    "GlobalSources",
-    "IndiaMART"
+    "youtube",
+    "facebook",
+    "consumer phone",
+    "phone accessories",
+    "smartphone"
   ];
   const normalizedPriority = new Map(priority.map((term, index) => [term.toLowerCase(), index]));
 
-  return [...terms].sort((left, right) => {
+  const sorted = [...terms].sort((left, right) => {
     const leftPriority = normalizedPriority.get(left.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
     const rightPriority = normalizedPriority.get(right.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
     if (leftPriority !== rightPriority) {
@@ -799,15 +833,83 @@ function prioritizeExcludeTerms(terms: string[]) {
 
     return left.localeCompare(right);
   });
+  const output: string[] = [];
+  const seen = new Set<string>();
+
+  for (const term of sorted) {
+    const key = canonicalNegativeTerm(term);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(term);
+  }
+
+  return output;
 }
 
 function toNegativeSearchTerm(term: string) {
   const cleaned = term.trim();
-  if (!cleaned) {
+  if (!cleaned || forbiddenContactNegativeTerms.has(cleaned.toLowerCase())) {
     return "";
   }
 
   return /[^A-Za-z0-9-]/.test(cleaned) ? `-"${cleaned}"` : `-${cleaned}`;
+}
+
+const forbiddenContactNegativeTerms = new Set([
+  "phone",
+  "contact",
+  "tel",
+  "email",
+  "mail",
+  "fax",
+  "address",
+  "mobile",
+  "whatsapp"
+]);
+
+function canonicalNegativeTerm(term: string) {
+  const normalized = term.trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    careers: "career",
+    jobs: "job",
+    wikipedia: "wiki"
+  };
+  return aliases[normalized] ?? normalized;
+}
+
+function compactRenderedSearchQuery(query: string) {
+  const withCompactGroups = query.replace(/\(([^()]*\bOR\b[^()]*)\)/gi, (match, group: string) => {
+    const terms = group
+      .split(/\s+OR\s+/i)
+      .map((term) => term.trim())
+      .filter(Boolean)
+      .slice(0, 4);
+    return terms.length > 1 ? `(${terms.join(" OR ")})` : (terms[0] ?? match);
+  });
+  return limitRenderedNegativeTerms(withCompactGroups, 3).replace(/\s+/g, " ").trim();
+}
+
+function limitRenderedNegativeTerms(query: string, maxTerms: number) {
+  const tokens = query.split(/\s+/);
+  const output: string[] = [];
+  const seen = new Set<string>();
+  let negatives = 0;
+
+  for (const token of tokens) {
+    if (token.startsWith("-")) {
+      const key = canonicalNegativeTerm(token.toLowerCase().replace(/^-+/, "").replace(/^"|"$/g, ""));
+      if (seen.has(key) || negatives >= maxTerms) {
+        continue;
+      }
+      seen.add(key);
+      negatives += 1;
+    }
+    output.push(token);
+  }
+
+  return output.join(" ");
 }
 
 function specificProductTerms(terms: string[]) {
@@ -1031,6 +1133,49 @@ function countryToSite(country: string) {
   };
 
   return siteMap[normalized] ?? ".com";
+}
+
+function countryToPhoneCode(country: string) {
+  const normalized = country.trim().toLowerCase();
+  const codeMap: Record<string, string> = {
+    uae: "971",
+    "united arab emirates": "971",
+    dubai: "971",
+    "abu dhabi": "971",
+    "saudi arabia": "966",
+    riyadh: "966",
+    jeddah: "966",
+    qatar: "974",
+    oman: "968",
+    kuwait: "965",
+    bahrain: "973",
+    jordan: "962",
+    iraq: "964",
+    iran: "98",
+    turkey: "90",
+    egypt: "20",
+    morocco: "212",
+    nigeria: "234",
+    kenya: "254",
+    "south africa": "27",
+    ghana: "233",
+    tanzania: "255",
+    brazil: "55",
+    russia: "7",
+    ukraine: "380",
+    india: "91",
+    indonesia: "62",
+    vietnam: "84",
+    malaysia: "60",
+    philippines: "63",
+    thailand: "66",
+    mexico: "52",
+    colombia: "57",
+    chile: "56",
+    peru: "51"
+  };
+
+  return codeMap[normalized] ?? "";
 }
 
 function countryToLoc(country: string) {

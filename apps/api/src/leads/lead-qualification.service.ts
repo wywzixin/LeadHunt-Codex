@@ -130,7 +130,10 @@ type IntelligenceType =
   | "rfq_notice"
   | "exhibition_pdf"
   | "project_news"
-  | "company_directory";
+  | "company_directory"
+  | "decision_maker_profile"
+  | "buyer_directory"
+  | "operator_vendor_registration";
 
 type EvidenceLeadClassification = {
   leadType: Exclude<EvidenceLeadType, "customer">;
@@ -143,10 +146,10 @@ type EvidenceLeadClassification = {
   risk: string;
 };
 
-const contactProbeTimeoutMs = 8000;
-const contactProbePageLimit = 18;
-const contactLinkedProbePageLimit = 10;
-const maxAiCandidateEvaluationsPerBatch = 5;
+const contactProbeTimeoutMs = 5000;
+const contactProbePageLimit = 6;
+const contactLinkedProbePageLimit = 3;
+const maxAiCandidateEvaluationsPerBatch = 15;
 
 @Injectable()
 export class LeadQualificationService {
@@ -207,6 +210,10 @@ export class LeadQualificationService {
     );
     const buyerServicePage = looksLikeBuyerSideCompanyPage(candidate);
     const hasGenericServiceBuyerSignal = hasAny(text, genericServiceBuyerGateTerms);
+    const hasCompanyNameQualityIssue =
+      isForbiddenCompanyName(candidate.companyName) ||
+      looksLikePseudoCompanyName(candidate.companyName) ||
+      looksLikeSiteBuilderCredit(candidate.companyName);
 
     score += pageQuality.scoreAdjustment;
     reasons.push(...pageQuality.reasons);
@@ -300,7 +307,7 @@ export class LeadQualificationService {
         }`
       );
     } else if (targetCountryMismatch) {
-      forcedStatus = buyerOrIndustryFit ? "country_conflict_review" : "rejected";
+      forcedStatus = "rejected";
     } else if (targetCountryUnverified) {
       forcedStatus = "needs_country_review";
     }
@@ -388,7 +395,7 @@ export class LeadQualificationService {
     if (targetCountryMismatch) {
       score = Math.min(score, 49);
       risks.push(
-        "Verified candidate country is outside the selected target markets; kept for country-conflict review"
+        "Verified candidate country is outside the selected target markets; rejected instead of entering country review"
       );
     }
 
@@ -423,6 +430,14 @@ export class LeadQualificationService {
       risks.push(
         "Candidate is not backed by an official company homepage, about, contact, services, solutions, telecom, project, or location page"
       );
+    }
+
+    if (hasCompanyNameQualityIssue) {
+      score = Math.min(score, 49);
+      if (!forcedStatus || forcedStatus === "needs_country_review") {
+        forcedStatus = "evidence_review";
+      }
+      risks.push("Company name looks like a page title, template label, or site-builder credit");
     }
 
     if (pageType === "brand_oem_site") {
@@ -717,6 +732,7 @@ function mergeAiEvaluationWithRuleScore(
 ): IcpScoreDraft {
   const weightedScore = Math.round(clamp(ai.fitScore, 0, 100) * 0.6 + ruleIcp.score * 0.4);
   let score = weightedScore;
+  const aiCompanyNameRisk = hasAiCompanyNameQualityRisk(ai);
   const rejectTypes = new Set([
     "directory",
     "content_article",
@@ -747,11 +763,15 @@ function mergeAiEvaluationWithRuleScore(
     score = Math.min(score, 49);
   }
 
+  if (aiCompanyNameRisk) {
+    score = Math.min(score, 49);
+  }
+
   const finalScore = clamp(score, 0, 100);
   let status: IcpScoreDraft["status"];
   if (ruleIcp.status === "intelligence_review" || ai.resultType === "procurement_intelligence") {
     status = "intelligence_review";
-  } else if (ruleIcp.status === "evidence_review") {
+  } else if (ruleIcp.status === "evidence_review" || aiCompanyNameRisk) {
     status = "evidence_review";
   } else if (ruleIcp.status === "country_conflict_review") {
     status = "country_conflict_review";
@@ -776,7 +796,8 @@ function mergeAiEvaluationWithRuleScore(
     ...(ai.confidence < 0.55 ? ["AI buyer judgment confidence is low"] : []),
     ...(ai.resultType === "supplier_or_competitor"
       ? ["AI marked this result as supplier or competitor; not a buyer lead"]
-      : [])
+      : []),
+    ...(aiCompanyNameRisk ? ["AI flagged the company name as unreliable"] : [])
   ]);
 
   return {
@@ -797,6 +818,13 @@ function mergeAiEvaluationWithRuleScore(
     pageType: ruleIcp.pageType,
     status
   };
+}
+
+function hasAiCompanyNameQualityRisk(ai: CandidateBuyerEvaluation) {
+  const text = [...(ai.risks ?? []), ...(ai.matchedSignals ?? [])].join(" ").toLowerCase();
+  return /company\s+name|wrong\s+name|looks\s+wrong|site[-\s]?builder|created\s+by|designed\s+by|powered\s+by|template\s+label|page\s+title/.test(
+    text
+  );
 }
 
 function normalizeResult(
@@ -872,20 +900,6 @@ function contactKey(contact: { type: string; value: string }) {
   return `${contact.type}:${contact.value.toLowerCase()}`;
 }
 
-function mergeExistingContacts(
-  candidateContacts: NormalizedLeadCandidate["contacts"],
-  existingContacts: ExistingLead["contacts"]
-) {
-  return dedupeContacts([
-    ...candidateContacts,
-    ...existingContacts.map((contact) => ({
-      type: contact.type as NormalizedLeadCandidate["contacts"][number]["type"],
-      value: contact.value,
-      sourceUrl: contact.sourceUrl ?? ""
-    }))
-  ]);
-}
-
 function missingExistingContacts(
   existingContacts: ExistingLead["contacts"],
   candidateContacts: NormalizedLeadCandidate["contacts"]
@@ -902,7 +916,16 @@ function extractCompanyName(title: string, url: string) {
     return attributedCompany;
   }
 
+  const profileCompany = companyFromProfileUrl(url);
+  if (profileCompany) {
+    return profileCompany;
+  }
+
   const domainCompany = companyFromDomain(url);
+  if (looksLikeSiteBuilderCredit(title)) {
+    return domainCompany || "Unknown Company";
+  }
+
   const parts = title
     .split(/\s(?:[-–—|:»]\s)+|\s[|]\s/)
     .map((part) => cleanupCompanyName(part))
@@ -918,6 +941,7 @@ function cleanupCompanyName(value: string) {
   return value
     .replace(/\b(home|official site|website|about us|contact us|logo)\b/gi, "")
     .replace(/^\s*(?:welcome to|official)\s+/i, "")
+    .replace(siteBuilderCreditPrefixPattern, "")
     .replace(/\s+\b(?:homepage|home page)\b$/i, "")
     .replace(/\s+/g, " ")
     .replace(/^[|:：/\\\-\s]+|[|:：/\\\-\s]+$/g, "")
@@ -951,6 +975,7 @@ function isForbiddenCompanyName(value: string) {
     !normalized ||
     forbiddenCompanyNameTerms.has(normalized) ||
     /^by\s+[a-z0-9 .'-]{2,60}$/i.test(value.trim()) ||
+    looksLikeSiteBuilderCredit(value) ||
     /\b(?:tagline|awesome image|blog category|article author|pdf)\b/i.test(value)
   );
 }
@@ -1011,6 +1036,10 @@ function looksLikePseudoCompanyName(value: string) {
   );
 }
 
+function looksLikeSiteBuilderCredit(value: string) {
+  return siteBuilderCreditPrefixPattern.test(value.trim());
+}
+
 function companyFromDomain(url: string) {
   const domain = domainFromUrl(url);
   if (!domain) {
@@ -1019,6 +1048,24 @@ function companyFromDomain(url: string) {
 
   const label = domain.split(".")[0] ?? domain;
   return formatDomainLabelAsCompany(label);
+}
+
+function companyFromProfileUrl(url: string) {
+  const domain = domainFromUrl(url);
+  const path = pathFromUrl(url);
+  if (!domain || !path) {
+    return null;
+  }
+
+  const linkedInMatch = domainMatches(domain, "linkedin.com")
+    ? path.match(/\/(?:company|in)\/([^/?#]+)/i)
+    : null;
+  const slug = linkedInMatch?.[1];
+  if (!slug) {
+    return null;
+  }
+
+  return formatDomainLabelAsCompany(slug);
 }
 
 function formatDomainLabelAsCompany(label: string) {
@@ -1496,6 +1543,18 @@ function isUsableEmail(email: string) {
     return false;
   }
 
+  if (discardedEmailLocalParts.has(localPart)) {
+    return false;
+  }
+
+  if (
+    /^(?:your|sample|test|demo|username|user|name|email|mail|admin)(?:[._-]?(?:name|email|mail|company|domain|address|id))?$/i.test(
+      localPart
+    )
+  ) {
+    return false;
+  }
+
   return !discardedEmailDomains.includes(domain);
 }
 
@@ -1563,6 +1622,10 @@ function isPlausiblePhoneNumber(phone: string) {
     return false;
   }
 
+  if (looksLikeTemplatePhoneNumber(phone)) {
+    return false;
+  }
+
   if ((phone.match(/\(/g)?.length ?? 0) !== (phone.match(/\)/g)?.length ?? 0)) {
     return false;
   }
@@ -1594,6 +1657,24 @@ function hasPartNumberContext(context: string) {
 
 function digitsOnly(value: string) {
   return value.replace(/\D/g, "");
+}
+
+function looksLikeTemplatePhoneNumber(phone: string) {
+  const digits = digitsOnly(phone);
+  if (
+    /^(?:38640(?:222555|44445555)|15551234567|1800458556)$/.test(digits) ||
+    /(?:000000|111111|222222|333333|444444|555555|666666|777777|888888|999999)/.test(
+      digits
+    )
+  ) {
+    return true;
+  }
+
+  const groups = phone.match(/\d+/g) ?? [];
+  const repeatedGroups = groups.filter((group) => group.length <= 3);
+  return repeatedGroups.some(
+    (group) => repeatedGroups.filter((candidate) => candidate === group).length >= 3
+  );
 }
 
 function extractPhones(text: string) {
@@ -1827,6 +1908,10 @@ function shouldProbeContactPages(candidate: NormalizedLeadCandidate) {
     return false;
   }
 
+  if (looksLikeKnowledgeContentPage(candidate)) {
+    return false;
+  }
+
   if (looksLikeBuyerSideCompanyPage(candidate)) {
     return true;
   }
@@ -1850,11 +1935,17 @@ function shouldHardRejectCandidate(
     .join(" ")
     .toLowerCase();
   const pageType = classifyCandidatePage(candidate, criteria);
+  const evidenceClassification = classifyEvidenceLead(candidate, criteria, pageType);
 
-  if (
-    pageType === "own_site" ||
-    pageType === "third_party_profile"
-  ) {
+  if (pageType === "own_site") {
+    return true;
+  }
+
+  if (domain && evidenceClassification && isPreHardRejectReviewDomain(domain)) {
+    return false;
+  }
+
+  if (pageType === "third_party_profile") {
     return true;
   }
 
@@ -1866,7 +1957,7 @@ function shouldHardRejectCandidate(
     return true;
   }
 
-  if (classifyEvidenceLead(candidate, criteria, pageType)) {
+  if (evidenceClassification) {
     return false;
   }
 
@@ -1920,9 +2011,10 @@ function isRiskyDiscoveryPage(candidate: NormalizedLeadCandidate) {
 
   return Boolean(
     (domain && (isBlockedContentDomain(domain) || isBlockedMarketplaceDomain(domain))) ||
-    looksLikeArticlePath(path) ||
-    looksLikeContentTitle(candidate.companyName) ||
-    hasAny(text, contentNoiseTerms)
+      looksLikeKnowledgeContentPage(candidate) ||
+      looksLikeArticlePath(path) ||
+      looksLikeContentTitle(candidate.companyName) ||
+      hasAny(text, contentNoiseTerms)
   );
 }
 
@@ -1948,6 +2040,10 @@ function looksLikeBuyerSideCompanyPage(candidate: NormalizedLeadCandidate) {
   }
 
   if (looksLikeStorefrontPath(path) || isVendorOemDomain(domain)) {
+    return false;
+  }
+
+  if (looksLikeKnowledgeContentPage(candidate)) {
     return false;
   }
 
@@ -2365,6 +2461,10 @@ function classifyCandidatePage(
     return "supplier_or_storefront";
   }
 
+  if (looksLikeKnowledgeContentPage(candidate)) {
+    return "content_or_directory";
+  }
+
   if (looksLikeBuyerSideCompanyPage(candidate)) {
     return "official_company_site";
   }
@@ -2518,6 +2618,42 @@ function classifyEvidenceLead(
       "policy alert",
       "commission restricts"
     ]);
+
+  if (domain && isOperatorVendorRegistrationPage(domain, path, text)) {
+    return intelligenceClassification(
+      "operator_vendor_registration",
+      ["operator_vendor_registration", "procurement_intelligence"],
+      extractableCompanies
+    );
+  }
+
+  if (domain && isLinkedInDomain(domain) && hasRelevantSearchContext) {
+    const isDecisionMakerProfile = path.includes("/in/");
+    return intelligenceClassification(
+      isDecisionMakerProfile ? "decision_maker_profile" : "company_directory",
+      [
+        isDecisionMakerProfile ? "decision_maker_profile" : "linkedin_company_profile",
+        "linkedin_intelligence"
+      ],
+      extractableCompanies
+    );
+  }
+
+  if (domain && isDirectoryIntelligenceDomain(domain) && hasRelevantSearchContext) {
+    return intelligenceClassification(
+      "company_directory",
+      ["company_directory", "directory_intelligence", "extractable_companies"],
+      extractableCompanies
+    );
+  }
+
+  if (domain && isB2bBuyerIntelligenceDomain(domain) && hasB2bBuyerIntelligenceSignal(text, path)) {
+    return intelligenceClassification(
+      isProcurement ? "rfq_notice" : "buyer_directory",
+      ["buyer_directory", "b2b_buyer_intelligence"],
+      extractableCompanies
+    );
+  }
 
   if (
     pageType === "supplier_or_storefront" ||
@@ -2861,6 +2997,54 @@ function isBlockedMarketplaceDomain(domain: string) {
   );
 }
 
+function isLinkedInDomain(domain: string) {
+  return domainMatches(domain, "linkedin.com");
+}
+
+function isDirectoryIntelligenceDomain(domain: string) {
+  return directoryIntelligenceDomains.some((directoryDomain) =>
+    domainMatches(domain, directoryDomain)
+  );
+}
+
+function isB2bBuyerIntelligenceDomain(domain: string) {
+  return b2bBuyerIntelligenceDomains.some((buyerDomain) => domainMatches(domain, buyerDomain));
+}
+
+function hasB2bBuyerIntelligenceSignal(text: string, path: string) {
+  return (
+    hasProcurementIntent(text) ||
+    hasAny(text, b2bBuyerIntelligenceTerms) ||
+    /(?:buyer|buyers|buying-lead|buying-leads|rfq|inquiry|inquiries|request-for-quotation)/i.test(
+      path
+    )
+  );
+}
+
+function isPreHardRejectReviewDomain(domain: string) {
+  return (
+    isLinkedInDomain(domain) ||
+    isDirectoryIntelligenceDomain(domain) ||
+    isB2bBuyerIntelligenceDomain(domain)
+  );
+}
+
+function isOperatorVendorRegistrationPage(domain: string, path: string, text: string) {
+  const hasOperatorIdentity =
+    operatorVendorDomains.some((operatorDomain) => domainMatches(domain, operatorDomain)) ||
+    hasAny(text, operatorVendorIdentityTerms);
+  if (!hasOperatorIdentity) {
+    return false;
+  }
+
+  return (
+    hasProcurementIntent(text) ||
+    /(?:vendor|supplier|procurement|purchasing|registration|prequalification|pre-qualification)/i.test(
+      path
+    )
+  );
+}
+
 function isAlwaysHardRejectedContentDomain(domain: string) {
   return alwaysHardRejectedContentDomains.some((blockedDomain) =>
     domainMatches(domain, blockedDomain)
@@ -2925,6 +3109,37 @@ function looksLikeArticlePath(path: string) {
   }
 
   return articlePathTerms.some((term) => path.includes(term)) || /\/20\d{2}\/\d{1,2}\//.test(path);
+}
+
+function looksLikeKnowledgeContentPage(candidate: NormalizedLeadCandidate) {
+  const path = pathFromUrl(candidate.sourceUrl);
+  const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    /\/(?:what-is|what-does|definition|glossary|topics?|resources?|applications?|knowledge|learn|guide|guides|specifications?|standards?|whitepaper|paper|journal|article|blog)\b/i.test(
+      path
+    ) ||
+    hasAny(text, [
+      "what is",
+      "what does",
+      "definition",
+      "glossary",
+      "stands for",
+      "stands-for",
+      "learn about",
+      "guide to",
+      "specifications",
+      "standards & performance",
+      "application information",
+      "open access journal",
+      "research article",
+      "science direct",
+      "whitepaper"
+    ])
+  );
 }
 
 function looksLikeDocumentPath(path: string) {
@@ -3601,12 +3816,39 @@ const legacyMigratedDomains = ["etisalat.ae"];
 
 const discardedEmailDomains = [
   "example.com",
+  "example.org",
+  "example.net",
   "domain.com",
   "yourdomain.com",
+  "your-domain.com",
+  "yourmail.com",
   "company.com",
+  "companyname.com",
   "email.com",
+  "emailaddress.com",
+  "yoursite.com",
+  "yourcompany.com",
+  "sample.com",
+  "test.com",
+  "mywebsite.com",
+  "site.com",
   "tecnologia.com"
 ];
+
+const discardedEmailLocalParts = new Set([
+  "yourmail",
+  "your-email",
+  "youremail",
+  "your.email",
+  "email",
+  "mail",
+  "username",
+  "user",
+  "name",
+  "test",
+  "sample",
+  "demo"
+]);
 
 const procurementIntelligenceDomains = [
   "tendersontime.com",
@@ -3616,6 +3858,79 @@ const procurementIntelligenceDomains = [
   "tendersinfo.com",
   "dgmarket.com",
   "procurement-notices.undp.org"
+];
+
+const directoryIntelligenceDomains = [
+  "yellowpages.com",
+  "yellowpages.ae",
+  "yellowpages.co.za",
+  "yellowpages.com.ng",
+  "dubaiyellowpages.com",
+  "saudidirectory.com",
+  "yello.ae",
+  "yellosa.co.za",
+  "uaeplusplus.com",
+  "kompass.com",
+  "europages.com",
+  "europages.co.uk",
+  "telecom.directory"
+];
+
+const b2bBuyerIntelligenceDomains = [
+  "alibaba.com",
+  "accio.com",
+  "tradewheel.com",
+  "made-in-china.com",
+  "globalsources.com",
+  "indiamart.com",
+  "go4worldbusiness.com",
+  "tradeindia.com",
+  "ec21.com",
+  "exporthub.com"
+];
+
+const b2bBuyerIntelligenceTerms = [
+  "buyer",
+  "buyers",
+  "buying lead",
+  "buying leads",
+  "request for quotation",
+  "rfq",
+  "inquiry",
+  "inquiries",
+  "purchase request",
+  "sourcing request",
+  "wanted",
+  "looking for supplier"
+];
+
+const operatorVendorDomains = [
+  "stc.com.kw",
+  "stc.com.sa",
+  "ooredoo.qa",
+  "ooredoo.com",
+  "zain.com",
+  "zain.com.kw",
+  "eand.ae",
+  "etisalat.ae",
+  "du.ae",
+  "omantel.om",
+  "batelco.com",
+  "vodafone.qa"
+];
+
+const operatorVendorIdentityTerms = [
+  "stc",
+  "ooredoo",
+  "zain",
+  "etisalat",
+  "e&",
+  "du telecom",
+  "omantel",
+  "batelco",
+  "vodafone qatar",
+  "mobile network operator",
+  "telecom operator"
 ];
 
 const governmentPortalDomains = ["u.ae"];
@@ -3960,6 +4275,9 @@ const contentTitleTerms = [
   "shipment details",
   "showroom",
   "what is",
+  "what does",
+  "glossary",
+  "definition",
   "how to",
   "guide",
   "state act",
@@ -4095,6 +4413,7 @@ const domainCompanyNameOverrides: Record<string, string> = {
   ats4solutions: "ATS 4 Solutions",
   greenportsuppliers: "Greenport Suppliers",
   hctgroup: "HCT Group",
+  alhazmservices: "Al Hazm Services",
   ispsupplies: "ISP Supplies",
   mfcomm: "MF Communications",
   rtesqatar: "RTES Qatar",
@@ -4172,6 +4491,9 @@ const forbiddenCompanyNameTerms = new Set([
   "tagline",
   "welcome"
 ]);
+
+const siteBuilderCreditPrefixPattern =
+  /^\s*(?:created|designed|powered|developed|maintained|hosted)\s+by\s+|^\s*website\s+by\s+/i;
 
 const globalTargetRegions = new Set(["global", "worldwide", "all countries", "all markets"]);
 

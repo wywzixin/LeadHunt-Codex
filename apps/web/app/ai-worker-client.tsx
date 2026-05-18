@@ -414,6 +414,7 @@ type DisplayLead = {
   social: string;
   address: string;
   stage: string;
+  actionable: boolean;
   raw: LeadCandidate;
 };
 
@@ -445,17 +446,25 @@ export function AiWorkerClient() {
   const [mailLead, setMailLead] = useState<MailConfirmationLead | null>(null);
 
   const displayLeads = useMemo(() => buildDisplayLeads(currentTask), [currentTask]);
-  const sentCount = useMemo(
-    () => displayLeads.filter((lead) => hasSentEmail(lead.raw)).length,
+  const actionableDisplayLeads = useMemo(
+    () => displayLeads.filter(isActionableDisplayLead),
     [displayLeads]
+  );
+  const sentCount = useMemo(
+    () => actionableDisplayLeads.filter((lead) => hasSentEmail(lead.raw)).length,
+    [actionableDisplayLeads]
   );
   const crmSyncedCount = useMemo(
-    () => displayLeads.filter((lead) => Boolean(lead.raw.crmLead)).length,
-    [displayLeads]
+    () => actionableDisplayLeads.filter((lead) => Boolean(lead.raw.crmLead)).length,
+    [actionableDisplayLeads]
   );
   const pendingFollowupCount = useMemo(
-    () => displayLeads.reduce((total, lead) => total + pendingFollowups(lead.raw).length, 0),
-    [displayLeads]
+    () =>
+      actionableDisplayLeads.reduce(
+        (total, lead) => total + pendingFollowups(lead.raw).length,
+        0
+      ),
+    [actionableDisplayLeads]
   );
   const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
   const keywordRows = useMemo(
@@ -469,7 +478,7 @@ export function AiWorkerClient() {
         creating,
         searching,
         approving,
-        leadCount: displayLeads.length,
+        leadCount: actionableDisplayLeads.length,
         leadQualityCounts,
         sentCount,
         crmSyncedCount,
@@ -480,22 +489,26 @@ export function AiWorkerClient() {
       creating,
       crmSyncedCount,
       currentTask,
-      displayLeads.length,
+      actionableDisplayLeads.length,
       leadQualityCounts,
       pendingFollowupCount,
       searching,
       sentCount
     ]
   );
-  const crmRows = useMemo(() => buildCrmRows(displayLeads), [displayLeads]);
+  const crmRows = useMemo(() => buildCrmRows(actionableDisplayLeads), [actionableDisplayLeads]);
   const crmPageCount = Math.max(1, Math.ceil(crmRows.length / crmPageSize));
   const crmPageRows = crmRows.slice((crmPage - 1) * crmPageSize, crmPage * crmPageSize);
   const selectedDisplayLead =
     displayLeads.find((lead) => lead.id === selectedLeadId) ?? displayLeads[0] ?? null;
+  const selectedActionableLead =
+    actionableDisplayLeads.find((lead) => lead.id === selectedLeadId) ??
+    actionableDisplayLeads[0] ??
+    null;
   const modalLead =
-    mailLead ?? (selectedDisplayLead ? toMailLead(selectedDisplayLead) : fallbackMailLead);
+    mailLead ?? (selectedActionableLead ? toMailLead(selectedActionableLead) : fallbackMailLead);
   const modalRecipients = useMemo<MailConfirmationRecipient[]>(() => {
-    return displayLeads
+    return actionableDisplayLeads
       .map((lead) => {
         const mailLead = toMailLead(lead);
         return {
@@ -505,7 +518,7 @@ export function AiWorkerClient() {
         };
       })
       .filter((item) => item.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item.email));
-  }, [displayLeads]);
+  }, [actionableDisplayLeads]);
 
   useEffect(() => {
     if (!currentTask?.id || !isBackendTaskActive(currentTask)) {
@@ -602,7 +615,7 @@ export function AiWorkerClient() {
       setTaskPrompt(restoredPrompt);
       applyTaskProgress(refreshed);
       if ((refreshed.leadCandidates?.length ?? 0) > 0) {
-        setSelectedLeadId(refreshed.leadCandidates?.[0]?.id ?? null);
+        setSelectedLeadId(buildDisplayLeads(refreshed)[0]?.id ?? null);
       }
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -682,7 +695,7 @@ export function AiWorkerClient() {
 
     const leadCount = task.leadCandidates?.length ?? 0;
     if (leadCount > 0) {
-      setSelectedLeadId((current) => current ?? task.leadCandidates?.[0]?.id ?? null);
+      setSelectedLeadId((current) => current ?? buildDisplayLeads(task)[0]?.id ?? null);
     }
   }
 
@@ -690,6 +703,12 @@ export function AiWorkerClient() {
     const lead = selectedDisplayLead;
     if (!lead) {
       setStatus("当前还没有候选客户，请先执行搜索。");
+      return;
+    }
+
+    if (!lead.actionable) {
+      setSelectedLeadId(lead.id);
+      setStatus("该线索仍在待复核/情报区，先确认国家、官网和联系方式后再生成开发信或同步 CRM。");
       return;
     }
 
@@ -751,7 +770,7 @@ export function AiWorkerClient() {
   function openCrmPreview() {
     setCrmPage(1);
     setCrmOpen(true);
-    setStatus(displayLeads.length ? "已打开 CRM 同步预览。" : "当前暂无候选客户，CRM 预览为空。");
+    setStatus(crmRows.length ? "已打开 CRM 同步预览。" : "当前暂无可同步主客户，CRM 预览为空。");
   }
 
   function changeCrmPage(nextPage: number) {
@@ -1295,7 +1314,9 @@ function AiWorkerConversation({
   const rawResultCount =
     currentTask?.searchQueries?.reduce((total, query) => total + (query.resultCount ?? 0), 0) ??
     rawSearchResults.length;
-  const qualifiedCount = leads.filter((lead) => lead.score >= 75).length;
+  const actionableLeads = leads.filter(isActionableDisplayLead);
+  const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
+  const hasActionableLeads = actionableLeads.length > 0;
   const running = creating || searching || approving;
   const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
   const activitySteps = buildActivitySteps({
@@ -1621,7 +1642,7 @@ function AiWorkerConversation({
                 type="button"
                 data-open-mail="true"
                 onClick={onOpenMail}
-                disabled={running || !leads.length}
+                disabled={running || !hasActionableLeads}
               >
                 ✉ 发邮件
               </button>
@@ -1631,8 +1652,8 @@ function AiWorkerConversation({
             </div>
             <div className="projectPager leadPager">
               <span>
-                已找到 {leads.length} 条，ICP 75+ {qualifiedCount} 条
-                {leads.length ? ` · 当前 ${leadRangeStart}-${leadRangeEnd}` : ""}
+                主客户 {actionableLeads.length} 条，ICP 75+ {qualifiedCount} 条
+                {leads.length ? ` · 当前显示 ${leadRangeStart}-${leadRangeEnd}` : ""}
               </span>
               <button
                 type="button"
@@ -1727,7 +1748,7 @@ function AiWorkerConversation({
           {sentCount
             ? `已完成 ${sentCount} 封 Gmail 发送，${crmSyncedCount} 家客户已同步 CRM，${pendingFollowupCount} 个 3 天后跟进提醒已创建。`
             : leads.length
-              ? `我已为您找到 ${leads.length} 家候选公司，其中 ${qualifiedCount} 家达到 ICP 75 分以上。下一步可以选择客户进入邮件触达。`
+              ? `我已为您找到 ${actionableLeads.length} 家主客户，其中 ${qualifiedCount} 家达到 ICP 75 分以上。下一步可以选择客户进入邮件触达。`
               : "任务创建后，系统会先生成搜索策略，再调用搜索接口清洗候选客户。当前页面已经接入真实任务链路，等待首批候选客户返回。"}
         </p>
 
@@ -1762,7 +1783,7 @@ function AiWorkerConversation({
                     type="button"
                     data-open-mail="true"
                     onClick={onOpenMail}
-                    disabled={running || !leads.length}
+                    disabled={running || !hasActionableLeads}
                   >
                     发送
                   </button>
@@ -2287,17 +2308,15 @@ function buildProfileSourceRows(task: LeadTask | null): ProfileSourceRow[] {
     });
   }
   if (signals?.qualityGate) {
+    const executed = signals.qualityGate.executedQueryCount ?? 0;
+    const remaining = signals.qualityGate.remainingQueries ?? 0;
     rows.push({
-      label: "质量门禁",
+      label: "质量诊断",
       values: [
-        `动作：${formatQualityGateAction(signals.qualityGate.action)}`,
-        `已执行：${signals.qualityGate.executedQueryCount ?? 0} 条`,
-        `暂停 pending：${signals.qualityGate.pendingQueryCount ?? 0} 条`,
-        `剩余自动执行：${signals.qualityGate.remainingQueries ?? 0} 条`,
+        `前 ${executed} 条质量波动，系统保留原搜索计划并继续执行剩余 ${remaining} 条 query。`,
         ...(signals.qualityGate.reasons?.length
           ? [`原因：${signals.qualityGate.reasons.join(", ")}`]
-          : []),
-        ...formatPausedPendingSamples(signals.qualityGate.samplePendingQueries)
+          : [])
       ]
     });
   }
@@ -2334,31 +2353,12 @@ function formatMarketSource(source: string | undefined) {
   return source ? (labels[source] ?? source) : "-";
 }
 
-function formatQualityGateAction(action: string | undefined) {
-  const labels: Record<string, string> = {
-    paused_pending_queries_for_review: "暂停待复核，保留原 pending",
-    quality_fallback_suggestion: "生成 fallback 建议"
-  };
-  return action ? (labels[action] ?? action) : "-";
-}
-
 function formatFallbackSuggestionSamples(
   samples: NonNullable<ProfileSignals["qualityFallbackSuggestion"]>["sampleQueries"]
 ) {
   return (samples ?? [])
     .slice(0, 2)
     .map((item) => `建议：${[item.country, item.query].filter(Boolean).join(" | ")}`);
-}
-
-function formatPausedPendingSamples(
-  samples: NonNullable<ProfileSignals["qualityGate"]>["samplePendingQueries"]
-) {
-  return (samples ?? [])
-    .slice(0, 2)
-    .map(
-      (item) =>
-        `保留：${[item.country, item.strategyTemplate, item.query].filter(Boolean).join(" | ")}`
-    );
 }
 
 function keywordRow(
@@ -2433,7 +2433,8 @@ function buildActivitySteps({
   const executedCount =
     currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
     0;
-  const qualifiedCount = leads.filter((lead) => lead.score >= 75).length;
+  const actionableLeads = leads.filter(isActionableDisplayLead);
+  const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
   const hasReturnedLeads = leads.length > 0;
 
   return [
@@ -2570,7 +2571,8 @@ function buildActivityLogs({
   const executedCount =
     currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
     0;
-  const qualifiedCount = leads.filter((lead) => lead.score >= 75).length;
+  const actionableLeads = leads.filter(isActionableDisplayLead);
+  const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
   const hasTask = Boolean(currentTask);
   const hasLeads = leads.length > 0;
 
@@ -2737,10 +2739,9 @@ function searchResultKey(result: SearchResult) {
 
 function buildDisplayLeads(task: LeadTask | null): DisplayLead[] {
   const targetMarkets = taskTargetMarkets(task);
-  return (task?.leadCandidates ?? [])
-    .filter((lead) => {
-      return isDisplayableLeadCandidate(lead);
-    })
+  const candidates = task?.leadCandidates ?? [];
+  const sortLeads = (leads: LeadCandidate[]) =>
+    leads
     .map((lead) => ({
       displayLead: buildDisplayLead(lead),
       priority: displayLeadPriority(lead, targetMarkets)
@@ -2756,6 +2757,15 @@ function buildDisplayLeads(task: LeadTask | null): DisplayLead[] {
       return left.displayLead.companyName.localeCompare(right.displayLead.companyName);
     })
     .map(({ displayLead }) => displayLead);
+
+  const mainLeads = sortLeads(candidates.filter(isDisplayableLeadCandidate));
+  const reviewTailLimit = Math.max(8, 20 - mainLeads.length);
+  const reviewTail = sortLeads(candidates.filter(isReviewTailLeadCandidate)).slice(
+    0,
+    reviewTailLimit
+  );
+
+  return [...mainLeads, ...reviewTail];
 }
 
 function isMainLeadStatus(status: string | undefined) {
@@ -2767,10 +2777,36 @@ function isDisplayableLeadCandidate(lead: LeadCandidate) {
   return (
     isMainLeadStatus(lead.status) &&
     !hasEvidenceLeadType(lead) &&
+    !isHiddenEvidenceOrContentLead(lead) &&
     score >= 50 &&
     (lead.countryConfidence === "high" || lead.countryConfidence === "medium") &&
     !lead.countryConflict
   );
+}
+
+function isReviewTailLeadCandidate(lead: LeadCandidate) {
+  if (
+    isDisplayableLeadCandidate(lead) ||
+    lead.status === "rejected" ||
+    lead.status === "intelligence_review" ||
+    lead.status === "evidence_review" ||
+    hasEvidenceLeadType(lead) ||
+    isHiddenEvidenceOrContentLead(lead)
+  ) {
+    return false;
+  }
+
+  return (
+    lead.status === "needs_country_review" ||
+    lead.status === "country_conflict_review" ||
+    lead.countryConflict ||
+    lead.countryConfidence === "low" ||
+    lead.countryConfidence === "unknown"
+  );
+}
+
+function isActionableDisplayLead(lead: DisplayLead) {
+  return lead.actionable;
 }
 
 function hasEvidenceLeadType(lead: LeadCandidate) {
@@ -2783,6 +2819,50 @@ function hasEvidenceLeadType(lead: LeadCandidate) {
     leadType === "content_evidence" ||
     leadType === "government_information"
   );
+}
+
+function isHiddenEvidenceOrContentLead(lead: LeadCandidate) {
+  const payload = icpReasonPayload(lead.icpScore?.reasons);
+  const summary = typeof payload?.summary === "string" ? payload.summary : "";
+  const text = [
+    lead.companyName,
+    lead.website,
+    lead.sourceUrl,
+    summary,
+    firstIcpReason(lead.icpScore?.reasons)
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return containsAny(text, [
+    "/glossary",
+    "/resources/",
+    "/resource/",
+    "/blog",
+    "/article",
+    "/articles",
+    "/news",
+    "/press-release",
+    "/topics/",
+    "/applications/",
+    "/application/",
+    "/definition",
+    "what is",
+    "what does",
+    "stands for",
+    "stands-for",
+    "essential knowledge",
+    "specifications",
+    "standards & performance",
+    "open access journal",
+    "sciencedirect.com",
+    "mdpi.com",
+    "techtarget.com",
+    "whatis.com",
+    "microchip.com/en-us/solutions/communications-infrastructure",
+    "st.com/en/applications/telecom-infrastructure"
+  ]);
 }
 
 function summarizeLeadQualityCounts(task: LeadTask | null): LeadQualityCounts {
@@ -2798,6 +2878,7 @@ function summarizeLeadQualityCounts(task: LeadTask | null): LeadQualityCounts {
       lead.status !== "rejected" &&
       lead.status !== "intelligence_review" &&
       lead.status !== "evidence_review" &&
+      !isHiddenEvidenceOrContentLead(lead) &&
       !isDisplayableLeadCandidate(lead) &&
       (lead.status === "needs_country_review" ||
         lead.status === "country_conflict_review" ||
@@ -2875,6 +2956,7 @@ function buildDisplayLead(lead: LeadCandidate): DisplayLead {
     social: social || "-",
     address: country,
     stage: displayLeadStage(lead),
+    actionable: isDisplayableLeadCandidate(lead),
     raw: lead
   };
 }
@@ -2898,6 +2980,14 @@ function displayCompanyName(lead: LeadCandidate) {
   const currentName = cleanupDisplayCompanyName(lead.companyName);
   const domainName = companyNameFromUrl(lead.website ?? lead.sourceUrl);
   const attributedName = extractDisplayAttributedCompanyName(currentName);
+
+  if (
+    /^\s*(?:created|designed|powered|developed|maintained|hosted)\s+by\s+|^\s*website\s+by\s+/i.test(
+      lead.companyName ?? ""
+    )
+  ) {
+    return domainName || currentName || "Unknown Company";
+  }
 
   if (attributedName) {
     return attributedName;
@@ -2923,6 +3013,7 @@ function cleanupDisplayCompanyName(value: string | null | undefined) {
   return (value ?? "")
     .replace(/\b(home|official site|website|about us|contact us|logo|tagline|awesome image|pdf)\b/gi, "")
     .replace(/^\s*(?:welcome to|official)\s+/i, "")
+    .replace(/^\s*(?:created|designed|powered|developed|maintained|hosted)\s+by\s+|^\s*website\s+by\s+/i, "")
     .replace(/\s+\b(?:homepage|home page)\b$/i, "")
     .replace(/\s+/g, " ")
     .replace(/^[|:\\\-\s]+|[|:\\\-\s]+$/g, "")
@@ -2953,6 +3044,9 @@ function isForbiddenDisplayCompanyName(value: string) {
     !normalized ||
     displayForbiddenCompanyNameTerms.has(normalized) ||
     /^by\s+[a-z0-9 .'-]{2,60}$/i.test(value.trim()) ||
+    /^\s*(?:created|designed|powered|developed|maintained|hosted)\s+by\s+|^\s*website\s+by\s+/i.test(
+      value.trim()
+    ) ||
     /\b(?:tagline|awesome image|blog category|article author|pdf)\b/i.test(value)
   );
 }
@@ -3231,6 +3325,7 @@ const displayCompanyEntityTerms = [
 const displayDomainCompanyNameOverrides: Record<string, string> = {
   ats4solutions: "ATS 4 Solutions",
   greenportsuppliers: "Greenport Suppliers",
+  alhazmservices: "Al Hazm Services",
   hctgroup: "HCT Group",
   ispsupplies: "ISP Supplies",
   mfcomm: "MF Communications",
@@ -3434,6 +3529,12 @@ function displayLeadStage(lead: LeadCandidate) {
   if (lead.status === "evidence_review") {
     return "证据待复核";
   }
+  if (lead.status === "needs_country_review") {
+    return "待国家复核";
+  }
+  if (lead.status === "country_conflict_review") {
+    return "国家冲突复核";
+  }
   if (lead.status === "approved") {
     return "已进入开发信";
   }
@@ -3495,6 +3596,12 @@ function buildCustomerBrief(lead: LeadCandidate) {
   }
   if (lead.status === "evidence_review") {
     return "证据待复核";
+  }
+  if (lead.status === "needs_country_review") {
+    return "待国家复核";
+  }
+  if (lead.status === "country_conflict_review") {
+    return "国家冲突复核";
   }
 
   const payload = icpReasonPayload(lead.icpScore?.reasons);
@@ -3634,6 +3741,15 @@ function evidenceBriefFromPayload(status: string | undefined, payload: IcpReason
     }
     if (intelligenceType === "company_directory") {
       return "\u540d\u5f55\u60c5\u62a5/\u53ef\u63d0\u53d6\u5ba2\u6237";
+    }
+    if (intelligenceType === "decision_maker_profile") {
+      return "LinkedIn 决策人情报" + suffix;
+    }
+    if (intelligenceType === "buyer_directory") {
+      return "B2B 买家情报" + suffix;
+    }
+    if (intelligenceType === "operator_vendor_registration") {
+      return "运营商供应商入口";
     }
     return "\u60c5\u62a5\u7ebf\u7d22" + suffix;
   }

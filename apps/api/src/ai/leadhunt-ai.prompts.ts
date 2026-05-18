@@ -64,66 +64,30 @@ export const leadHuntPromptTemplates = {
     title: "Search strategy generation",
     instruction:
       [
-        "Generate exactly 30 Brave-compatible B2B prospecting search queries from the current product evidence. Product evidence may come from the user prompt, saved product profile, website content, uploaded files, product lists, CRM samples, historical tasks, or manual notes. Do not assume the seller has a website and do not assume the industry is telecom.",
-        "Core goal: do not simply search for who sells the same product. Infer who would realistically use, maintain, repair, replace, install, integrate, procure, import, distribute, tender for, or resell the product.",
+        "Generate exactly input.minQueryCount Brave-compatible B2B prospecting search queries from the analyzed productProfile and customerProfile. If input.minQueryCount is missing, generate 15. Product evidence may come from the user prompt, saved product profile, website content, uploaded files, product lists, CRM samples, historical tasks, or manual notes. Do not assume the seller has a website and do not assume the industry is telecom.",
+        "Before writing queries, use productProfile to decide what is being sold and customerProfile to decide who should buy, maintain, repair, replace, install, integrate, operate, import, distribute, or resell it. Every executable query must be traceable to both, but keep output compact: rationale must be under 12 words, productEvidence/customerEvidence should be omitted or contain at most one short phrase each.",
+        "Core goal: find direct company/customer pages, not intelligence pages. Do not simply search for who sells the same product. Infer who would realistically use, maintain, repair, replace, install, integrate, operate, import, distribute, or resell the product.",
         "First build a product search matrix from the available evidence: productCategory, productType, coreProducts, modelTerms, priorityModelTerms, brandTerms, productGroups, applicationScenarios, demandTriggers, likelyBuyerTypes, channelTypes, and badTargets. If evidence is thin, infer cautiously from product category instead of inventing exact SKUs.",
         "Target markets: input.targetMarkets has already been expanded to concrete countries. Never put macro regions such as Middle East, Africa, Europe, LATAM, MENA, GCC, Global, or worldwide in a query or country field. Each query must contain exactly one concrete country and the country field must be the same concrete country.",
         "Model/SKU handling: when many models exist, do not default to evenly generating many queries for every model. Cluster models into productGroups first. Select 10-20 representative product/model terms for the whole task, balanced by product group. Select priority models only when they are mentioned by the user, marked as main/hot/in-stock/high-value, shown on the homepage or key category, representative of a group, or present in CRM history. Non-priority models should inform product understanding but should not each receive their own query by default. If the user explicitly asks to search every model, keep it batched and generate only 1-3 buyer-intent queries per model.",
-        "Search matrix types and default 30-query mix: buyer_scenario 40% / 12 queries, product_group 30% / 9 queries, model_specific 20% / 6 queries, procurement_event 10% / 3 queries, channel 0%. Execution priority must be buyer_scenario first, then product_group, then brand_ecosystem, then model_specific, then procurement_event, with channel last. Channel means distributor, supplier, stockist, reseller, wholesaler, importer, or dealer. Only use channel when the user's current prompt explicitly asks for channel customers, distributors, stockists, importers, resellers, or dealers; then take it from the buyer_scenario/product_group budget, not from model_specific by default. Saved profile wording about distributors is weak background, not permission to make channel the main line.",
-        "Every query must contain buyer-side intent plus a product clue plus exactly one concrete target country plus a contact/procurement/RFQ/tender/vendor-registration entry point. Default buyer-side intent should prioritize maintain, repair, replace, operate, install, integrate, manage network operations, procure, RFQ, tender, vendor registration, or project deployment. Do not use supplier/distributor/stockist/reseller/wholesale as the default customer type.",
-        "Good generic patterns: \"[application scenario]\" [country] contact; \"[product group] maintenance\" [country] contact; \"[brand ecosystem]\" [country] integrator contact; \"[operator/ISP/FTTH/WISP] network operations\" [country] contact; \"[product category]\" [country] RFQ; \"[product category] distributor\" [country] contact only when channel customers are explicitly requested; \"[model]\" replacement [country] contact only when the model is a priority model.",
-        "Bad query patterns: SKU-only, product-only, supplier-only, manufacturer-only, price, datasheet, manual, buy now, marketplace, market report, encyclopedia, jobs, training, course, mixed-country query, or a country field that is a long phrase. Bad examples: \"Huawei MA5800 Canada supplier price datasheet\"; \"industrial pump datasheet Australia\"; \"Canada telecom equipment distributor\" as country; site:.ru Russia \"UAE\".",
+        "Search matrix types for the main customer list: buyer_scenario 50%, product_group 30%, brand_ecosystem 10%, model_specific 10%, procurement_event 0%, channel 0%. For a 15-query batch this means about 8 buyer_scenario, 4 product_group, 1 brand_ecosystem, and 2 model_specific queries. Execution priority must be buyer_scenario first, then product_group, then brand_ecosystem, then model_specific, with channel last only if explicitly requested. Do not generate procurement_event queries for the default customer search.",
+        "Every query must contain buyer-side intent plus a specific product/category/application clue plus exactly one concrete target country plus a direct company entry point such as contact, contact us, services, solutions, projects, locations, offices, about us, or company. Default buyer-side intent should prioritize maintain, repair, replace, operate, install, integrate, manage network operations, service delivery, or project deployment. Do not use supplier/distributor/stockist/reseller/wholesale as the default customer type.",
+        "Good generic patterns: \"[application scenario]\" [country] contact; \"[product group] maintenance\" [country] contact; \"[brand ecosystem]\" [country] integrator contact; \"[operator/ISP/FTTH/WISP] network operations\" [country] contact; \"[product group] service company\" [country] contact; \"[model]\" replacement [country] contact only when the model is a priority model; \"[product category] distributor\" [country] contact only when channel customers are explicitly requested.",
+        "Bad query patterns: SKU-only, product-only, supplier-only, manufacturer-only, RFQ, tender, vendor registration, procurement notice, government procurement, filetype:pdf, LinkedIn profile, yellow pages, directory, B2B marketplace, buyer board, WhatsApp hunting, price, datasheet, manual, buy now, marketplace, market report, encyclopedia, glossary, blog, article, resources page, jobs, training, course, mixed-country query, or a country field that is a long phrase. Bad examples: \"Huawei MA5800 Canada supplier price datasheet\"; \"industrial pump datasheet Australia\"; \"Canada telecom equipment distributor\" as country; site:.ru Russia \"UAE\".",
         "The country field is a geographic routing field for Brave Search. It MUST be exactly one of the provided concrete targetMarkets values. It is not a customer type, industry label, macro region, or long-tail keyword. Each query text must mention only that same country/market. User prompt target markets override saved profile regions; profile regions are weak defaults only.",
-        "Keep each query concise: target length <= 120 characters, max one OR group, max three OR terms in that group, max three negative terms. Do not add repeated negatives such as -job and -jobs together. Choose negatives by query type instead of mechanically repeating every exclusion. Do not use -pdf, -news, -blog, or -report as negative terms because tenders, government procurement pages, exhibition PDFs, and project news are useful intelligence and will be separated downstream.",
-        "Use only supported or experimental operators for automated execution. Do not use site:.xx unless the TLD matches the country field. Avoid broad marketplace, directory, report, article, encyclopedia, price, datasheet, PDF, job, course, or supplier-manufacturer discovery unless explicitly requested."
+        "Keep each query concise: target length <= 120 characters, max one OR group, max three OR terms in that group, max three negative terms. Do not add repeated negatives such as -job and -jobs together. Choose negatives by query type instead of mechanically repeating every exclusion. Never use contact evidence fields as negative terms: -phone, -contact, -tel, -email, -mail, -fax, -address, -mobile, or -whatsapp are forbidden. If you need to avoid consumer phone retailers, use exact phrase negatives such as -\"consumer phone\", -\"phone accessories\", or -\"mobile phone shop\" instead of -phone.",
+        "Use only supported or experimental operators for automated execution; executionStatus must be supported or experimental only. Never output manual_only or disabled. If a query is not safe for automated execution, omit it and write a better executable query instead. Do not use site:.xx unless the TLD matches the country field. Do not use LinkedIn profiles, local directories, B2B marketplaces, buyer boards, WhatsApp-link hunting, PDFs, news, reports, articles, glossary pages, or procurement/tender/RFQ/vendor-registration searches in the automated main customer search.",
+        "Reject broad filler queries. Do not rely on generic words such as infrastructure, equipment, network, service, spare parts, or contractor unless the same query also contains a specific product/category/application clue from productProfile such as a model, product group, brand ecosystem, base station/RAN/OLT/rectifier/microwave/private-network equivalent, or another domain-specific term.",
+        "Keep JSON small. evidenceSummary, productUnderstanding, rejectedIdeas, productEvidence, customerEvidence, and negativeTerms may be empty unless they add important evidence. Do not write long explanations.",
+        "If input.refillContext is present, this is a second-pass refill. Keep the same productProfile and customerProfile logic, avoid duplicating acceptedQueries, and replace rejectedQueries with stronger executable alternatives that fix the stated rejection reasons. Return exactly input.minQueryCount new queries; the system will merge them with acceptedQueries."
       ].join(" "),
     outputShape: {
-      evidenceSummary: {
-        availableSources: ["string"],
-        missingSources: ["string"],
-        confidence: "number between 0 and 1"
-      },
-      productUnderstanding: {
-        productCategory: "string",
-        productType: "equipment | spare_parts | raw_materials | consumables | machinery | software | service | components | finished_goods | unknown",
-        coreProducts: ["string"],
-        modelTerms: ["string"],
-        priorityModelTerms: ["string"],
-        brandTerms: ["string"],
-        productGroups: ["string"],
-        applicationScenarios: ["string"],
-        demandTriggers: ["string"],
-        likelyBuyerTypes: ["string"],
-        channelTypes: ["string"],
-        badTargets: ["string"]
-      },
-      strategyMix: {
-        buyerScenario: "integer percentage, default 40",
-        productGroup: "integer percentage, default 30",
-        brandEcosystem: "integer percentage",
-        modelSpecific: "integer percentage, default 20",
-        procurementEvent: "integer percentage, default 10",
-        channel: "integer percentage"
-      },
       queries: [
         {
           query: "string",
           country: "one exact value from input.targetMarkets, e.g. Canada",
-          language: "language code",
-          operatorSource: "google_official | brave_official | common_seo",
-          executionStatus: "supported | experimental | manual_only | disabled",
-          rationale: "string",
-          strategyType: "buyer_scenario | product_group | brand_ecosystem | model_specific | procurement_event | channel",
-          sourceEvidence: "user_prompt | product_profile | website | product_list | crm_sample | inferred",
-          buyerIntent: "string",
-          negativeTerms: ["string"],
+          strategyType: "buyer_scenario | product_group | brand_ecosystem | model_specific | channel",
           priority: "integer 1-5"
-        }
-      ],
-      rejectedIdeas: [
-        {
-          badQueryIdea: "string",
-          reason: "string"
         }
       ]
     }
