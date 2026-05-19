@@ -58,6 +58,15 @@ export type SearchStrategyInput = {
   productProfile: ProductProfileAnalysis | ProductProfileAnalysisInput;
   customerProfile: CustomerProfileAnalysis | CustomerProfileAnalysisInput;
   targetMarkets: string[];
+  targetMarketProfiles?: Array<{
+    country: string;
+    countryName: string;
+    tier?: number;
+    language?: string;
+    anchors?: string[];
+    phoneCode?: string | null;
+    tlds?: string[];
+  }>;
   operatorLibrary: unknown;
   minQueryCount?: number;
   refillContext?: {

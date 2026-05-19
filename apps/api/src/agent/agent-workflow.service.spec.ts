@@ -229,6 +229,15 @@ function createWebsiteContentMock() {
 function createLeadHuntAiMock(
   generateSearchStrategy: (input: {
     targetMarkets: string[];
+    targetMarketProfiles?: Array<{
+      country: string;
+      countryName: string;
+      tier?: number;
+      language?: string;
+      anchors?: string[];
+      phoneCode?: string | null;
+      tlds?: string[];
+    }>;
     refillContext?: {
       requiredAdditionalQueries: number;
       acceptedQueries: Array<{
@@ -240,13 +249,19 @@ function createLeadHuntAiMock(
     };
   }) => Promise<{
     queries: Array<{
-      query: string;
+      query?: string;
+      coreQuery?: string;
       country: string;
+      countryName?: string;
       language: string;
       operatorSource: string;
-      executionStatus: string;
+      executionStatus?: string;
+      engineCompatibility?: string;
       rationale: string;
       strategyType?: string;
+      intelligenceType?: string;
+      expectedResultType?: string;
+      confidence?: string;
       priority: number;
     }>;
   }>
@@ -417,6 +432,115 @@ describe("AgentWorkflowService", () => {
     expect(prisma.leadTask.findMany).not.toHaveBeenCalled();
   });
 
+  it("hides intelligence and evidence leads from customer-list task responses", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValueOnce({
+      id: "task-1",
+      userId: "user-1",
+      mode: "semi_managed",
+      status: "paused",
+      targetCount: 20,
+      inputPayload: null,
+      createdAt: new Date("2026-05-03T08:00:00.000Z"),
+      updatedAt: new Date("2026-05-03T08:05:00.000Z"),
+      agentSteps: [],
+      searchQueries: [],
+      leadCandidates: [
+        {
+          id: "lead-1",
+          taskId: "task-1",
+          companyName: "Gulf Telecom",
+          website: "https://gulf.example",
+          country: "UAE",
+          queryCountry: "UAE",
+          inferredCountry: "UAE",
+          countryEvidence: null,
+          countryConfidence: "high",
+          countryConflict: false,
+          sourceUrl: "https://gulf.example",
+          status: "review",
+          createdAt: new Date("2026-05-03T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-03T08:00:00.000Z"),
+          contacts: [],
+          icpScore: { id: "score-1", score: 67, grade: "B", reasons: [], createdAt: new Date() },
+          crmLead: null,
+          followupTasks: [],
+          outreachDrafts: []
+        },
+        {
+          id: "lead-2",
+          taskId: "task-1",
+          companyName: "Market Report",
+          website: "https://reports.example",
+          country: null,
+          queryCountry: "UAE",
+          inferredCountry: null,
+          countryEvidence: null,
+          countryConfidence: "unknown",
+          countryConflict: false,
+          sourceUrl: "https://reports.example",
+          status: "intelligence_review",
+          createdAt: new Date("2026-05-03T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-03T08:00:00.000Z"),
+          contacts: [],
+          icpScore: { id: "score-2", score: 49, grade: "D", reasons: [], createdAt: new Date() },
+          crmLead: null,
+          followupTasks: [],
+          outreachDrafts: []
+        },
+        {
+          id: "lead-3",
+          taskId: "task-1",
+          companyName: "Blog Article",
+          website: "https://blog.example",
+          country: null,
+          queryCountry: "UAE",
+          inferredCountry: null,
+          countryEvidence: null,
+          countryConfidence: "unknown",
+          countryConflict: false,
+          sourceUrl: "https://blog.example",
+          status: "evidence_review",
+          createdAt: new Date("2026-05-03T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-03T08:00:00.000Z"),
+          contacts: [],
+          icpScore: { id: "score-3", score: 49, grade: "D", reasons: [], createdAt: new Date() },
+          crmLead: null,
+          followupTasks: [],
+          outreachDrafts: []
+        }
+      ]
+    });
+    const service = new AgentWorkflowService(prisma as any);
+
+    const result = (await service.getTaskForUser("user-1", "task-1")) as any;
+
+    expect(result.leadCandidates.map((lead: { companyName: string }) => lead.companyName)).toEqual([
+      "Gulf Telecom"
+    ]);
+    expect(prisma.leadTask.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          leadCandidates: expect.objectContaining({
+            where: {
+              status: {
+                notIn: expect.arrayContaining([
+                  // 2026-05 simplified statuses we hide.
+                  "intelligence",
+                  "rejected",
+                  // Legacy statuses kept for back-compat with historical
+                  // task rows.
+                  "intelligence_review",
+                  "evidence_review"
+                ])
+              }
+            }
+          })
+        })
+      })
+    );
+  });
+
   it("creates a task and writes the full agent_steps timeline", async () => {
     const prisma = createPrismaMock();
     const ai = createLeadHuntAiMock(async (input) => ({
@@ -509,6 +633,39 @@ describe("AgentWorkflowService", () => {
       new Set(["Germany", "Poland", "Oman"])
     );
     expect(result.searchQueries.map((query) => query.country)).not.toContain("Global");
+  });
+
+  it("detects Kuwait as an explicit prompt market for search planning", async () => {
+    const prisma = createPrismaMock();
+    prisma.customerProfile.findUnique.mockResolvedValue({
+      targetRegions: ["UAE"],
+      referenceCustomerUrls: [],
+      crmSampleIds: [],
+      notes: "Saved profile should not hide explicitly requested Kuwait."
+    });
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt: "Find telecom equipment buyers in UAE and Kuwait",
+      targetCount: 20
+    });
+
+    expect(ai.generateSearchStrategy.mock.calls[0]?.[0].targetMarkets).toEqual([
+      "UAE",
+      "Kuwait"
+    ]);
+    expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(
+      new Set(["UAE", "Kuwait"])
+    );
   });
 
   it("keeps macro profile regions auditable while planning only the primary market pool first", async () => {
@@ -757,56 +914,156 @@ describe("AgentWorkflowService", () => {
     });
   });
 
+  it("accepts ISO coreQuery output, enables channel queries, and appends backend exclusions", async () => {
+    const prisma = createPrismaMock();
+    const makeCoreQueries = (offset: number) =>
+      Array.from({ length: 15 }, (_, index) => {
+        const absoluteIndex = offset + index;
+        const isChannel = absoluteIndex % 5 === 4;
+        const isUae = absoluteIndex % 2 === 0;
+        const countryName = isUae ? "UAE" : "Saudi Arabia";
+        const country = isUae ? "AE" : "SA";
+        const product = absoluteIndex % 3 === 0 ? "RRU BBU" : "5G telecom equipment";
+        const buyer = isChannel
+          ? "telecom equipment distributor"
+          : absoluteIndex === 0
+            ? "private 5G solutions"
+            : absoluteIndex === 1
+              ? "field engineering"
+              : absoluteIndex === 2
+                ? "telecom power service"
+              : absoluteIndex % 3 === 1
+                ? "telecom system integrator"
+                : "base station maintenance company";
+
+        return {
+          id: `Q${String(absoluteIndex + 1).padStart(2, "0")}`,
+          coreQuery: `"${buyer}" "${product}" ${countryName} contact project ${absoluteIndex + 1} ${
+            absoluteIndex === 0 ? "-phone" : ""
+          }`.trim(),
+          country,
+          countryName,
+          language: "en",
+          operatorSource: "brave_official",
+          engineCompatibility: "supported",
+          rationale: "Buyer role plus product",
+          strategyType: isChannel ? "channel_customer" : "main_customer",
+          intelligenceType: "none",
+          expectedResultType: "company_site",
+          buyerIntent: isChannel ? "distribution" : "maintenance",
+          productEvidence: [product],
+          customerEvidence: [buyer],
+          confidence: "high",
+          priority: index + 1
+        };
+      });
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: makeCoreQueries(input.refillContext ? 15 : 0)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt: "Find UAE and Saudi Arabia 5G telecom equipment customers",
+      targetCount: 20
+    });
+    const queryText = result.searchQueries.map((query) => query.query).join("\n");
+
+    expect(ai.generateSearchStrategy).toHaveBeenCalledTimes(2);
+    expect(ai.generateSearchStrategy.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        minQueryCount: 15,
+        targetMarketProfiles: expect.arrayContaining([
+          expect.objectContaining({ country: "AE", countryName: "UAE" }),
+          expect.objectContaining({ country: "SA", countryName: "Saudi Arabia" })
+        ])
+      })
+    );
+    expect(result.searchQueries).toHaveLength(30);
+    expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(
+      new Set(["UAE", "Saudi Arabia"])
+    );
+    expect(result.searchQueries.some((query) => query.strategyType === "channel_customer")).toBe(
+      true
+    );
+    expect(queryText).toContain('"private 5G solutions"');
+    expect(queryText).toContain('"field engineering"');
+    expect(queryText).toContain('"telecom power service"');
+    // 2026-05: backend no longer concatenates -site:/-inurl: exclusions
+    // into the query text. Brave does not honor them reliably and they
+    // burn scarce query-length budget; post-search candidate filtering
+    // does the actual rejection. Assert the new behavior here.
+    expect(queryText).not.toContain("-site:alibaba.com");
+    expect(queryText).not.toContain("-inurl:.cn");
+    expect(queryText).not.toMatch(/-phone\b/i);
+  });
+
+  it("fails planning instead of executing a partial 15-query GPT plan when refill fails", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => {
+      if (input.refillContext) {
+        throw new Error("refill unavailable");
+      }
+
+      return {
+        queries: simpleAiQueriesForMarkets(input.targetMarkets).slice(0, 15)
+      };
+    });
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt: "Find 5G telecom equipment customers",
+      targetCount: 20
+    });
+    const persistedPayload = prisma.leadTask.create.mock.calls[0]?.[0].data.inputPayload;
+
+    expect(ai.generateSearchStrategy).toHaveBeenCalledTimes(2);
+    expect(result.searchQueries).toHaveLength(15);
+    expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
+    expect(prisma.agentStep.updateMany).toHaveBeenCalledWith({
+      where: { taskId: "task-1", nodeName: "plan_search_queries" },
+      data: expect.objectContaining({
+        status: "failed",
+        // 2026-05: error message changed when we added the soft-floor
+        // (GPT must hit either MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT
+        // outright or 80% of it plus reverse-network padding to reach
+        // the target). Match on the threshold count rather than the
+        // wording so future tweaks don't flake the test.
+        error: expect.stringContaining("at least 30")
+      })
+    });
+    expect(persistedPayload.profileSignals.aiPlanning).toEqual(
+      expect.objectContaining({
+        gptSearchQueryCount: 15,
+        gptRefillAttempts: 1,
+        gptRefillAcceptedCount: 0,
+        fallbackReasons: expect.arrayContaining([
+          expect.stringContaining("GPT search refill failed"),
+          expect.stringContaining("GPT search plan incomplete: 15/30")
+        ])
+      })
+    );
+  });
+
   it("asks GPT for a refill when valid long-tail queries are rejected before reaching 30", async () => {
     const prisma = createPrismaMock();
     const ai = createLeadHuntAiMock(async (input) => {
       if (input.refillContext) {
         return {
-          queries: [
-            aiSearchQuery('"Huawei OLT MA5800" replacement UAE contact', "UAE", 1, "model_specific"),
-            aiSearchQuery(
-              '"Ericsson Baseband 6648" replacement "Saudi Arabia" contact',
-              "Saudi Arabia",
-              2,
-              "model_specific"
-            ),
-            aiSearchQuery(
-              '"Ericsson AIR 6488 B42" replacement UAE contact',
-              "UAE",
-              3,
-              "model_specific"
-            ),
-            aiSearchQuery(
-              '"remote radio unit" maintenance "Saudi Arabia" contact',
-              "Saudi Arabia",
-              4,
-              "model_specific"
-            ),
-            aiSearchQuery(
-              '"waterproof insulating tape" telecom site UAE contact',
-              "UAE",
-              5,
-              "model_specific"
-            ),
-            aiSearchQuery(
-              '"telecom boards" cards maintenance "Saudi Arabia" contact',
-              "Saudi Arabia",
-              6,
-              "model_specific"
-            ),
-            aiSearchQuery(
-              '"RAN equipment" maintenance UAE services',
-              "UAE",
-              7,
-              "brand_ecosystem"
-            ),
-            aiSearchQuery(
-              '"telecom spare parts" replenishment "Saudi Arabia" contact',
-              "Saudi Arabia",
-              8,
-              "brand_ecosystem"
-            )
-          ]
+          queries: simpleAiQueriesForMarkets(input.targetMarkets)
+            .slice(15, 30)
+            .map((query, index) => ({ ...query, priority: index + 1 }))
         };
       }
 
@@ -843,29 +1100,75 @@ describe("AgentWorkflowService", () => {
     expect(ai.generateSearchStrategy.mock.calls[1]?.[0]).toEqual(
       expect.objectContaining({
         refillContext: expect.objectContaining({
-          requiredAdditionalQueries: 8,
+          requiredAdditionalQueries: 15,
           acceptedQueries: expect.arrayContaining([
             expect.objectContaining({ query: expect.stringContaining("base station maintenance") })
-          ]),
-          rejectedQueries: expect.arrayContaining([
-            expect.objectContaining({ reason: "missing_product_customer_or_market_signal" })
           ])
         })
       })
     );
     expect(result.searchQueries).toHaveLength(30);
-    expect(queryText).toContain('"Huawei OLT MA5800" replacement UAE contact');
-    expect(queryText).toContain('"waterproof insulating tape" telecom site UAE contact');
+    expect(queryText).toContain('"Huawei OLT MA5800"');
     expect(queryText).not.toContain("infrastructure equipment service");
     expect(persistedPayload.profileSignals.aiPlanning).toEqual(
       expect.objectContaining({
         querySource: "gpt55_only",
         gptSearchQueryCount: 30,
         gptRefillAttempts: 1,
-        gptRefillAcceptedCount: 8,
+        gptRefillAcceptedCount: 15,
         fallbackQueryCount: 0
       })
     );
+  });
+
+  it("asks GPT for a second repair refill when the first refill is still one query short", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => {
+      if (input.refillContext?.acceptedQueries.length === 29) {
+        return {
+          queries: simpleAiQueriesForMarkets(input.targetMarkets)
+            .slice(29, 30)
+            .map((query) => ({ ...query, priority: 1 }))
+        };
+      }
+
+      if (input.refillContext) {
+        return {
+          queries: simpleAiQueriesForMarkets(input.targetMarkets)
+            .slice(15, 29)
+            .map((query, index) => ({ ...query, priority: index + 1 }))
+        };
+      }
+
+      return {
+        queries: simpleAiQueriesForMarkets(input.targetMarkets).slice(0, 15)
+      };
+    });
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt: "Find 5G telecom equipment customers",
+      targetCount: 20
+    });
+    const persistedPayload = prisma.leadTask.create.mock.calls[0]?.[0].data.inputPayload;
+
+    expect(ai.generateSearchStrategy).toHaveBeenCalledTimes(3);
+    expect(result.searchQueries).toHaveLength(30);
+    expect(persistedPayload.profileSignals.aiPlanning).toEqual(
+      expect.objectContaining({
+        gptSearchQueryCount: 30,
+        gptRefillAttempts: 2,
+        gptRefillAcceptedCount: 15,
+        fallbackQueryCount: 0
+      })
+    );
+    expect(prisma.searchQuery.createMany).toHaveBeenCalled();
   });
 
   it("sanitizes or rejects mixed-country GPT search queries before persisting them", async () => {
@@ -1396,7 +1699,12 @@ describe("AgentWorkflowService", () => {
     });
   });
 
-  it("retries a failed Brave query with a neutral country parameter before marking it failed", async () => {
+  it("does not retry a failed Brave query with country=US (the legacy retry was removed)", async () => {
+    // 2026-05: the legacy "fallback to country=US on first failure"
+    // path was removed because Brave's country parameter is unreliable
+    // and the US locale never improves relevance for non-US targets.
+    // We assert here that the second call to searchAndSaveResults is
+    // never made (no retry) and the original error surfaces.
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
     const leadQualification = createLeadQualificationMock();
@@ -1412,21 +1720,15 @@ describe("AgentWorkflowService", () => {
     const result = await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
 
     expect(result).toMatchObject({
-      ok: true,
+      ok: false,
       executedQueries: 1,
-      successfulQueries: 1,
-      failedQueries: 0,
-      resultCount: 1,
-      createdCandidates: 1,
+      successfulQueries: 0,
+      failedQueries: 1,
+      resultCount: 0,
+      createdCandidates: 0,
       fallback: false
     });
-    expect(braveSearch.searchAndSaveResults).toHaveBeenNthCalledWith(
-      2,
-      "query-1",
-      expect.objectContaining({
-        country: "US"
-      })
-    );
+    expect(braveSearch.searchAndSaveResults).toHaveBeenCalledTimes(1);
   });
 
   it("runs all pending searches when no explicit limit is provided", async () => {

@@ -10,7 +10,12 @@
       "env": {},
       "autoApprove": [
         "select_page",
-        "list_pages"
+        "list_pages",
+        "navigate_page",
+        "take_snapshot",
+        "click",
+        "evaluate_script",
+        "fill"
       ]
     }
   }

@@ -2773,14 +2773,17 @@ function isMainLeadStatus(status: string | undefined) {
 }
 
 function isDisplayableLeadCandidate(lead: LeadCandidate) {
+  // 2026-05: country verification is no longer a gate. We keep
+  // candidates with unconfirmed country in the main customer list and
+  // show "国家待补充" in the UI; downstream review still lets users
+  // double-check before sending. Score >= 50 + main status + not an
+  // evidence-only or hidden content lead is enough.
   const score = lead.icpScore?.score ?? 0;
   return (
     isMainLeadStatus(lead.status) &&
     !hasEvidenceLeadType(lead) &&
     !isHiddenEvidenceOrContentLead(lead) &&
-    score >= 50 &&
-    (lead.countryConfidence === "high" || lead.countryConfidence === "medium") &&
-    !lead.countryConflict
+    score >= 50
   );
 }
 
@@ -2788,6 +2791,8 @@ function isReviewTailLeadCandidate(lead: LeadCandidate) {
   if (
     isDisplayableLeadCandidate(lead) ||
     lead.status === "rejected" ||
+    lead.status === "intelligence" ||
+    // Legacy evidence/intelligence statuses kept for historical rows.
     lead.status === "intelligence_review" ||
     lead.status === "evidence_review" ||
     hasEvidenceLeadType(lead) ||
@@ -2796,6 +2801,10 @@ function isReviewTailLeadCandidate(lead: LeadCandidate) {
     return false;
   }
 
+  // Legacy buckets only — needs_country_review and country_conflict_review
+  // do not exist in new scoring, but historical task rows still carry
+  // them. They surface here as a soft tail of "country unconfirmed"
+  // entries below the main list.
   return (
     lead.status === "needs_country_review" ||
     lead.status === "country_conflict_review" ||
@@ -2813,6 +2822,8 @@ function hasEvidenceLeadType(lead: LeadCandidate) {
   const payload = icpReasonPayload(lead.icpScore?.reasons);
   const leadType = typeof payload?.leadType === "string" ? payload.leadType : "";
   return (
+    lead.status === "intelligence" ||
+    // Legacy: kept for historical rows.
     lead.status === "intelligence_review" ||
     lead.status === "evidence_review" ||
     leadType === "intelligence" ||
@@ -2869,13 +2880,15 @@ function summarizeLeadQualityCounts(task: LeadTask | null): LeadQualityCounts {
   const candidates = task?.leadCandidates ?? [];
   const main = candidates.filter(isDisplayableLeadCandidate).length;
   const rejected = candidates.filter((lead) => lead.status === "rejected").length;
+  // Combine new "intelligence" status with legacy "intelligence_review".
   const intelligenceReview = candidates.filter(
-    (lead) => lead.status === "intelligence_review"
+    (lead) => lead.status === "intelligence" || lead.status === "intelligence_review"
   ).length;
   const evidenceReview = candidates.filter((lead) => lead.status === "evidence_review").length;
   const needsCountryReview = candidates.filter(
     (lead) =>
       lead.status !== "rejected" &&
+      lead.status !== "intelligence" &&
       lead.status !== "intelligence_review" &&
       lead.status !== "evidence_review" &&
       !isHiddenEvidenceOrContentLead(lead) &&
@@ -3523,17 +3536,29 @@ function displayLeadStage(lead: LeadCandidate) {
   if (lead.crmLead) {
     return "已同步 CRM";
   }
-  if (lead.status === "intelligence_review") {
+  if (lead.status === "intelligence" || lead.status === "intelligence_review") {
     return "采购情报待复核";
   }
   if (lead.status === "evidence_review") {
     return "证据待复核";
   }
+  // 2026-05: country verification was downgraded to a soft tag. Keep
+  // the legacy needs_country_review / country_conflict_review labels
+  // for historical rows; for new rows we surface a single "国家待补充"
+  // tag whenever country confidence is missing.
   if (lead.status === "needs_country_review") {
     return "待国家复核";
   }
   if (lead.status === "country_conflict_review") {
     return "国家冲突复核";
+  }
+  if (
+    isMainLeadStatus(lead.status) &&
+    (lead.countryConfidence === "low" ||
+      lead.countryConfidence === "unknown" ||
+      lead.countryConflict)
+  ) {
+    return "国家待补充";
   }
   if (lead.status === "approved") {
     return "已进入开发信";
@@ -3591,7 +3616,7 @@ function buildCustomerBrief(lead: LeadCandidate) {
   );
   if (evidenceBrief) return evidenceBrief;
 
-  if (lead.status === "intelligence_review") {
+  if (lead.status === "intelligence" || lead.status === "intelligence_review") {
     return "采购情报线索";
   }
   if (lead.status === "evidence_review") {
@@ -3602,6 +3627,14 @@ function buildCustomerBrief(lead: LeadCandidate) {
   }
   if (lead.status === "country_conflict_review") {
     return "国家冲突复核";
+  }
+  if (
+    isMainLeadStatus(lead.status) &&
+    (lead.countryConfidence === "low" ||
+      lead.countryConfidence === "unknown" ||
+      lead.countryConflict)
+  ) {
+    return "国家待补充";
   }
 
   const payload = icpReasonPayload(lead.icpScore?.reasons);
@@ -3726,7 +3759,7 @@ function evidenceBriefFromPayload(status: string | undefined, payload: IcpReason
   if (leadType === "government_information") {
     return "\u653f\u5e9c\u4fe1\u606f\u7ebf\u7d22";
   }
-  if (leadType === "intelligence" || status === "intelligence_review") {
+  if (leadType === "intelligence" || status === "intelligence" || status === "intelligence_review") {
     if (intelligenceType === "government_tender") {
       return "\u653f\u5e9c\u62db\u6807\u60c5\u62a5" + suffix;
     }

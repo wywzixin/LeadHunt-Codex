@@ -68,29 +68,85 @@ export const searchStrategyPlanSchema = z.object({
       brandEcosystem: z.number().int().min(0).max(100).default(0),
       modelSpecific: z.number().int().min(0).max(100).default(0),
       procurementEvent: z.number().int().min(0).max(100).default(0),
-      channel: z.number().int().min(0).max(100).default(0)
+      channel: z.number().int().min(0).max(100).default(0),
+      mainCustomer: z.number().int().min(0).max(100).default(0),
+      channelCustomer: z.number().int().min(0).max(100).default(0),
+      intelligence: z.number().int().min(0).max(100).default(0)
     })
     .optional(),
   queries: z
     .array(
       z.object({
-        query: z.string().min(1),
+        id: z.string().optional(),
+        lane: z
+          .enum(["A", "B", "C", "D", "E", "F"])
+          .or(z.string().regex(/^[A-Fa-f]$/i))
+          .optional()
+          .transform((value) =>
+            typeof value === "string" && value.length > 0 ? value.toUpperCase() : undefined
+          ),
+        coreQuery: z.string().min(1).optional(),
+        query: z.string().min(1).optional(),
         country: z.string().min(2),
+        countryName: z.string().min(2).optional(),
         language: z.string().min(2).default("en"),
         operatorSource: z
           .enum(["google_official", "brave_official", "common_seo"])
           .default("brave_official"),
-        executionStatus: z.enum(["supported", "experimental"]).default("supported"),
+        executionStatus: z.enum(["supported", "experimental"]).optional(),
+        engineCompatibility: z.enum(["supported", "experimental"]).default("supported"),
         rationale: z.string().min(1).default("buyer-led profile query"),
         strategyType: z
-          .enum(["buyer_scenario", "product_group", "brand_ecosystem", "model_specific", "procurement_event", "channel"])
+          .enum([
+            "main_customer",
+            "channel_customer",
+            "intelligence",
+            "buyer_scenario",
+            "product_group",
+            "brand_ecosystem",
+            "model_specific",
+            "procurement_event",
+            "channel"
+          ])
           .optional(),
-        sourceEvidence: z.enum(["user_prompt", "product_profile", "website", "product_list", "crm_sample", "inferred"]).optional(),
+        intelligenceType: z
+          .enum([
+            "none",
+            "linkedin_decision_maker",
+            "linkedin_company",
+            "directory",
+            "b2b_buyer_page",
+            "tender",
+            "exhibitor_list"
+          ])
+          .default("none"),
+        expectedResultType: z
+          .enum([
+            "company_site",
+            "linkedin_profile",
+            "linkedin_company",
+            "tender_pdf",
+            "exhibitor_list",
+            "directory",
+            "b2b_buyer_page"
+          ])
+          .default("company_site"),
+        sourceEvidence: z
+          .enum(["user_prompt", "product_profile", "website", "product_list", "crm_sample", "inferred"])
+          .optional(),
         buyerIntent: z.string().optional(),
         productEvidence: z.array(z.string().min(1)).default([]),
         customerEvidence: z.array(z.string().min(1)).default([]),
         negativeTerms: z.array(z.string()).default([]),
+        confidence: z.enum(["high", "medium", "low"]).default("medium"),
         priority: z.number().int().min(1).max(5).default(3)
+      }).superRefine((query, ctx) => {
+        if (!query.coreQuery?.trim() && !query.query?.trim()) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Either coreQuery or query is required"
+          });
+        }
       })
     )
     .min(10),

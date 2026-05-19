@@ -49,13 +49,18 @@ export type IcpScoreDraft = {
   extractableCompanies?: string[];
   pageType?: PageType;
   status:
+    // 2026-05 simplified state machine. New code only emits these four:
     | "qualified"
     | "review"
+    | "intelligence"
+    | "rejected"
+    // Legacy values are still part of the union so historical DB rows
+    // and old test fixtures continue to type-check. New scoring should
+    // not produce any of these.
     | "needs_country_review"
     | "country_conflict_review"
     | "intelligence_review"
-    | "evidence_review"
-    | "rejected";
+    | "evidence_review";
 };
 
 type CountryConfidence = "high" | "medium" | "low" | "unknown";
@@ -146,9 +151,14 @@ type EvidenceLeadClassification = {
   risk: string;
 };
 
-const contactProbeTimeoutMs = 5000;
-const contactProbePageLimit = 6;
-const contactLinkedProbePageLimit = 3;
+// 2026-05: contact-probe budgets relaxed for GCC/SEA sites that
+// commonly sit behind a CDN with 4-6s TTFB or render contact info via
+// JS. Old values were 5s timeout / 6 main pages / 3 linked pages,
+// which timed out on roughly half of legitimate target-country sites
+// (notably .ae integrators with React shells and slow CDNs).
+const contactProbeTimeoutMs = 9000;
+const contactProbePageLimit = 8;
+const contactLinkedProbePageLimit = 5;
 const maxAiCandidateEvaluationsPerBatch = 15;
 
 @Injectable()
@@ -296,9 +306,14 @@ export class LeadQualificationService {
       risks.push("Target country is not verified from official website evidence");
     }
 
-    const buyerOrIndustryFit = hasBuyerRoleSignal || hasIndustryContextSignal;
     if (countryValidation.countryConflict) {
-      forcedStatus = buyerOrIndustryFit ? "country_conflict_review" : "rejected";
+      // Country conflicts (e.g. evidence points to two different
+      // countries) used to force a separate review state. Per the
+      // 2026-05 country-validation rework, we no longer split country
+      // outcomes into their own statuses. We let the candidate flow
+      // through the normal qualified/review/rejected path; the country
+      // field will hold the most-likely country and the UI will tag it
+      // as "country unconfirmed" if confidence is low.
       risks.push(
         `Country evidence conflicts${
           countryValidation.countryConflictCountries.length
@@ -307,9 +322,16 @@ export class LeadQualificationService {
         }`
       );
     } else if (targetCountryMismatch) {
-      forcedStatus = "rejected";
+      // Verified country outside target markets remains a soft signal,
+      // not a hard reject. The user explicitly asked: "validation fails
+      // → just let it through, more customers is fine, treat it as
+      // exploring a new market." So we record the mismatch in risks but
+      // do not force-reject; downstream scoring still decides the bin.
+      risks.push("Official country evidence is outside the selected target markets");
     } else if (targetCountryUnverified) {
-      forcedStatus = "needs_country_review";
+      // No usable country signal yet. Used to bounce to
+      // needs_country_review; that status is removed. Just note it.
+      risks.push("Country not verified from address or phone; passing through unconfirmed");
     }
 
     const contactScore = contactCompletenessScore(candidate.contacts);
@@ -378,40 +400,37 @@ export class LeadQualificationService {
     }
 
     const hasMainReadyServiceEvidence =
-      pageType === "official_company_site" &&
-      targetCountryVerified &&
-      hasSearchContextSignal &&
-      hasDirectContact;
+      pageType === "official_company_site" && hasSearchContextSignal && hasDirectContact;
     if (buyerServicePage && hasGenericServiceBuyerSignal && !hasMainReadyServiceEvidence) {
+      // Used to require verified country before allowing entry to the
+      // main customer list. Per 2026-05 policy, country may be
+      // unconfirmed; a real company page with buyer-role signals plus a
+      // contact is enough to enter review. We still keep the score cap
+      // for completely empty official-text pages so they do not jump to
+      // qualified by accident.
       score = Math.min(score, 49);
-      if (!forcedStatus) {
-        forcedStatus = "evidence_review";
-      }
       risks.push(
-        "Generic service, maintenance, or integrator page needs official site, target country evidence, search-context match, and direct contact before entering the main customer list"
+        "Generic service / maintenance page needs official-site context and a direct contact before entering the main customer list"
       );
     }
 
     if (targetCountryMismatch) {
-      score = Math.min(score, 49);
+      // Country mismatch is now a soft signal, not a score floor.
+      // We keep the candidate in the running ("opening a new market")
+      // and only let downstream scoring decide.
       risks.push(
-        "Verified candidate country is outside the selected target markets; rejected instead of entering country review"
+        "Verified candidate country differs from selected target markets; treated as new-market exploration"
       );
     }
 
-    if (targetCountryUnverified) {
-      score = Math.min(score, 49);
-      risks.push("Low or missing country confidence keeps this lead out of the main review list");
-    }
-
-    if (countryValidation.countryConflict) {
-      score = Math.min(score, 49);
-      risks.push("Conflicting country evidence keeps this lead out of the main review list");
-    }
+    // targetCountryUnverified no longer reduces the score. The 2026-05
+    // policy is "country unconfirmed → still go to review". Old code
+    // capped the score at 49 here, which silently sent every .com lead
+    // without phone evidence to the rejected bin.
 
     if (pageType === "procurement_document") {
       score = Math.min(score, 49);
-      forcedStatus = "intelligence_review";
+      forcedStatus = "intelligence";
       risks.push(
         "Procurement/RFQ result is intelligence only; it is kept out of the main customer list and outreach flow"
       );
@@ -419,24 +438,35 @@ export class LeadQualificationService {
 
     if (evidenceClassification) {
       score = Math.min(score, evidenceClassification.scoreCap);
-      forcedStatus = evidenceClassification.status;
+      // Map old multi-status evidence classifications onto the new
+      // simplified status set. intelligence_review collapses into
+      // "intelligence"; evidence_review now folds into "rejected" since
+      // the simplified state machine no longer carries an evidence-only
+      // bucket. Real buyer companies should never reach this branch
+      // because of the buyer-role floor below; this branch is reserved
+      // for genuinely non-customer evidence pages.
+      forcedStatus =
+        evidenceClassification.status === "intelligence_review" ? "intelligence" : "rejected";
       reasons.push(evidenceClassification.reason);
       risks.push(evidenceClassification.risk);
     } else if (pageType === "unknown" && !isOfficialMainCustomerPage(candidate, pageType)) {
+      // Used to set evidence_review here. We now keep the score cap
+      // (which already pushes the candidate below the qualified
+      // threshold) but do not force-reject; the buyer-role floor below
+      // can still rescue genuine company pages whose pageType could not
+      // be confidently classified.
       score = Math.min(score, 49);
-      if (!forcedStatus || forcedStatus === "needs_country_review") {
-        forcedStatus = "evidence_review";
-      }
       risks.push(
         "Candidate is not backed by an official company homepage, about, contact, services, solutions, telecom, project, or location page"
       );
     }
 
     if (hasCompanyNameQualityIssue) {
+      // Same simplification: cap the score, drop the dedicated
+      // evidence_review state. Bad-looking company names tend to be
+      // page titles or site-builder credits, which the buyer-role floor
+      // does NOT rescue.
       score = Math.min(score, 49);
-      if (!forcedStatus || forcedStatus === "needs_country_review") {
-        forcedStatus = "evidence_review";
-      }
       risks.push("Company name looks like a page title, template label, or site-builder credit");
     }
 
@@ -459,6 +489,39 @@ export class LeadQualificationService {
       );
     }
 
+    // ---- Customer-role floor (2026-05 product policy) ----
+    //
+    // If the candidate looks like one of the seven buyer roles the user
+    // explicitly wants to keep visible — engineering company,
+    // maintenance company, installation company, system integrator,
+    // distributor, stockist, or spare-parts supplier — and it has not
+    // been pushed into a forced state (intelligence / hard reject /
+    // company-name issue), and it is not on a non-buyer page type, lift
+    // the score to at least 55. This guarantees the candidate enters
+    // "review" instead of being silently rejected by sub-50 scoring,
+    // even when the country is unconfirmed.
+    const buyerRoleFloorEligible =
+      forcedStatus !== "intelligence" &&
+      forcedStatus !== "rejected" &&
+      !hasCompanyNameQualityIssue &&
+      pageType !== "brand_oem_site" &&
+      pageType !== "supplier_or_storefront" &&
+      pageType !== "third_party_profile" &&
+      pageType !== "non_procurement_document" &&
+      pageType !== "own_site" &&
+      !riskyDiscoveryPage &&
+      (hasBuyerRoleSignal || hasTargetCustomerType || hasUseCaseCustomerSignal);
+    if (buyerRoleFloorEligible) {
+      const floor = hasDirectContact ? 60 : 55;
+      if (score < floor) {
+        score = floor;
+        reasons.push(
+          "Buyer-role floor applied: candidate looks like an engineering / maintenance / installation / system-integrator / distributor / stockist / spare-parts buyer profile"
+        );
+      }
+    }
+    // ---- end customer-role floor ----
+
     const finalScore = clamp(Math.round(score), 0, 100);
     const grade = finalScore >= 75 ? "high" : finalScore >= 50 ? "medium" : "low";
     const hardRejectedPage =
@@ -467,22 +530,29 @@ export class LeadQualificationService {
       pageType === "supplier_or_storefront" ||
       pageType === "third_party_profile" ||
       pageType === "non_procurement_document";
-    const status =
-      forcedStatus === "rejected"
-        ? "rejected"
-        : forcedStatus === "intelligence_review"
-          ? "intelligence_review"
-          : forcedStatus === "evidence_review"
-            ? "evidence_review"
-            : forcedStatus === "country_conflict_review" && !hardRejectedPage
-              ? "country_conflict_review"
-              : forcedStatus === "needs_country_review" && !hardRejectedPage
-                ? "needs_country_review"
-                : finalScore >= 75
-                  ? "qualified"
-                  : finalScore >= 50
-                    ? "review"
-                    : "rejected";
+    // Simplified 4-state machine (2026-05). Old states map as follows:
+    //   needs_country_review / country_conflict_review → review
+    //   evidence_review                                → rejected
+    //   intelligence_review                            → intelligence
+    //
+    // Note: when forcedStatus is "intelligence" (e.g. exhibition PDFs,
+    // government tenders, project news on whitelisted intelligence
+    // domains), it WINS over hardRejectedPage. The hard-reject page
+    // shape only matters when there is no intelligence classification
+    // — at that point a low score plus a hard-reject page type means
+    // we drop the candidate entirely.
+    let status: IcpScoreDraft["status"];
+    if (forcedStatus === "intelligence") {
+      status = "intelligence";
+    } else if (forcedStatus === "rejected" || hardRejectedPage) {
+      status = "rejected";
+    } else if (finalScore >= 75) {
+      status = "qualified";
+    } else if (finalScore >= 50) {
+      status = "review";
+    } else {
+      status = "rejected";
+    }
 
     return {
       score: finalScore,
@@ -583,7 +653,16 @@ export class LeadQualificationService {
           taskId,
           companyName: enrichedCandidate.companyName,
           website: enrichedCandidate.website,
-          country: enrichedCandidate.inferredCountry ?? enrichedCandidate.country,
+          // 2026-05 (Q1=A): when country is verified we use the verified
+          // value; when it is unconfirmed we fall back to the queryCountry
+          // (the country the search was scoped to). This keeps CRM and
+          // outreach UX from showing a blank country and matches the
+          // user's "treat it as opening a new market" stance.
+          country:
+            enrichedCandidate.inferredCountry ??
+            enrichedCandidate.country ??
+            enrichedCandidate.queryCountry ??
+            null,
           queryCountry: enrichedCandidate.queryCountry ?? null,
           inferredCountry: enrichedCandidate.inferredCountry ?? enrichedCandidate.country,
           countryEvidence: toJsonInput(enrichedCandidate.countryEvidence ?? []),
@@ -653,18 +732,25 @@ function shouldEvaluateCandidateWithAi(
   candidate: NormalizedLeadCandidate,
   criteria: IcpScoringCriteria
 ) {
-  if (ruleIcp.status === "intelligence_review" || ruleIcp.status === "evidence_review") {
+  if (ruleIcp.status === "intelligence") {
     return false;
   }
 
+  // 2026-05: country gating no longer blocks AI evaluation. Per the
+  // user's policy, country-unconfirmed candidates still flow through to
+  // review and we want GPT to weigh in on whether they look like real
+  // buyers. We only short-circuit AI eval when the candidate has a
+  // VERIFIED country that is outside the target markets — at that point
+  // we already know the company is in a different region and we don't
+  // want to spend GPT budget classifying it.
   const countryValidation = validatedCountry(candidate);
   if (
     hasTargetRegionConstraint(criteria.targetRegions) &&
-    (countryValidation.countryConflict ||
-      !countryValidation.inferredCountry ||
-      countryValidation.countryConfidence === "low" ||
-      countryValidation.countryConfidence === "unknown" ||
-      !matchesTargetRegion(countryValidation.inferredCountry, criteria.targetRegions))
+    countryValidation.inferredCountry &&
+    (countryValidation.countryConfidence === "high" ||
+      countryValidation.countryConfidence === "medium") &&
+    !countryValidation.countryConflict &&
+    !matchesTargetRegion(countryValidation.inferredCountry, criteria.targetRegions)
   ) {
     return false;
   }
@@ -755,11 +841,7 @@ function mergeAiEvaluationWithRuleScore(
     score = Math.max(score, 75);
   }
 
-  if (ruleIcp.status === "intelligence_review" || ai.resultType === "procurement_intelligence") {
-    score = Math.min(score, 49);
-  }
-
-  if (ruleIcp.status === "evidence_review") {
+  if (ruleIcp.status === "intelligence" || ai.resultType === "procurement_intelligence") {
     score = Math.min(score, 49);
   }
 
@@ -768,15 +850,16 @@ function mergeAiEvaluationWithRuleScore(
   }
 
   const finalScore = clamp(score, 0, 100);
+  // Simplified 4-state machine. Old states fold the same way as in the
+  // rule-only scoring path: needs_country_review / country_conflict_review
+  // → review (or rejected), evidence_review → rejected, intelligence_review
+  // → intelligence. AI-flagged company-name risks now also push to
+  // rejected instead of evidence_review.
   let status: IcpScoreDraft["status"];
-  if (ruleIcp.status === "intelligence_review" || ai.resultType === "procurement_intelligence") {
-    status = "intelligence_review";
-  } else if (ruleIcp.status === "evidence_review" || aiCompanyNameRisk) {
-    status = "evidence_review";
-  } else if (ruleIcp.status === "country_conflict_review") {
-    status = "country_conflict_review";
-  } else if (ruleIcp.status === "needs_country_review") {
-    status = "needs_country_review";
+  if (ruleIcp.status === "intelligence" || ai.resultType === "procurement_intelligence") {
+    status = "intelligence";
+  } else if (aiCompanyNameRisk) {
+    status = "rejected";
   } else if (finalScore >= 75) {
     status = "qualified";
   } else if (finalScore >= 50) {
@@ -1210,47 +1293,38 @@ function collectCountryEvidence(candidate: NormalizedLeadCandidate): CountryEvid
   ]
     .filter(Boolean)
     .join("\n");
-  const websiteCountry = inferDomainCountry(candidate.website ?? candidate.sourceUrl);
-  if (websiteCountry) {
-    evidence.push({
-      type: "website_domain",
-      country: websiteCountry,
-      value:
-        domainFromUrl(candidate.website ?? candidate.sourceUrl) ??
-        candidate.website ??
-        candidate.sourceUrl,
-      sourceUrl: candidate.website ?? candidate.sourceUrl,
-      confidence: "medium"
-    });
-  }
+
+  // Country evidence intentionally does NOT use website TLD or email TLD
+  // anymore. Per the 2026-05 product policy, country verification only
+  // looks at:
+  //   1. Address text on the candidate's official pages (city / region /
+  //      country / postcode mentions inside contact/about content).
+  //   2. Phone numbers (with or without the leading "+"); the phone is
+  //      labeled with the country we can infer from the number itself.
+  // If neither is present, the candidate stays "country unconfirmed" and
+  // still flows into the main customer list.
 
   for (const contact of candidate.contacts) {
-    if (contact.type === "phone") {
-      const country = inferCountryFromPhone(contact.value);
-      if (country) {
-        evidence.push({
-          type: "phone",
-          country,
-          value: contact.value,
-          sourceUrl: contact.sourceUrl,
-          confidence: "high"
-        });
-      }
+    if (contact.type !== "phone") {
       continue;
     }
 
-    if (contact.type === "email") {
-      const country = inferDomainCountry(contact.value);
-      if (country) {
-        evidence.push({
-          type: "email_domain",
-          country,
-          value: contact.value,
-          sourceUrl: contact.sourceUrl,
-          confidence: "medium"
-        });
-      }
+    const country = inferCountryFromPhone(contact.value);
+    if (!country) {
+      continue;
     }
+
+    evidence.push({
+      type: "phone",
+      country,
+      value: contact.value,
+      sourceUrl: contact.sourceUrl,
+      // Phones used to be "high" automatically; we now require the phone
+      // to appear alongside an address-style cue on the same page before
+      // we trust it as high confidence. Without that anchor it stays
+      // "medium" so the candidate is verified but not over-weighted.
+      confidence: phoneHasAddressContext(candidate, contact.value) ? "high" : "medium"
+    });
   }
 
   for (const textEvidence of extractCountryEvidenceFromOfficialText(text, candidate.sourceUrl)) {
@@ -1260,16 +1334,27 @@ function collectCountryEvidence(candidate: NormalizedLeadCandidate): CountryEvid
   return dedupeCountryEvidence(evidence);
 }
 
-function normalizeQueryCountry(country: string | undefined) {
-  return country && !isMacroTargetRegion(country) ? normalizeCountry(country) : null;
+function phoneHasAddressContext(candidate: NormalizedLeadCandidate, phoneValue: string) {
+  const summary = stripSearchContext(candidate.summary ?? "");
+  if (!summary) {
+    return false;
+  }
+  const lower = summary.toLowerCase();
+  if (!lower.includes(phoneValue.toLowerCase())) {
+    // Phone may appear in any of the probed pages stitched into summary;
+    // if it does not appear at all there is no nearby address context to
+    // verify against.
+    return /\b(?:address|po box|p\.o\. box|street|building|tower|floor|office|hq|headquarters)\b/i.test(
+      summary
+    );
+  }
+  return /\b(?:address|po box|p\.o\. box|street|building|tower|floor|office|hq|headquarters|located in|based in)\b/i.test(
+    summary
+  );
 }
 
-function inferDomainCountry(value: string | null | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  return inferCountryFromText(value);
+function normalizeQueryCountry(country: string | undefined) {
+  return country && !isMacroTargetRegion(country) ? normalizeCountry(country) : null;
 }
 
 function stripSearchContext(value: string) {
@@ -1359,23 +1444,49 @@ function dedupeCountryEvidence(evidence: CountryEvidence[]) {
 function inferCountryFromPhone(phone: string) {
   const trimmed = phone.trim();
   const digits = digitsOnly(trimmed);
-  const internationalDigits = trimmed.startsWith("+")
+  // Accept either an explicit "+", a "00" international prefix, or any
+  // long phone whose first 1-3 digits match a known country dial code.
+  // The user's policy is to verify country whenever there is a phone;
+  // requiring the "+" symbol filtered out a large set of GCC numbers
+  // formatted as "(02) 643 1828" or "+971 2 643 1828" rendered as
+  // "971 2 643 1828". Here we check both the strict international form
+  // and a relaxed form where digits match a dial code without symbols.
+  const strictDigits = trimmed.startsWith("+")
     ? digits
     : digits.startsWith("00")
       ? digits.slice(2)
       : "";
 
-  if (internationalDigits) {
-    const match = phoneCountryCodeSignals.find(([code]) => internationalDigits.startsWith(code));
-    return match ? normalizeCountry(match[1]) : null;
+  if (strictDigits) {
+    const match = phoneCountryCodeSignals.find(([code]) => strictDigits.startsWith(code));
+    if (match) {
+      return normalizeCountry(match[1]);
+    }
   }
 
+  // US toll-free / North American formatting first — these patterns
+  // would otherwise be misread (e.g. "1-800-..." has digits "1800..."
+  // which looks like Egypt's "+20" only after the leading "1").
   if (/^1[\s.-]?(?:800|888|877|866|855|844|833)[\s.-]?\d{3}[\s.-]?\d{4}$/.test(trimmed)) {
     return normalizeCountry("United States");
   }
 
+  // Classic North-American 10-digit format with separators (e.g.
+  // "630-209-8300", "(630) 209 8300"). We commit to "United States"
+  // here BEFORE attempting the relaxed dial-code match, otherwise a
+  // raw "63" prefix would be misclassified as the Philippines.
   if (!digits.startsWith("0") && /^\(?[2-9]\d{2}\)?[\s.-]\d{3}[\s.-]\d{4}$/.test(trimmed)) {
     return normalizeCountry("United States");
+  }
+
+  // Relaxed form: try to spot the dial code at the very front of the
+  // digits, but only when the number is long enough to plausibly include
+  // a country code (>= 9 digits) and the leading digits are not "0".
+  if (!strictDigits && digits.length >= 9 && !digits.startsWith("0")) {
+    const match = phoneCountryCodeSignals.find(([code]) => digits.startsWith(code));
+    if (match) {
+      return normalizeCountry(match[1]);
+    }
   }
 
   return null;
@@ -1908,7 +2019,11 @@ function shouldProbeContactPages(candidate: NormalizedLeadCandidate) {
     return false;
   }
 
-  if (looksLikeKnowledgeContentPage(candidate)) {
+  if (
+    looksLikeKnowledgeContentPage(candidate) ||
+    looksLikeNonCustomerProductPage(candidate) ||
+    looksLikeIndustryOrganizationOrEventPage(candidate)
+  ) {
     return false;
   }
 
@@ -1921,6 +2036,61 @@ function shouldProbeContactPages(candidate: NormalizedLeadCandidate) {
   }
 
   return !looksLikeArticlePath(path) || hasAny(text, buyerRoleTerms);
+}
+
+function looksLikeTrainingOrCourseSite(candidate: NormalizedLeadCandidate, text: string) {
+  const path = pathFromUrl(candidate.sourceUrl).toLowerCase();
+  const domain = (candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl)
+  )?.toLowerCase() ?? "";
+
+  // Domain or path explicitly references coaching / civil-service
+  // exam preparation / academy.
+  if (
+    /(?:^|[.-])(?:academy|institute|coaching|tutorials?|tutoring|edu(?:cation)?|exams?|upsc|ias|ssc|gate)(?:[.-]|$)/i.test(
+      domain
+    )
+  ) {
+    return true;
+  }
+  if (
+    /(?:^|\/)(?:course|courses|training|tutorial|tutorials|exam|exams|syllabus|admission|admissions|coaching|notes|study-?material|prep|preparation)(?:\/|$)/i.test(
+      path
+    )
+  ) {
+    return true;
+  }
+
+  const lowerText = text.toLowerCase();
+  const trainingHits = [
+    "course fee",
+    "course fees",
+    "course duration",
+    "course outline",
+    "course curriculum",
+    "course schedule",
+    "training program",
+    "training programme",
+    "training schedule",
+    "training calendar",
+    "syllabus",
+    "admissions",
+    "exam preparation",
+    "exam prep",
+    "civil services exam",
+    "upsc",
+    "civil services",
+    "online classes",
+    "live classes",
+    "video lectures",
+    "study material",
+    "previous year papers"
+  ].filter((token) => lowerText.includes(token));
+  // Two or more training-vocabulary hits is a strong "this is a course
+  // page, not a buyer" signal. One hit alone (e.g. an industrial
+  // company that mentions "training program" once) is not enough.
+  return trainingHits.length >= 2;
 }
 
 function shouldHardRejectCandidate(
@@ -1936,8 +2106,34 @@ function shouldHardRejectCandidate(
     .toLowerCase();
   const pageType = classifyCandidatePage(candidate, criteria);
   const evidenceClassification = classifyEvidenceLead(candidate, criteria, pageType);
+  const nonTargetChinaSupplier = hasNonTargetChinaSupplierSignal(candidate, criteria);
 
   if (pageType === "own_site") {
+    return true;
+  }
+
+  if (nonTargetChinaSupplier) {
+    return true;
+  }
+
+  // 2026-05: training / course / exam-prep sites are not buyers and
+  // routinely show up under telecom/5G queries (e.g. UPSC and other
+  // civil-service prep pages). Hard reject if any of these signals
+  // appear on the candidate page or its URL path.
+  if (looksLikeTrainingOrCourseSite(candidate, text)) {
+    return true;
+  }
+
+  if (looksLikeNonCustomerProductPage(candidate) && !evidenceClassification) {
+    return true;
+  }
+
+  // 2026-05: news / trade-media / research-firm domains are always
+  // noise per the user's policy. Reject them BEFORE the evidence
+  // classification fallback would otherwise rescue them as
+  // "intelligence" (e.g. RCR Wireless project news, MarketsAndMarkets
+  // research). The user's quote: "新闻站不要 ... 报告页不要".
+  if (domain && (isNewsMediaDomain(domain) || isMarketResearchDomain(domain))) {
     return true;
   }
 
@@ -2039,7 +2235,12 @@ function looksLikeBuyerSideCompanyPage(candidate: NormalizedLeadCandidate) {
     return false;
   }
 
-  if (looksLikeStorefrontPath(path) || isVendorOemDomain(domain)) {
+  if (
+    looksLikeStorefrontPath(path) ||
+    looksLikeNonCustomerProductPage(candidate) ||
+    looksLikeIndustryOrganizationOrEventPage(candidate) ||
+    isVendorOemDomain(domain)
+  ) {
     return false;
   }
 
@@ -2085,7 +2286,12 @@ function looksLikeDirectCompanyEvidence(candidate: NormalizedLeadCandidate) {
     return false;
   }
 
-  if (looksLikeArticlePath(path) || looksLikeContentTitle(candidate.companyName)) {
+  if (
+    looksLikeArticlePath(path) ||
+    looksLikeContentTitle(candidate.companyName) ||
+    looksLikeNonCustomerProductPage(candidate) ||
+    looksLikeIndustryOrganizationOrEventPage(candidate)
+  ) {
     return false;
   }
 
@@ -2112,6 +2318,15 @@ function contactProbeUrls(website: string, sourceUrl: string) {
       "/about",
       "/about-us",
       "/company",
+      "/who-we-are",
+      "/our-team",
+      "/team",
+      "/our-offices",
+      "/our-locations",
+      "/locations",
+      "/offices",
+      "/imprint",
+      "/legal-notice",
       "/support",
       "/sales",
       "/request-a-quote",
@@ -2136,21 +2351,56 @@ function contactPagePathCandidates(...urls: string[]) {
   }
   prefixes.add("/wp");
 
-  const suffixes = [
+  // 2026-05: high-frequency contact paths come first. The previous
+  // ordering iterated `suffixes.flatMap(s => prefixes.map(p => p+s))`
+  // which interleaved every suffix with every prefix; with prefix list
+  // size >= 3 (root + sub-path + /wp), only the first 2-3 distinct
+  // suffixes ever survived the contactProbePageLimit cutoff. That meant
+  // `/contact-us` was almost always cut off on sites whose source URL
+  // had a sub-path. We now iterate the OTHER way: for each suffix in
+  // priority order, emit the empty-prefix path first, then sub-path
+  // and /wp variants. The most likely paths therefore land at the top
+  // of the URL list and survive truncation.
+  const highPrioritySuffixes = [
     "/contact",
     "/contactus",
     "/contact-us",
+    "/contacts",
     "/contact/",
     "/contactus/",
     "/contact-us/",
+    "/contacts/",
     "/contact.html",
     "/contactus.html",
     "/contact-us.html",
-    "/contacts",
-    "/contacts/",
     "/get-in-touch",
     "/get-in-touch/",
+    "/get-in-touch-with-us",
     "/get-in-touch-customers",
+    "/getintouch",
+    "/getintouch/",
+    "/reach-us",
+    "/reach-us/",
+    "/connect",
+    "/connect/"
+  ];
+  const lowPrioritySuffixes = [
+    "/our-team",
+    "/our-team/",
+    "/team",
+    "/team/",
+    "/our-offices",
+    "/our-offices/",
+    "/our-locations",
+    "/our-locations/",
+    "/who-we-are",
+    "/who-we-are/",
+    "/imprint",
+    "/imprint/",
+    "/legal-notice",
+    "/legal-notice/",
+    "/legal/imprint",
+    "/legal/imprint/",
     "/request-a-quote",
     "/request-a-quote/",
     "/quote",
@@ -2164,9 +2414,23 @@ function contactPagePathCandidates(...urls: string[]) {
     "/offices",
     "/offices/"
   ];
-  return uniqueStrings(
-    suffixes.flatMap((suffix) => [...prefixes].map((prefix) => `${prefix}${suffix}`))
-  );
+  const orderedPrefixes = ["", ...[...prefixes].filter((prefix) => prefix !== "")];
+  const allSuffixes = [...highPrioritySuffixes, ...lowPrioritySuffixes];
+  const candidates: string[] = [];
+  // First pass: emit all suffixes with empty prefix (highest priority —
+  // these are the most likely contact page paths on any site).
+  for (const suffix of allSuffixes) {
+    candidates.push(suffix);
+  }
+  // Second pass: emit sub-path and /wp variants for high-priority
+  // suffixes only (these are fallbacks for sites with path prefixes).
+  for (const suffix of highPrioritySuffixes) {
+    for (const prefix of orderedPrefixes) {
+      if (prefix === "") continue; // already emitted above
+      candidates.push(`${prefix}${suffix}`);
+    }
+  }
+  return uniqueStrings(candidates);
 }
 
 function installBasePathPrefix(url: string) {
@@ -2185,6 +2449,17 @@ function installBasePathPrefix(url: string) {
         "contact-us",
         "contacts",
         "get-in-touch",
+        "getintouch",
+        "reach-us",
+        "connect",
+        "our-team",
+        "team",
+        "our-offices",
+        "our-locations",
+        "who-we-are",
+        "imprint",
+        "legal-notice",
+        "legal",
         "about",
         "about-us",
         "company",
@@ -2457,6 +2732,10 @@ function classifyCandidatePage(
     return "brand_oem_site";
   }
 
+  if (looksLikeIndustryOrganizationOrEventPage(candidate)) {
+    return "content_or_directory";
+  }
+
   if (isSupplierOrStorefrontPage(text, path)) {
     return "supplier_or_storefront";
   }
@@ -2518,6 +2797,10 @@ function hasProcurementIntent(text: string) {
 }
 
 function isSupplierOrStorefrontPage(text: string, path: string) {
+  if (looksLikeProductDetailPath(path) && !hasBuyerSideSignal(text)) {
+    return true;
+  }
+
   const storefrontSignalFlags = [
     hasAny(text, storefrontSearchTerms),
     hasAny(text, storefrontCatalogTerms),
@@ -2625,6 +2908,19 @@ function classifyEvidenceLead(
       ["operator_vendor_registration", "procurement_intelligence"],
       extractableCompanies
     );
+  }
+
+  if (looksLikeIndustryOrganizationOrEventPage(candidate)) {
+    return {
+      leadType: "content_evidence",
+      reviewLabels: ["industry_organization_or_event", "content_evidence"],
+      extractableCompanies,
+      status: "evidence_review",
+      scoreCap: 49,
+      reason: "Industry organization, standards body, conference, or event page kept only as evidence",
+      risk:
+        "Associations, alliances, standards organizations, conferences, agendas, and technical programmes are not direct customer companies"
+    };
   }
 
   if (domain && isLinkedInDomain(domain) && hasRelevantSearchContext) {
@@ -2991,6 +3287,12 @@ function isBlockedContentDomain(domain: string) {
   );
 }
 
+function isMarketResearchDomain(domain: string) {
+  return marketResearchDomains.some(
+    (researchDomain) => domain === researchDomain || domain.endsWith(`.${researchDomain}`)
+  );
+}
+
 function isBlockedMarketplaceDomain(domain: string) {
   return blockedMarketplaceDomains.some(
     (blockedDomain) => domain === blockedDomain || domain.endsWith(`.${blockedDomain}`)
@@ -3122,6 +3424,7 @@ function looksLikeKnowledgeContentPage(candidate: NormalizedLeadCandidate) {
     /\/(?:what-is|what-does|definition|glossary|topics?|resources?|applications?|knowledge|learn|guide|guides|specifications?|standards?|whitepaper|paper|journal|article|blog)\b/i.test(
       path
     ) ||
+    looksLikeMarketingArticleSlug(path) ||
     hasAny(text, [
       "what is",
       "what does",
@@ -3137,8 +3440,29 @@ function looksLikeKnowledgeContentPage(candidate: NormalizedLeadCandidate) {
       "open access journal",
       "research article",
       "science direct",
-      "whitepaper"
+      "whitepaper",
+      "future-proofing",
+      "future proofing",
+      "businesses in 2026",
+      "technical programme",
+      "technical program"
     ])
+  );
+}
+
+function looksLikeMarketingArticleSlug(path: string) {
+  const slug = path.split("/").filter(Boolean).at(-1) ?? "";
+  if (!slug || !slug.includes("-")) {
+    return false;
+  }
+
+  const tokenCount = slug.split("-").filter(Boolean).length;
+  return (
+    tokenCount >= 6 &&
+    (/\b20\d{2}\b/.test(slug) ||
+      /\b(?:future|proof|guide|what|why|how|businesses?|trends?|market|top|best|complete)\b/i.test(
+        slug
+      ))
   );
 }
 
@@ -3154,6 +3478,108 @@ function looksLikeStorefrontPath(path: string) {
   return /\/(?:product(?:s)?|catalog(?:ue|s)?|category(?:ies)?|collection(?:s)?|shop|store|cart|checkout|item(?:s)?|sku)\b/.test(
     path
   );
+}
+
+function looksLikeProductDetailPath(path: string) {
+  if (!path) {
+    return false;
+  }
+
+  return /(?:\/product(?:s)?(?:\/|\.php\b)|\/product-detail\b|\/item(?:s)?(?:\/|\b)|\/sku(?:\/|\b)|\/catalog(?:ue|s)?(?:\/|\b)|\/shop(?:\/|\b)|\/store(?:\/|\b)|\/category(?:ies)?(?:\/|\b))/i.test(
+    path
+  );
+}
+
+function looksLikeNonCustomerProductPage(candidate: NormalizedLeadCandidate) {
+  const path = pathFromUrl(candidate.sourceUrl);
+  const text = candidateSignalText(candidate);
+
+  if (looksLikeProductDetailPath(path)) {
+    return true;
+  }
+
+  if (looksLikeProductTitle(candidate.companyName) && !hasAny(text, buyerRoleTerms)) {
+    return true;
+  }
+
+  const hasSkuOrModelSignal = /\b(?:sku|model|part\s*(?:no|number)|p\/n|datasheet|product details?)\b/i.test(
+    text
+  );
+  const hasCommerceOrCatalogSignal =
+    hasAny(text, storefrontCommerceTerms) ||
+    hasAny(text, storefrontCatalogTerms) ||
+    hasAny(text, storefrontPriceTerms);
+
+  return hasSkuOrModelSignal && hasCommerceOrCatalogSignal && !hasAny(text, buyerUseCaseTerms);
+}
+
+function looksLikeIndustryOrganizationOrEventPage(candidate: NormalizedLeadCandidate) {
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
+  const path = pathFromUrl(candidate.sourceUrl);
+  const text = candidateSignalText(candidate);
+
+  return Boolean(
+    (domain && industryOrganizationOrEventDomains.some((item) => domainMatches(domain, item))) ||
+      /\/(?:conference|event|events|agenda|technical-program|technical-programme|workshop|symposium|program-committee)\b/i.test(
+        path
+      ) ||
+      hasAny(text, industryOrganizationOrEventTerms)
+  );
+}
+
+function hasNonTargetChinaSupplierSignal(
+  candidate: NormalizedLeadCandidate,
+  criteria: IcpScoringCriteria
+) {
+  if (!hasTargetRegionConstraint(criteria.targetRegions)) {
+    return false;
+  }
+
+  if (matchesTargetRegion("China", criteria.targetRegions)) {
+    return false;
+  }
+
+  const hasVerifiedTargetCountry =
+    Boolean(candidate.inferredCountry) &&
+    matchesTargetRegion(candidate.inferredCountry!, criteria.targetRegions);
+  const hasChinaPhone = candidate.contacts.some(
+    (contact) => contact.type === "phone" && inferCountryFromPhone(contact.value) === "CHINA"
+  );
+
+  return hasChinaSupplierSignal(candidate) || (hasChinaPhone && !hasVerifiedTargetCountry);
+}
+
+function hasChinaSupplierSignal(candidate: NormalizedLeadCandidate) {
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
+  const text = candidateSignalText(candidate);
+
+  return Boolean(
+    (domain &&
+        (domain.endsWith(".cn") ||
+          chinaSupplierDomains.some((item) => domainMatches(domain, item)) ||
+          /\bchina\b/i.test(domain))) ||
+      hasAny(text, chinaSupplierSignalTerms)
+  );
+}
+
+function candidateSignalText(candidate: NormalizedLeadCandidate) {
+  return [
+    candidate.companyName,
+    candidate.website,
+    candidate.sourceUrl,
+    candidate.summary,
+    candidate.country,
+    candidate.inferredCountry,
+    candidate.queryCountry,
+    candidate.contacts.map((contact) => contact.value).join(" ")
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 }
 
 function looksLikeContentTitle(value: string) {
@@ -3194,7 +3620,7 @@ function toJsonInput(value: unknown): Prisma.InputJsonValue {
       }
 
       if (typeof item === "string") {
-        return item.split(String.fromCharCode(0)).join("");
+        return item.split(String.fromCharCode(0)).join("").replace(/\\u0000/gi, "");
       }
 
       return item;
@@ -3641,6 +4067,71 @@ const consumerElectronicsTerms = [
   "retail electronics"
 ];
 
+const chinaSupplierDomains = [
+  "hua-network.com",
+  "fiberolt.com",
+  "etulinktechnology.com",
+  "etulink.com",
+  "pcbaaa.com",
+  "suntelecom.cn",
+  "hilinktech.com",
+  "optical-module.com",
+  "opticaltransceiver-module.com",
+  "wolontek.com",
+  "yxfiber-sfp.com",
+  "chinatelecomglobal.com"
+];
+
+const chinaSupplierSignalTerms = [
+  "china manufacturer",
+  "chinese manufacturer",
+  "china supplier",
+  "chinese supplier",
+  "made in china",
+  "made-in-china",
+  "supplier in china",
+  "suppliers in china",
+  "china factory",
+  "shenzhen",
+  "guangzhou",
+  "dongguan",
+  "wuhan",
+  "china sourcing",
+  "best chinese sourcing",
+  "finding a manufacturer in china"
+];
+
+const industryOrganizationOrEventDomains = [
+  "telecominfraproject.com",
+  "o-ran.org",
+  "gsma.com",
+  "3gpp.org",
+  "ieee.org",
+  "ieee-icc.org",
+  "aaai.org"
+];
+
+const industryOrganizationOrEventTerms = [
+  "telecom infra project",
+  "o-ran alliance",
+  "open ran alliance",
+  "industry association",
+  "standards body",
+  "standards organization",
+  "technical programme",
+  "technical program",
+  "conference programme",
+  "conference program",
+  "program committee",
+  "technical committee",
+  "conference agenda",
+  "workshop",
+  "symposium",
+  "webinar",
+  "call for papers",
+  "accepted papers"
+];
+
 const defaultRiskTerms = [
   "job",
   "career",
@@ -3733,7 +4224,17 @@ const knownBrandOemDomains = [
   "cogentdistribution.com",
   "lightyear.ai",
   "l-p.com",
-  "yxfiber-sfp.com"
+  "yxfiber-sfp.com",
+  // 2026-05: pure telecom-software / BSS/OSS vendors. They sell
+  // software to operators, not hardware. They are never buyers of
+  // RRU/BBU/OLT/rectifier equipment.
+  "amdocs.com",
+  "csgi.com",
+  "csgnets.com",
+  "netcracker.com",
+  "comverse.com",
+  "subex.com",
+  "optiva.com"
 ];
 
 const blockedContentDomains = [
@@ -3793,7 +4294,37 @@ const blockedContentDomains = [
   "aliexpress.com",
   "yellowpages.com",
   "yellowpages.ae",
-  "yello.ae"
+  "yello.ae",
+  // 2026-05 additions: trade media + research firms reliably flagged
+  // as noise in the Brave result set; these are evidence pages, not
+  // buyer companies, and never produce a real outreach contact.
+  "telecoms.com",
+  "lightreading.com",
+  "fiercewireless.com",
+  "rcrwireless.com",
+  "totaltele.com",
+  "telecomreview.com",
+  "capacitymedia.com",
+  "datacenterdynamics.com",
+  "towerxchange.com",
+  "marketresearch.com",
+  "globenewswire.com",
+  "prnewswire.com",
+  "businesswire.com",
+  "nuoptima.com",
+  "smart-minded.com",
+  "accio.com",
+  // Free-host / template-site platforms. Real B2B companies do not
+  // build their public site on these; nearly every result is either
+  // an SEO content page, a course landing page, or a pseudo-company.
+  "sites.google.com",
+  "wixsite.com",
+  "weebly.com",
+  "webnode.com",
+  "godaddysites.com",
+  "business.site",
+  "blogspot.com",
+  "wordpress.com"
 ];
 
 const alwaysHardRejectedContentDomains = [
@@ -3946,6 +4477,30 @@ const newsMediaDomains = [
   "totaltele.com"
 ];
 
+// Market-research / industry-report firms. These are noise per the
+// 2026-05 product policy ("报告页不要"); they look like buyer-style
+// articles but never contain a real customer.
+const marketResearchDomains = [
+  "marketsandmarkets.com",
+  "expertmarketresearch.com",
+  "mordorintelligence.com",
+  "grandviewresearch.com",
+  "researchandmarkets.com",
+  "precedenceresearch.com",
+  "fortunebusinessinsights.com",
+  "thebusinessresearchcompany.com",
+  "datainsightsmarket.com",
+  "datacenterdynamics.com",
+  "towerxchange.com",
+  "marketresearch.com",
+  "gartner.com",
+  "mckinsey.com",
+  "statista.com",
+  // 2026-05: Dell'Oro is a telecom market research firm that
+  // consistently appears in 5G/telecom queries but is not a buyer.
+  "delloro.com"
+];
+
 const governmentInformationTerms = [
   "official platform",
   "government portal",
@@ -4081,7 +4636,37 @@ const blockedMarketplaceDomains = [
   "yellowpages.com.ng",
   "yello.ae",
   "yellosa.co.za",
-  "uaeplusplus.com"
+  "uaeplusplus.com",
+  // 2026-05 additions:
+  // Company / contact directories — not buyer companies; the page
+  // never produces a real outreach contact, just a profile snippet.
+  "dnb.com",
+  "dnb.co.uk",
+  "zoominfo.com",
+  "apollo.io",
+  "rocketreach.co",
+  "lusha.com",
+  "clutch.co",
+  "goodfirms.co",
+  "manta.com",
+  "thomasnet.com",
+  "zaubacorp.com",
+  "yelp.com",
+  // Job boards / recruitment portals — telecom/5G queries trip these
+  // a lot via "engineering company" / "system integrator" wording.
+  "indeed.com",
+  "indeed.ae",
+  "indeed.co.uk",
+  "indeed.com.sa",
+  "glassdoor.com",
+  "glassdoor.co.uk",
+  "naukrigulf.com",
+  "naukri.com",
+  "bayt.com",
+  "gulftalent.com",
+  "monster.com",
+  "monstergulf.com",
+  "linkedin.com/jobs"
 ];
 
 const hardRejectedDiscoveryDomains = [
@@ -4280,6 +4865,12 @@ const contentTitleTerms = [
   "definition",
   "how to",
   "guide",
+  "future-proofing",
+  "future proofing",
+  "businesses in 2026",
+  "technical programme",
+  "technical program",
+  "conference agenda",
   "state act",
   "commission restricts",
   "regulation",
@@ -4352,7 +4943,12 @@ const hardRejectContentTerms = [
   "rebranding educational message",
   "looking for etisalat",
   "we're now eand.ae",
-  "welcome to the new era"
+  "welcome to the new era",
+  "technical programme",
+  "technical program",
+  "conference agenda",
+  "conference programme",
+  "program committee"
 ];
 
 const genericDiscoveryTitlePatterns = [
@@ -4738,6 +5334,7 @@ const phoneCountryCodeSignals: Array<[string, string]> = [
   ["65", "Singapore"],
   ["66", "Thailand"],
   ["84", "Vietnam"],
+  ["86", "China"],
   ["52", "Mexico"],
   ["57", "Colombia"],
   ["56", "Chile"],
@@ -4783,5 +5380,9 @@ const countrySignals: Array<[string, string]> = [
   ["kuwait", "KUWAIT"],
   [".kw", "KUWAIT"],
   ["bahrain", "BAHRAIN"],
-  [".bh", "BAHRAIN"]
+  [".bh", "BAHRAIN"],
+  ["china", "CHINA"],
+  [".cn", "CHINA"],
+  ["shenzhen", "CHINA"],
+  ["guangzhou", "CHINA"]
 ];

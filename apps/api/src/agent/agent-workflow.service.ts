@@ -15,7 +15,6 @@ import {
   createKeywordGroups,
   createInitialWorkflowState,
   getSearchStrategyLibrary,
-  countryToSearchApiCode,
   countryToSite as marketToSite,
   resolveCountry,
   leadHuntWorkflowNodes,
@@ -134,17 +133,27 @@ const MAX_SYNC_SEARCH_QUERY_LIMIT = 500;
 const MAX_CANDIDATE_RESULTS_PER_QUERY = 20;
 const DEFAULT_SEARCH_QUERY_COUNT = 30;
 const SEARCH_STRATEGY_INITIAL_QUERY_COUNT = 15;
-const MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT = SEARCH_STRATEGY_INITIAL_QUERY_COUNT;
+const DEFAULT_MAIN_CUSTOMER_QUERY_COUNT = 24;
+const DEFAULT_CHANNEL_CUSTOMER_QUERY_COUNT = 6;
+const MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT = DEFAULT_SEARCH_QUERY_COUNT;
 const SEARCH_STRATEGY_MAX_REFILL_ATTEMPTS = 2;
 const PRODUCT_PROFILE_TIMEOUT_MS = 75_000;
 const CUSTOMER_PROFILE_TIMEOUT_MS = 75_000;
 const KEYWORD_EXPANSION_TIMEOUT_MS = 90_000;
 const SEARCH_STRATEGY_TIMEOUT_MS = 90_000;
-const SEARCH_STRATEGY_REFILL_TIMEOUT_MS = 30_000;
+const SEARCH_STRATEGY_REFILL_TIMEOUT_MS = 90_000;
 const FIRST_STAGE_SEARCH_QUERY_LIMIT = 15;
 const RUNNING_TASK_RECOVERY_LIMIT = 5;
 const RUNNING_TASK_RECOVERY_WINDOW_HOURS = 24;
 const LANGGRAPH_CHECKPOINT_STORE_VALUES = ["memory", "postgres"] as const;
+const CUSTOMER_LIST_HIDDEN_LEAD_STATUSES = [
+  // New simplified statuses we hide from the main customer list:
+  "intelligence",
+  "rejected",
+  // Legacy statuses kept for back-compat with historical task rows.
+  "intelligence_review",
+  "evidence_review"
+] as const;
 const knownQueryMarkets = [
   "Canada",
   "Australia",
@@ -716,9 +725,28 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         this.completeWorkflowStep(taskId, "plan_search_queries", async () => {
           const existingCount = await this.prisma.searchQuery.count({ where: { taskId } });
           if (existingCount === 0) {
-            if (context.searchQueries.length < MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT) {
+            // 2026-05: count GPT-emitted queries against the minimum
+            // threshold. Reverse-network injection adds 0-cost extras
+            // on top, but those are not a substitute for a complete
+            // GPT plan. We accept the plan when GPT itself produced
+            // at least MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT queries,
+            // OR when GPT produced at least 80% of that target AND the
+            // total (GPT + reverse-network) reaches the target. This
+            // protects against the previous mode where one missing
+            // GPT query failed the whole task even though the reverse
+            // network had already padded the plan to 32+.
+            const gptQueryCount = context.searchQueries.filter(
+              (query) => query.templateId === "gpt55_search_strategy"
+            ).length;
+            const totalQueryCount = context.searchQueries.length;
+            const gptSoftFloor = Math.ceil(MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT * 0.8);
+            const acceptable =
+              gptQueryCount >= MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT ||
+              (gptQueryCount >= gptSoftFloor &&
+                totalQueryCount >= MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT);
+            if (!acceptable) {
               throw new Error(
-                `GPT-5.5 search plan produced ${context.searchQueries.length} executable queries; at least ${MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT} are required. No deterministic fallback queries were added.`
+                `GPT-5.5 search plan produced ${gptQueryCount} executable queries (total ${totalQueryCount}); at least ${MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT} GPT queries (or ${gptSoftFloor} GPT plus reverse-network reaching ${MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT}) are required. No deterministic fallback queries were added.`
               );
             }
             await this.prisma.searchQuery.createMany({
@@ -946,6 +974,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           orderBy: { createdAt: "asc" }
         },
         leadCandidates: {
+          where: {
+            status: {
+              notIn: [...CUSTOMER_LIST_HIDDEN_LEAD_STATUSES]
+            }
+          },
           select: {
             id: true,
             taskId: true,
@@ -1045,7 +1078,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     await this.ensureTaskForUser(userId, taskId);
 
     return this.prisma.leadCandidate.findMany({
-      where: { taskId },
+      where: {
+        taskId,
+        status: {
+          notIn: [...CUSTOMER_LIST_HIDDEN_LEAD_STATUSES]
+        }
+      },
       include: {
         contacts: true,
         icpScore: true,
@@ -1278,7 +1316,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     for (const query of task.searchQueries) {
       const searchParams = {
         query: query.query,
-        country: countryToBraveCode(query.country),
+        country: countryToBraveCode(),
         language: "en",
         count: 20
       };
@@ -1502,19 +1540,19 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     ).length;
     const rejectedRatio = ratio(rejectedCandidates, totalCandidates);
     const countryIssueRatio = ratio(countryIssueCandidates, totalCandidates);
+    // Country-issue ratio is no longer a stop condition. The new product
+    // policy keeps "country unconfirmed" candidates flowing through to the
+    // main review list (we do not exist needs_country_review anymore), so
+    // the only remaining stop signal is "everything came back rejected" —
+    // which usually means a Brave outage or upstream filter break, not a
+    // genuine quality issue. We require near-total rejection before
+    // freezing pending queries, so legitimate noisy first batches do not
+    // strand the rest of the plan.
     const shouldStop =
       executedQueryCount >= FIRST_STAGE_SEARCH_QUERY_LIMIT &&
       totalCandidates >= 10 &&
-      ((mainCandidates < 1 && rejectedRatio >= 0.85) ||
-        countryIssueRatio >= 0.4 ||
-        rejectedRatio >= 0.9);
-    const reasons = [
-      ...(mainCandidates < 1 && rejectedRatio >= 0.85
-        ? ["review_plus_under_1_and_rejected_ratio_high"]
-        : []),
-      ...(countryIssueRatio >= 0.4 ? ["country_issue_ratio_high"] : []),
-      ...(rejectedRatio >= 0.9 ? ["rejected_ratio_high"] : [])
-    ];
+      rejectedRatio >= 0.95;
+    const reasons = shouldStop ? ["rejected_ratio_critical"] : [];
 
     return {
       phase: "first_15_queries",
@@ -1650,19 +1688,13 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       const search = await this.braveSearchService!.searchAndSaveResults(queryId, params);
       return { ...search, fallback: false };
     } catch (error) {
-      if (params.country !== "US") {
-        try {
-          await wait(searchRetryDelayMs());
-          const retrySearch = await this.braveSearchService!.searchAndSaveResults(queryId, {
-            ...params,
-            country: "US"
-          });
-          return { ...retrySearch, fallback: false };
-        } catch {
-          // Continue to the configured development fallback or return the original Brave error.
-        }
-      }
-
+      // We deliberately do NOT retry with country="US" anymore. After the
+      // 2026-05 country-validation rework, geographic anchoring is in the
+      // query text (country names, cities, local TLD site: filters,
+      // reference-customer domains), not in Brave's country parameter, so
+      // a US-locale retry can never improve relevance. If the first call
+      // fails, fall through to either the development fallback or surface
+      // the upstream error.
       if (!canUseDevelopmentSearchFallback()) {
         throw error;
       }
@@ -1840,12 +1872,15 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     }
 
     const requestedIds = input.leadIds ?? [];
+    // 2026-05: country verification is no longer required to send. The
+    // user's policy is "country unconfirmed → still let it through; one
+    // more customer is fine, treat it as opening a new market." We keep
+    // status + score gates but drop the country-confidence filter so
+    // .com domains without phone-extracted country can still be sent
+    // after the human review step.
     const eligibleCandidates = task.leadCandidates.filter(
       (candidate) =>
-        isMainCandidateStatus(candidate.status) &&
-        (candidate.icpScore?.score ?? 0) >= 50 &&
-        (candidate.countryConfidence === "high" || candidate.countryConfidence === "medium") &&
-        !candidate.countryConflict
+        isMainCandidateStatus(candidate.status) && (candidate.icpScore?.score ?? 0) >= 50
     );
     const selected = requestedIds.length
       ? task.leadCandidates.filter((candidate) => requestedIds.includes(candidate.id))
@@ -1863,7 +1898,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       )
     ) {
       throw new BadRequestException(
-        "Only country-verified review or qualified candidates can be approved"
+        "Only review or qualified candidates with sufficient ICP score can be approved"
       );
     }
 
@@ -2247,7 +2282,25 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     const productProfileAnalysis = aiPlanning.productProfileAnalysis;
     const customerProfileAnalysis = aiPlanning.customerProfileAnalysis;
     const keywordGroups = aiPlanning.keywordGroups;
-    const searchQueries = aiPlanning.searchQueries;
+    const baseSearchQueries = aiPlanning.searchQueries;
+
+    // 2026-05: reverse-customer-network injection (Lane D safety net).
+    // The prompt asks GPT to emit at least 2 reverse-mining queries per
+    // task when reference customers are present. GPT compliance is not
+    // guaranteed, and these queries are 0-cost on Brave (no extra
+    // generation, no extra GPT round trip). We inject them directly so
+    // every task with reference customers gets the lookalike-buyer
+    // surface area regardless of GPT's mood.
+    const reverseNetworkQueries = buildReverseCustomerNetworkQueries({
+      siteEvidence,
+      customerProfileAnalysis,
+      keywordGroups,
+      targetMarkets
+    });
+    const searchQueries: PlannedSearchQuery[] = mergeSearchQueriesPreservingOrder(
+      baseSearchQueries,
+      reverseNetworkQueries
+    );
 
     return {
       productProfile: product,
@@ -2311,7 +2364,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     const fallbackReasons: string[] = [];
     let productProfileAnalysis = input.ruleProductProfileAnalysis;
     let customerProfileAnalysis = input.ruleCustomerProfileAnalysis;
-    const channelCustomersRequested = isChannelCustomerRequest(input.input.prompt);
+    const channelCustomersRequested =
+      isChannelCustomerRequest(input.input.prompt) || DEFAULT_CHANNEL_CUSTOMER_QUERY_COUNT > 0;
     let keywordGroups = prioritizeKeywordGroupCustomerIntentTerms(
       input.ruleKeywordGroups,
       channelCustomersRequested
@@ -2459,7 +2513,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       let normalization = normalizeAiSearchPlan(
         searchPlan,
         keywordGroups,
-        DEFAULT_SEARCH_QUERY_COUNT,
+        SEARCH_STRATEGY_INITIAL_QUERY_COUNT,
         searchTargetMarkets,
         channelCustomersRequested
       );
@@ -2521,6 +2575,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       aiQueryCount = aiQueries.filter(
         (query) => query.templateId === "gpt55_search_strategy"
       ).length;
+      if (aiQueries.length > 0 && aiQueries.length < DEFAULT_SEARCH_QUERY_COUNT) {
+        fallbackReasons.push(
+          `GPT search plan incomplete: ${aiQueries.length}/${DEFAULT_SEARCH_QUERY_COUNT} executable queries accepted. No deterministic fallback queries were added.`
+        );
+      }
       searchQueries = aiQueries;
     } catch (error) {
       fallbackReasons.push(`GPT search strategy failed: ${searchErrorMessage(error)}`);
@@ -2703,9 +2762,37 @@ function buildSearchStrategyInput(input: {
       compactKeywordGroups
     ),
     targetMarkets: input.targetMarkets,
+    targetMarketProfiles: buildTargetMarketProfiles(input.targetMarkets),
     operatorLibrary: input.operatorLibrary,
     minQueryCount: input.minQueryCount
   };
+}
+
+function buildTargetMarketProfiles(targetMarkets: string[]) {
+  return targetMarkets.map((market, index) => {
+    const countryName = normalizeSearchTargetCountry(market);
+    const resolved = resolveCountry(countryName) ?? resolveCountry(market);
+    const phoneCode = countryToPhoneCode(countryName);
+    const tld = marketToSite(countryName);
+    const anchors = uniqueStrings([
+      countryName,
+      resolved?.name ?? "",
+      resolved?.code ?? "",
+      ...queryMarketAliases(countryName),
+      phoneCode ?? "",
+      tld
+    ]).filter(Boolean);
+
+    return {
+      country: resolved?.code ?? countryName.slice(0, 2).toUpperCase(),
+      countryName,
+      tier: index < 5 ? 1 : 2,
+      language: "en",
+      anchors,
+      phoneCode,
+      tlds: tld === ".com" ? [] : [tld]
+    };
+  });
 }
 
 function compactKeywordExpansionForSearchStrategy(
@@ -2803,30 +2890,11 @@ function selectSearchPlanningProductGroups(
   expansion: KeywordExpansionResult,
   keywordGroups: KeywordGroups
 ) {
-  const preferred = [
-    "5G telecom equipment",
-    "RAN equipment",
-    "base station equipment",
-    "RRU radio unit",
-    "remote radio unit",
-    "BBU baseband unit",
-    "baseband unit",
-    "AAU active antenna unit",
-    "OLT equipment",
-    "rectifier module",
-    "telecom power module",
-    "SFP optical module",
-    "microwave backhaul equipment",
-    "DAS equipment",
-    "small cell equipment",
-    "private 5G equipment",
-    "communication cables",
-    "telecom boards"
-  ];
   const values = uniqueStrings([
-    ...preferred,
     ...expansion.primaryProducts,
     ...expansion.relatedProducts,
+    ...expansion.industryScenarioTerms,
+    ...expansion.upstreamDownstreamTerms,
     ...keywordGroups.productTerms
   ]);
 
@@ -2845,7 +2913,13 @@ function selectSearchPlanningModelTerms(
     ...keywordGroups.longTailProductTerms,
     ...keywordGroups.productTerms
   ])
-    .filter((term) => hasSpecificModelOrSkuSignal(term) || /\b(?:huawei|zte|ericsson|nokia|eltek|alcatel-lucent)\b/i.test(term))
+    .filter(
+      (term) =>
+        hasSpecificModelOrSkuSignal(term) ||
+        keywordGroups.brandTerms.some((brand) =>
+          new RegExp(`\\b${quoteRegExp(brand)}\\b`, "i").test(term)
+        )
+    )
     .filter((term) => !isMainCustomerIntelligenceQuery(term))
     .slice(0, 16);
 }
@@ -2870,7 +2944,6 @@ function selectSearchPlanningBuyerTerms(
 ) {
   return uniqueStrings([...expansion.purchaseIntentTerms, ...keywordGroups.customerIntentTerms])
     .filter((term) => !isMainCustomerIntelligenceQuery(term))
-    .filter((term) => !isChannelCustomerTerm(term))
     .filter((term) => !/\b(?:procurement|purchasing|rfq|tender|vendor registration|supplier registration)\b/i.test(term))
     .slice(0, 14);
 }
@@ -2883,7 +2956,8 @@ function isSearchPlanningProductGroup(term: string) {
 
   return (
     hasSpecificIndustryQueryContext(normalized) ||
-    /\b(?:huawei|zte|ericsson|nokia|eltek|alcatel-lucent)\b/i.test(normalized)
+    hasSpecificModelOrSkuSignal(normalized) ||
+    normalized.length >= 4
   );
 }
 
@@ -2959,21 +3033,6 @@ function isChannelCustomerTerm(term: string) {
   return channelCustomerPattern.test(term);
 }
 
-function isChannelOnlyQuery(query: string) {
-  const lower = query.toLowerCase();
-  const hasChannel =
-    /\b(suppliers?|distributors?|stockists?|resellers?|dealers?|wholesale|wholesalers?|importers?)\b/i.test(
-      lower
-    );
-  if (!hasChannel) {
-    return false;
-  }
-
-  return !/\b(maintenance|repair|replacement|operation|operations|operator|carrier|isp|wisp|ftth|contractor|integrator|procurement|purchasing|rfq|tender|bid|vendor registration|supplier registration|field services|managed services|o&m)\b/i.test(
-    lower
-  );
-}
-
 function constrainKeywordGroupMarkets(
   keywordGroups: KeywordGroups,
   targetMarkets: string[] | undefined
@@ -3040,34 +3099,57 @@ function normalizeAiSearchPlan(
   const rejected: Array<{ query: string; country: string; reason: string }> = [];
 
   for (const query of [...plan.queries].sort(compareAiSearchQueries)) {
-    if (!supportedStatuses.has(query.executionStatus)) {
+    const rawQueryText = searchPlanQueryText(query);
+    const executionStatus = query.executionStatus ?? query.engineCompatibility;
+    const strategyType = normalizeAiSearchStrategyType(query.strategyType);
+    const rawCountry = [query.country, query.countryName].filter(Boolean).join(" ");
+
+    if (!rawQueryText) {
       rejected.push({
-        query: query.query,
-        country: query.country,
-        reason: `unsupported_execution_status:${query.executionStatus}`
+        query: "",
+        country: rawCountry,
+        reason: "empty_query"
       });
       continue;
     }
 
-    if (!isStrategyTypeWithinBudget(output, query.strategyType, channelCustomersRequested)) {
+    if (!supportedStatuses.has(executionStatus)) {
       rejected.push({
-        query: query.query,
-        country: query.country,
-        reason: `strategy_budget_exceeded:${query.strategyType ?? "unknown"}`
+        query: rawQueryText,
+        country: rawCountry,
+        reason: `unsupported_execution_status:${executionStatus}`
+      });
+      continue;
+    }
+
+    if (isAiIntelligenceSearchQuery(query, rawQueryText)) {
+      rejected.push({
+        query: rawQueryText,
+        country: rawCountry,
+        reason: "intelligence_query_not_customer_search"
+      });
+      continue;
+    }
+
+    if (!isStrategyTypeWithinBudget(output, strategyType, channelCustomersRequested, minQueryCount)) {
+      rejected.push({
+        query: rawQueryText,
+        country: rawCountry,
+        reason: `strategy_budget_exceeded:${strategyType ?? "unknown"}`
       });
       continue;
     }
 
     const countryResolution = resolveAiQueryCountry(
-      query.country,
-      query.query,
+      rawCountry,
+      rawQueryText,
       countryPool,
       output.length
     );
     if (!countryResolution.country) {
       rejected.push({
-        query: query.query,
-        country: query.country,
+        query: rawQueryText,
+        country: rawCountry,
         reason: countryResolution.reason
       });
       continue;
@@ -3075,15 +3157,15 @@ function normalizeAiSearchPlan(
 
     const country = countryResolution.country;
     const queryNormalization = normalizeAiQueryText(
-      query.query,
+      rawQueryText,
       country,
       keywordGroups,
       countryPool
     );
     if (!queryNormalization.query) {
       rejected.push({
-        query: query.query,
-        country: query.country,
+        query: rawQueryText,
+        country: rawCountry,
         reason: queryNormalization.reason
       });
       continue;
@@ -3096,8 +3178,8 @@ function normalizeAiSearchPlan(
 
     if (isMainCustomerIntelligenceQuery(queryText)) {
       rejected.push({
-        query: query.query,
-        country: query.country,
+        query: rawQueryText,
+        country: rawCountry,
         reason: "intelligence_query_not_main_customer_search"
       });
       continue;
@@ -3105,18 +3187,9 @@ function normalizeAiSearchPlan(
 
     if (!hasEnoughQuerySignals(queryText, keywordGroups, country)) {
       rejected.push({
-        query: query.query,
-        country: query.country,
+        query: rawQueryText,
+        country: rawCountry,
         reason: "missing_product_customer_or_market_signal"
-      });
-      continue;
-    }
-
-    if (!channelCustomersRequested && isChannelOnlyQuery(queryText)) {
-      rejected.push({
-        query: query.query,
-        country: query.country,
-        reason: "channel_query_without_user_request"
       });
       continue;
     }
@@ -3125,10 +3198,13 @@ function normalizeAiSearchPlan(
     output.push({
       provider: "brave",
       operatorSource: query.operatorSource as OperatorSource,
-      executionStatus: query.executionStatus as "supported" | "experimental",
-      operatorName: "GPT-5.5 buyer-led search",
+      executionStatus: executionStatus as "supported" | "experimental",
+      operatorName:
+        strategyType === "channel_customer"
+          ? "GPT-5.5 channel buyer search"
+          : "GPT-5.5 main buyer search",
       strategyTemplate: query.rationale,
-      strategyType: query.strategyType ?? null,
+      strategyType,
       query: queryText,
       keywordGroups,
       country,
@@ -3142,6 +3218,45 @@ function normalizeAiSearchPlan(
   }
 
   return { queries: output, rejected };
+}
+
+function searchPlanQueryText(query: SearchStrategyPlan["queries"][number]) {
+  return (query.coreQuery ?? query.query ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeAiSearchStrategyType(
+  strategyType: SearchStrategyPlan["queries"][number]["strategyType"]
+) {
+  switch (strategyType) {
+    case "channel_customer":
+    case "channel":
+      return "channel_customer";
+    case "main_customer":
+    case "buyer_scenario":
+    case "product_group":
+    case "brand_ecosystem":
+    case "model_specific":
+      return "main_customer";
+    case "intelligence":
+    case "procurement_event":
+      return "intelligence";
+    default:
+      return "main_customer";
+  }
+}
+
+function isAiIntelligenceSearchQuery(
+  query: SearchStrategyPlan["queries"][number],
+  rawQueryText: string
+) {
+  return (
+    normalizeAiSearchStrategyType(query.strategyType) === "intelligence" ||
+    (query.intelligenceType ?? "none") !== "none" ||
+    (query.expectedResultType ?? "company_site") !== "company_site" ||
+    /\b(?:rfq|request for quotation|tender|bid|procurement notice|vendor registration|supplier registration|filetype:|linkedin\.com|yellow pages|directory|buyer inquiry|buying lead|exhibitor list|participant list)\b/i.test(
+      rawQueryText
+    )
+  );
 }
 
 function uniqueRejectedAiQueries(
@@ -3174,41 +3289,47 @@ function compareAiSearchQueries(
 }
 
 function aiSearchStrategyRank(strategyType: string | undefined) {
-  switch (strategyType) {
-    case "buyer_scenario":
+  const normalizedType = normalizeAiSearchStrategyType(
+    strategyType as SearchStrategyPlan["queries"][number]["strategyType"]
+  );
+  switch (normalizedType) {
+    case "main_customer":
       return 0;
-    case "product_group":
+    case "channel_customer":
       return 1;
-    case "brand_ecosystem":
-      return 2;
-    case "model_specific":
-      return 3;
-    case "procurement_event":
-      return 4;
-    case "channel":
-      return 5;
+    case "intelligence":
+      return 9;
     default:
-      return 2;
+      return 0;
   }
 }
 
 function isStrategyTypeWithinBudget(
   existingQueries: PlannedSearchQuery[],
   strategyType: SearchStrategyPlan["queries"][number]["strategyType"],
-  channelCustomersRequested: boolean
+  channelCustomersRequested: boolean,
+  targetQueryCount: number
 ) {
-  if (strategyType === "channel" && !channelCustomersRequested) {
+  const normalizedType = normalizeAiSearchStrategyType(strategyType);
+  if (normalizedType === "intelligence") {
     return false;
   }
 
-  const normalizedType = strategyType ?? "unknown";
+  if (normalizedType === "channel_customer" && !channelCustomersRequested) {
+    return false;
+  }
+
+  const channelLimit = Math.max(
+    0,
+    Math.round(
+      (targetQueryCount / DEFAULT_SEARCH_QUERY_COUNT) * DEFAULT_CHANNEL_CUSTOMER_QUERY_COUNT
+    )
+  );
   const limits: Record<string, number> = {
-    buyer_scenario: 12,
-    product_group: 9,
-    brand_ecosystem: 3,
-    model_specific: 6,
-    procurement_event: 0,
-    channel: channelCustomersRequested ? 4 : 0,
+    main_customer: targetQueryCount || DEFAULT_MAIN_CUSTOMER_QUERY_COUNT,
+    channel_customer: channelCustomersRequested
+      ? channelLimit || DEFAULT_CHANNEL_CUSTOMER_QUERY_COUNT
+      : 0,
     unknown: 6
   };
   const limit = limits[normalizedType] ?? limits.unknown ?? 6;
@@ -3253,26 +3374,6 @@ function resolveAiQueryCountry(
     : { country: null, reason: "no_target_market_available" };
 }
 
-function keywordGroupsFromPayload(
-  payload: ReturnType<typeof parseTaskPayload>,
-  marketTerms: string[]
-): KeywordGroups {
-  const groups = payload.keywordGroups ?? {};
-
-  return {
-    brandTerms: asStringArray(groups.brandTerms),
-    productTerms: asStringArray(groups.productTerms),
-    longTailProductTerms: asStringArray(groups.longTailProductTerms),
-    customerIntentTerms: prioritizeCustomerIntentTerms(
-      asStringArray(groups.customerIntentTerms),
-      false
-    ),
-    marketTerms,
-    scenarioTerms: asStringArray(groups.scenarioTerms),
-    excludeTerms: asStringArray(groups.excludeTerms)
-  };
-}
-
 function normalizeCountryAlias(value: string) {
   const normalized = value.trim().toLowerCase();
   const aliases: Record<string, string> = {
@@ -3302,7 +3403,7 @@ function normalizeCountryAlias(value: string) {
 function normalizeAiQueryText(
   query: string,
   country: string,
-  keywordGroups: KeywordGroups,
+  _keywordGroups: KeywordGroups,
   targetMarkets: string[]
 ): { query: string; reason: string } {
   const cleaned = query.replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim();
@@ -3310,7 +3411,9 @@ function normalizeAiQueryText(
     return { query: "", reason: "empty_query" };
   }
 
-  let sanitized = stripEvidenceNegativeTerms(removeQuotedMarketPhrases(cleaned, targetMarkets));
+  let sanitized = stripGeneratedNegativeTerms(
+    stripEvidenceNegativeTerms(removeQuotedMarketPhrases(cleaned, targetMarkets))
+  );
   const conflicts = findMentionedKnownMarkets(sanitized).filter(
     (market) => !marketMatches(country, market)
   );
@@ -3330,12 +3433,12 @@ function normalizeAiQueryText(
   const withCountry = queryMentionsCountry(sanitized, country)
     ? sanitized
     : `${sanitized} ${country}`;
-  const withNegatives = appendSafeNegativeTerms(withCountry, keywordGroups.excludeTerms);
-  const compacted = reduceQueryComplexity(withNegatives).replace(/\s+$/, "");
+  const compactedCore = reduceQueryComplexity(withCountry).replace(/\s+$/, "");
+  const compacted = appendBackendSearchExclusions(compactedCore);
 
-  const remainingConflicts = findMentionedKnownMarkets(compacted).filter(
-    (market) => !marketMatches(country, market)
-  );
+  const remainingConflicts = findMentionedKnownMarkets(
+    stripGeneratedNegativeTerms(compacted)
+  ).filter((market) => !marketMatches(country, market));
   if (remainingConflicts.length) {
     return { query: "", reason: `market_conflict:${remainingConflicts.slice(0, 3).join(",")}` };
   }
@@ -3345,9 +3448,13 @@ function normalizeAiQueryText(
 
 function queryMentionsCountry(query: string, country: string) {
   const lower = query.toLowerCase();
+  const phoneCode = countryToPhoneCode(country);
+  const countrySite = marketToSite(country);
   return (
     lower.includes(country.toLowerCase()) ||
-    lower.includes(normalizeCountryAlias(country).toLowerCase())
+    lower.includes(normalizeCountryAlias(country).toLowerCase()) ||
+    Boolean(phoneCode && lower.includes(phoneCode.toLowerCase())) ||
+    (countrySite !== ".com" && lower.includes(countrySite.toLowerCase()))
   );
 }
 
@@ -3514,15 +3621,36 @@ function limitNegativeTerms(query: string, maxTerms: number) {
   return output.join(" ").replace(/\s+/g, " ").trim();
 }
 
-function appendSafeNegativeTerms(query: string, excludeTerms: string[]) {
-  const safeTerms = ["jobs", "careers", "training", "course", "forum", "wikipedia"];
-  const configuredSafeTerms = excludeTerms.filter((term) => isSafeQueryNegativeTerm(term));
-  const terms = uniqueStrings([...safeTerms.slice(0, 5), ...configuredSafeTerms]).slice(0, 5);
-  const missingTerms = terms
-    .filter((term) => !new RegExp(`-${quoteRegExp(term)}\\b`, "i").test(query))
-    .map((term) => `-${term}`);
+function stripGeneratedNegativeTerms(query: string) {
+  return query
+    .replace(/(^|\s)-[a-z]+:"[^"]*"/gi, " ")
+    .replace(/(^|\s)-(?:"[^"]+"|\S+)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-  return stripEvidenceNegativeTerms([query, ...missingTerms].join(" "));
+// Brave does not reliably honor inline -site: / -inurl: / -intext: operators,
+// and they consume scarce query-length budget. The post-search candidate
+// filter (lead-qualification.service) already removes alibaba/made-in-china/
+// content/marketplace/Chinese-supplier results by domain and content rules,
+// so we deliberately stop appending any backend exclusions to the query
+// string here. These constants are retained as documentation of the
+// historical exclusion vocabulary; they are no longer concatenated into
+// queries sent to Brave.
+const mainCustomerBackendExclusions: string[] = [];
+
+const channelCustomerBackendExclusions: string[] = [];
+
+const chinaSupplierBackendExclusions: string[] = [];
+
+function appendBackendSearchExclusions(query: string) {
+  // No-op: backend exclusions are now applied post-search via candidate
+  // filtering, not by mutating the Brave query text. Keeping the function
+  // signature avoids ripple-effect refactors at all call sites.
+  void mainCustomerBackendExclusions;
+  void channelCustomerBackendExclusions;
+  void chinaSupplierBackendExclusions;
+  return query.replace(/\s+/g, " ").trim();
 }
 
 function stripEvidenceNegativeTerms(query: string) {
@@ -3561,6 +3689,37 @@ function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, coun
   const hasBuyerRole =
     hasCustomer || hasScenario || queryBuyerRoleTerms.some((term) => lower.includes(term));
   const hasEntryPoint = queryEntryPointTerms.some((term) => lower.includes(term));
+  // 2026-05: Lane A (`site:.{tld} ...`) and Lane B (`("Brand" OR
+  // "Brand") "{role}" {country}`) and Lane D (`site:{ref_domain}` /
+  // `"{ref_company}" ...`) queries do not need an explicit entry-point
+  // word like "contact" or "services" — they already carry strong
+  // geographic / brand / reference anchoring. Treat the structural
+  // anchor as a substitute entry point so the validator doesn't reject
+  // perfectly good Lane-A/B/D queries.
+  const hasLocalTldAnchor = /\bsite:\.[a-z]{2,3}(?:\.[a-z]{2})?\b/i.test(query);
+  const hasReferenceSiteAnchor = /\bsite:[a-z0-9.-]+\.(?:com|co|io|net|ae|sa|qa|om|kw|ng|br|ru|de|fr|it|es|nl|in)\b/i.test(query);
+  const hasBrandOrGroupAnchor =
+    /\(\s*"[^"]+"(?:\s+OR\s+"[^"]+")+\s*\)/i.test(query) &&
+    extractKnownBrandTerms([query]).length >= 2;
+  const hasStructuralEntryPointSubstitute =
+    hasLocalTldAnchor || hasReferenceSiteAnchor || hasBrandOrGroupAnchor;
+  // 2026-05: Lane D name-pivot queries pivot off a reference customer
+  // name (in quotes) and use "client" / "partner" / "case study" /
+  // "deployment" as the verb. The reference name IS the customer
+  // signal; we should not also demand a separate buyer-role word in
+  // the same query. Detect this pattern and treat it as buyer-role
+  // satisfied.
+  const referenceNamePivot =
+    /"[^"]{2,80}"\s*(?:\(\s*"?(?:client|clients|partner|partners|case stud(?:y|ies)|deployment|deployments|reference|references)"?(?:\s+OR\s+"?(?:client|clients|partner|partners|case stud(?:y|ies)|deployment|deployments|reference|references)"?)*\s*\)|"(?:client|clients|partner|partners|case stud(?:y|ies)|deployment|deployments|reference|references)")/i.test(
+      query
+    );
+  // 2026-05: Lane F catalog/inventory queries already carry buying
+  // intent in the catalog vocabulary. Treat catalog vocabulary as a
+  // buyer-role substitute for this lane.
+  const inventoryIntentPivot = /(?:"in stock"|"available stock"|"ready stock"|"spot stock"|"spare parts list"|"product catalog"|"product catalogue"|"stock list"|"available inventory")/i.test(
+    query
+  );
+  const hasBuyerRoleSubstitute = referenceNamePivot || inventoryIntentPivot;
   const hasSellerOnlyTrap =
     querySellerOnlyTerms.some((term) => lower.includes(term)) && !hasBuyerRole;
   const hasProductOrIndustryContext =
@@ -3570,8 +3729,8 @@ function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, coun
     hasCountry &&
     !hasSellerOnlyTrap &&
     hasProductOrIndustryContext &&
-    hasBuyerRole &&
-    hasEntryPoint
+    (hasBuyerRole || hasBuyerRoleSubstitute) &&
+    (hasEntryPoint || hasStructuralEntryPointSubstitute)
   );
 }
 
@@ -3648,6 +3807,7 @@ const queryEntryPointTerms = [
   "contact",
   "contact us",
   "about us",
+  "about",
   "services",
   "solutions",
   "projects",
@@ -3655,7 +3815,38 @@ const queryEntryPointTerms = [
   "offices",
   "company",
   "inquiry",
-  "enquiry"
+  "enquiry",
+  "team",
+  "our team",
+  "who we are",
+  "imprint",
+  // 2026-05: Lane D (reference-customer reverse network) queries hunt
+  // for pages that mention the reference company as a client / partner
+  // / deployment. These words are themselves valid entry points.
+  "client",
+  "clients",
+  "partner",
+  "partners",
+  "case study",
+  "case studies",
+  "deployment",
+  "deployments",
+  "reference",
+  "references",
+  // 2026-05: Lane F (catalog / inventory) queries anchor on a buyer's
+  // sourcing intent. Inventory and catalog vocabulary IS the entry
+  // point — these queries land directly on a stockist's product page
+  // or a distributor's catalog, so the validator should treat them as
+  // valid entry points without also demanding a contact / about word.
+  "in stock",
+  "available stock",
+  "ready stock",
+  "spot stock",
+  "spare parts list",
+  "product catalog",
+  "product catalogue",
+  "stock list",
+  "available inventory"
 ];
 
 const queryBuyerRoleTerms = [
@@ -3671,6 +3862,12 @@ const queryBuyerRoleTerms = [
   "integration",
   "integrate",
   "implementation",
+  "private 5g",
+  "private 5g solutions",
+  "private 5g integrator",
+  "telecom power systems",
+  "telecom power service",
+  "telecom power services",
   "telecom site",
   "cell site",
   "site installation",
@@ -3682,6 +3879,8 @@ const queryBuyerRoleTerms = [
   "service provider",
   "field service",
   "field services",
+  "field engineering",
+  "engineering",
   "tower",
   "towerco",
   "isp",
@@ -3712,6 +3911,166 @@ const querySellerOnlyTerms = [
   "pdfcoffee",
   "router-switch"
 ];
+
+// 2026-05: reverse-customer-network query injection.
+//
+// We turn each successfully-read reference customer (the "look-alike
+// model" the user provided) into 0-cost extra Brave queries:
+//   1. site:{ref_domain} ("clients" OR "partners" OR "case studies"
+//      OR "deployments")     — mines the reference's published client
+//      / partner / case-study lists.
+//   2. "{ref_company_name}" ("client" OR "partner" OR "deployment")
+//      {region}                — finds OTHER companies whose own pages
+//      mention the reference (often their integration partners or
+//      adjacent vendors who will buy similar products).
+//
+// This Lane D safety net runs regardless of whether GPT generated any
+// reference-customer queries on its own. The two patterns mirror the
+// LANE D guidance in the search-strategy prompt and are intentionally
+// kept short so they survive Brave's query-length budget.
+function buildReverseCustomerNetworkQueries(input: {
+  siteEvidence: ProfileSiteEvidence;
+  customerProfileAnalysis: Record<string, unknown>;
+  keywordGroups: KeywordGroups;
+  targetMarkets?: string[];
+}): PlannedSearchQuery[] {
+  const readReferenceSites = (input.siteEvidence.referenceCustomerSites ?? []).filter(
+    (site: WebsiteEvidence) => site.status === "read" && Boolean(site.finalUrl)
+  );
+  if (readReferenceSites.length === 0) {
+    return [];
+  }
+
+  const referenceCompanies = asStringArray(input.customerProfileAnalysis.referenceCompanies);
+  const targetMarkets = (input.targetMarkets ?? []).filter(
+    (market) => market && !isMacroMarket(market)
+  );
+  const primaryMarket = targetMarkets[0] ?? "";
+  const secondaryMarket = targetMarkets[1] ?? primaryMarket;
+  const queries: PlannedSearchQuery[] = [];
+
+  for (let index = 0; index < readReferenceSites.length; index += 1) {
+    const site = readReferenceSites[index]!;
+    const domain = referenceSiteDomain(site);
+    if (!domain) {
+      continue;
+    }
+
+    // Pattern A: mine the reference's own client / partner pages.
+    queries.push({
+      provider: "brave",
+      operatorSource: "brave_official",
+      executionStatus: "supported",
+      operatorName: "Reverse customer network mining",
+      strategyTemplate: "lane-D reference-customer reverse network",
+      strategyType: "main_customer",
+      query:
+        `site:${domain} ("clients" OR "partners" OR "case studies" OR "deployments")`.slice(0, 140),
+      keywordGroups: input.keywordGroups,
+      country: primaryMarket || null,
+      effectivenessScore: 0.9,
+      templateId: "reverse_network_site"
+    });
+
+    // Pattern B: pivot off the reference COMPANY name to find buyers
+    // whose own pages talk about the reference.
+    const referenceName = referenceCompanies[index] ?? referenceCompanyFromDomain(domain);
+    if (referenceName) {
+      const market = secondaryMarket || primaryMarket;
+      const trailingMarket = market ? ` ${market}` : "";
+      queries.push({
+        provider: "brave",
+        operatorSource: "brave_official",
+        executionStatus: "supported",
+        operatorName: "Reverse customer network mining",
+        strategyTemplate: "lane-D reference-customer name pivot",
+        strategyType: "main_customer",
+        query: `"${referenceName}" ("client" OR "partner" OR "deployment")${trailingMarket}`.slice(
+          0,
+          140
+        ),
+        keywordGroups: input.keywordGroups,
+        country: market || null,
+        effectivenessScore: 0.85,
+        templateId: "reverse_network_name"
+      });
+    }
+  }
+
+  return queries;
+}
+
+function mergeSearchQueriesPreservingOrder(
+  base: PlannedSearchQuery[],
+  injected: PlannedSearchQuery[]
+): PlannedSearchQuery[] {
+  if (injected.length === 0) {
+    return base;
+  }
+  const seen = new Set(base.map((query) => normalizeForDedup(query.query)));
+  const merged = [...base];
+  for (const query of injected) {
+    const key = normalizeForDedup(query.query);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(query);
+  }
+  return merged;
+}
+
+function normalizeForDedup(query: string) {
+  return query.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function referenceSiteDomain(site: WebsiteEvidence) {
+  const url = site.finalUrl ?? site.url;
+  if (!url) {
+    return null;
+  }
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function referenceCompanyFromDomain(domain: string) {
+  const stripped = domain.replace(/\.[a-z]{2,}(?:\.[a-z]{2})?$/i, "");
+  if (!stripped) {
+    return null;
+  }
+  return stripped
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function isMacroMarket(market: string) {
+  const normalized = market.trim().toLowerCase();
+  return [
+    "global",
+    "worldwide",
+    "international",
+    "middle east",
+    "mena",
+    "gcc",
+    "africa",
+    "north africa",
+    "europe",
+    "latin america",
+    "latam",
+    "americas",
+    "north america",
+    "asia",
+    "southeast asia",
+    "south asia",
+    "central asia",
+    "oceania"
+  ].includes(normalized);
+}
 
 function buildExecutionPlan(hasProductProfile: boolean, hasCustomerProfile: boolean) {
   return [
@@ -3907,7 +4266,7 @@ function compactLeadCandidatesForClient(value: unknown) {
     return value;
   }
 
-  return value.map((lead) => {
+  return value.filter(isCustomerListLeadVisible).map((lead) => {
     const row = toPlainObject(lead);
     return {
       ...row,
@@ -3917,6 +4276,14 @@ function compactLeadCandidatesForClient(value: unknown) {
       outreachDrafts: compactOutreachDraftsForClient(row.outreachDrafts)
     };
   });
+}
+
+function isCustomerListLeadVisible(lead: unknown) {
+  const row = toPlainObject(lead);
+  const status = typeof row.status === "string" ? row.status : "";
+  return !CUSTOMER_LIST_HIDDEN_LEAD_STATUSES.includes(
+    status as (typeof CUSTOMER_LIST_HIDDEN_LEAD_STATUSES)[number]
+  );
 }
 
 function compactIcpScoreForClient(value: unknown) {
@@ -4257,6 +4624,9 @@ function normalizeSearchTargetCountry(market: string) {
     riyadh: "Saudi Arabia",
     jeddah: "Saudi Arabia",
     doha: "Qatar",
+    kuwait: "Kuwait",
+    kw: "Kuwait",
+    "kuwait city": "Kuwait",
     lagos: "Nigeria",
     nairobi: "Kenya",
     moscow: "Russia",
@@ -4278,6 +4648,7 @@ function normalizeMarketKey(market: string) {
 function detectTaskMarkets(text: string): string[] {
   const rules: Array<[RegExp, string[]]> = [
     [/\boman\b|\u963f\u66fc/i, ["Oman"]],
+    [/\bkuwait\b|\bkw\b|\u79d1\u5a01\u7279/i, ["Kuwait"]],
     [/\biran\b|\u4f0a\u6717/i, ["Iran"]],
     [/\bisrael\b|\u4ee5\u8272\u5217/i, ["Israel"]],
     [/\bunited states\b|\busa\b|\bus\b|\u7f8e\u56fd/i, ["United States"]],
@@ -4605,92 +4976,61 @@ function resolveSearchBatchLimit(limit: number | undefined) {
   return Math.min(Math.max(Math.trunc(requested), 1), MAX_SYNC_SEARCH_QUERY_LIMIT);
 }
 
-function countryToBraveCode(country: string | null) {
-  if (!country) {
-    return "US";
-  }
-
-  const genericCode = countryToSearchApiCode(country);
-  if (genericCode !== "ALL" && (resolveCountry(country) || genericCode !== "US")) {
-    return genericCode;
-  }
-
-  const normalized = country?.toLowerCase();
-  const codes: Record<string, string> = {
-    uae: "ALL",
-    "united arab emirates": "ALL",
-    阿联酋: "ALL",
-    dubai: "ALL",
-    "abu dhabi": "ALL",
-    "saudi arabia": "SA",
-    沙特: "SA",
-    riyadh: "SA",
-    jeddah: "SA",
-    qatar: "ALL",
-    nigeria: "ALL",
-    尼日利亚: "ALL",
-    kenya: "ALL",
-    肯尼亚: "ALL",
-    "south africa": "ZA",
-    indonesia: "ID",
-    brazil: "BR",
-    india: "IN",
-    pakistan: "PK",
-    bangladesh: "BD",
-    vietnam: "VN",
-    malaysia: "MY",
-    philippines: "PH",
-    thailand: "TH",
-    singapore: "SG",
-    cambodia: "KH",
-    myanmar: "MM",
-    laos: "LA",
-    kazakhstan: "KZ",
-    uzbekistan: "UZ",
-    kyrgyzstan: "KG",
-    tajikistan: "TJ",
-    turkmenistan: "TM",
-    kuwait: "KW",
-    oman: "OM",
-    bahrain: "BH",
-    jordan: "JO",
-    iraq: "IQ",
-    turkey: "TR",
-    egypt: "EG",
-    germany: "DE",
-    "united kingdom": "GB",
-    france: "FR",
-    italy: "IT",
-    spain: "ES",
-    poland: "PL",
-    netherlands: "NL",
-    romania: "RO",
-    "united states": "US",
-    usa: "US",
-    canada: "CA",
-    mexico: "MX",
-    chile: "CL",
-    colombia: "CO",
-    peru: "PE",
-    argentina: "AR",
-    ecuador: "EC",
-    "costa rica": "CR",
-    australia: "AU",
-    "new zealand": "NZ",
-    "papua new guinea": "PG",
-    morocco: "MA",
-    ghana: "GH",
-    ethiopia: "ET",
-    tanzania: "TZ",
-    uganda: "UG",
-    algeria: "DZ",
-    russia: "ALL",
-    俄罗斯: "ALL",
-    ukraine: "ALL",
-    乌克兰: "ALL"
+function countryToPhoneCode(country: string) {
+  const code = resolveCountry(country)?.code;
+  const phoneCodes: Record<string, string> = {
+    AE: "+971",
+    SA: "+966",
+    QA: "+974",
+    OM: "+968",
+    KW: "+965",
+    BH: "+973",
+    JO: "+962",
+    IQ: "+964",
+    IR: "+98",
+    NG: "+234",
+    KE: "+254",
+    ZA: "+27",
+    EG: "+20",
+    MA: "+212",
+    GH: "+233",
+    TZ: "+255",
+    BR: "+55",
+    RU: "+7",
+    UA: "+380",
+    CA: "+1",
+    AU: "+61",
+    DE: "+49",
+    PL: "+48",
+    US: "+1",
+    GB: "+44",
+    ID: "+62",
+    MY: "+60",
+    PH: "+63",
+    TH: "+66",
+    VN: "+84",
+    MX: "+52",
+    CO: "+57",
+    CL: "+56",
+    PE: "+51"
   };
 
-  return normalized ? (codes[normalized] ?? "ALL") : "US";
+  return code ? (phoneCodes[code] ?? null) : null;
+}
+
+function countryToBraveCode() {
+  // Brave's `country` parameter is unreliable for our markets:
+  // - It rejects long names like "Saudi Arabia" / "United Arab Emirates"
+  //   and many region-style values, silently degrading to defaults.
+  // - It biases the entire result set toward the chosen locale, which
+  //   for US/SA pulls in irrelevant US/Alibaba content even when the
+  //   query text already anchors to the target country.
+  //
+  // After the 2026-05 country-validation rework we drive geography
+  // entirely through query text (country name, cities, local TLD
+  // site: filters, reference-customer domains). Asking Brave for ALL
+  // gives the broadest index and lets our text anchors do the work.
+  return "ALL";
 }
 
 function canUseDevelopmentSearchFallback() {
@@ -4709,14 +5049,6 @@ function searchErrorMessage(error: unknown) {
   }
 
   return String(error);
-}
-
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function searchRetryDelayMs() {
-  return process.env.NODE_ENV === "test" ? 0 : 1000;
 }
 
 function buildDevelopmentSearchResults(query: string, country: string | null): BraveSearchResult[] {
@@ -4766,7 +5098,21 @@ function ratio(value: number, total: number) {
 }
 
 function isMainCandidateStatus(status: string | null | undefined) {
-  return ["review", "qualified", "approved", "contacted", "email_sent"].includes(status ?? "");
+  // 2026-05: country verification was downgraded to a soft signal, so
+  // candidates whose country is unconfirmed but otherwise look like
+  // buyers now reach status="review" directly. The legacy
+  // needs_country_review / country_conflict_review entries still appear
+  // in historical rows, so we treat them as main candidates too — they
+  // map to the same UI bucket today.
+  return [
+    "review",
+    "qualified",
+    "approved",
+    "contacted",
+    "email_sent",
+    "needs_country_review",
+    "country_conflict_review"
+  ].includes(status ?? "");
 }
 
 function countryMatchesAnyTarget(country: string, targetRegions: string[]) {

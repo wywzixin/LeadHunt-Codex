@@ -311,7 +311,7 @@ describe("LeadQualificationService", () => {
         confidence: 0.8,
         decision: "review",
         matchedSignals: ["RRU spare parts\u0000"],
-        risks: ["Needs manual review\u0000"]
+        risks: ["Needs manual review\u0000", "Literal escaped null \\u0000 must be removed"]
       })
     );
 
@@ -359,7 +359,7 @@ describe("LeadQualificationService", () => {
         data: expect.objectContaining({
           companyName: "Noisy Telecom Page",
           website: "https://www.linkedin.com/company/noisy-telecom-page",
-          status: "intelligence_review",
+          status: "intelligence",
           icpScore: {
             create: expect.objectContaining({
               score: expect.any(Number),
@@ -544,7 +544,7 @@ describe("LeadQualificationService", () => {
       "UAE"
     );
 
-    expect(fetchSpy).toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
     expect(result.createdCount).toBe(0);
     expect(result.skippedCount).toBe(1);
     expect(prisma.leadCandidate.create).not.toHaveBeenCalled();
@@ -577,7 +577,11 @@ describe("LeadQualificationService", () => {
     expect(prisma.leadCandidate.create).toHaveBeenCalled();
   });
 
-  it("keeps generic service pages out of the main lead path until direct contact evidence exists", async () => {
+  it("uses the buyer-role floor to keep contact-less service pages in review instead of rejecting them", async () => {
+    // 2026-05: pages from buyer-side service companies (maintenance,
+    // system integrator, etc.) now stay in review even without a phone
+    // or email yet, so the human can decide whether to enrich. The
+    // candidate WITH a direct contact still scores higher.
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -605,15 +609,20 @@ describe("LeadQualificationService", () => {
 
     expect(result.createdCount).toBe(2);
     const atlasCall = prisma.leadCandidate.create.mock.calls.find(
-      ([input]) => input.data.website === "https://atlasnetwork.ae/services"
+      ([input]: any) =>
+        input.data.website === "https://atlasnetwork.ae/services"
     );
-    expect(atlasCall?.[0].data.status).toBe("evidence_review");
-    expect(atlasCall?.[0].data.icpScore.create.score).toBeLessThan(50);
+    expect(atlasCall?.[0].data.status).toBe("review");
+    expect(atlasCall?.[0].data.icpScore.create.score).toBeGreaterThanOrEqual(50);
     const gulfCall = prisma.leadCandidate.create.mock.calls.find(
-      ([input]) => input.data.website === "https://gulffieldtelecom.ae/contact"
+      ([input]: any) =>
+        input.data.website === "https://gulffieldtelecom.ae/contact"
     );
-    expect(gulfCall?.[0].data.status).not.toBe("evidence_review");
-    expect(gulfCall?.[0].data.icpScore.create.score).toBeGreaterThanOrEqual(50);
+    expect(gulfCall?.[0].data.status).not.toBe("rejected");
+    // Gulf has a direct phone and email so the floor applies a higher
+    // value AND the standard scoring path also lifts it; we expect at
+    // least 60 (the contactful floor).
+    expect(gulfCall?.[0].data.icpScore.create.score).toBeGreaterThanOrEqual(60);
   });
 
   it("stores query country separately and requires official evidence before assigning a lead country", async () => {
@@ -677,7 +686,13 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("uses manually selected countries while keeping known off-target country domains as rejected evidence", async () => {
+  it("keeps verified-country candidates from outside the target list as new-market leads", async () => {
+    // 2026-05 product policy: a verified country outside the selected
+    // target markets is no longer a hard reject. The user explicitly
+    // said "validation fails �?just let it through, more customers is
+    // fine, treat it as opening a new market." We assert both rows
+    // come through and Berlin lands at review-or-better with a
+    // soft-mismatch risk note.
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -716,20 +731,28 @@ describe("LeadQualificationService", () => {
         })
       })
     );
-    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          companyName: "Berlin Radio Systems",
-          country: "GERMANY",
-          queryCountry: "POLAND",
-          countryConflict: false,
-          status: "rejected"
-        })
-      })
+    const berlinCall = prisma.leadCandidate.create.mock.calls.find(
+      ([input]: any) =>
+        input.data.website === "https://berlinradio.de/contact"
+    );
+    expect(berlinCall?.[0].data.country).toBe("GERMANY");
+    expect(berlinCall?.[0].data.queryCountry).toBe("POLAND");
+    expect(berlinCall?.[0].data.countryConflict).toBe(false);
+    expect(["review", "qualified"]).toContain(berlinCall?.[0].data.status);
+    expect(berlinCall?.[0].data.icpScore.create.reasons.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("new-market exploration")
+      ])
     );
   });
 
-  it("flags official non-target countries instead of letting the query country disguise them", async () => {
+  it("keeps off-target verified countries as new-market leads instead of rejecting them", async () => {
+    // 2026-05: candidate verified outside target markets is no longer
+    // a hard reject. We let it through; the user accepted opening new
+    // markets when validation differs from the query country. The
+    // status here will be review or qualified depending on score; the
+    // important assertion is that we record the country mismatch in
+    // risks rather than dropping the row.
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -757,27 +780,17 @@ describe("LeadQualificationService", () => {
     );
 
     expect(result.createdCount).toBe(1);
-    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          companyName: "Tempest Network Solutions",
-          queryCountry: "KENYA",
-          country: "UNITED STATES",
-          inferredCountry: "UNITED STATES",
-          countryConflict: false,
-          status: "rejected"
-        })
-      })
-    );
-    const reasons = prisma.leadCandidate.create.mock.calls[0]?.[0].data.icpScore.create.reasons;
-    expect(reasons).toEqual(
-      expect.objectContaining({
-        countryValidation: expect.objectContaining({
-          queryCountry: "KENYA",
-          inferredCountry: "UNITED STATES",
-          countryConflict: false
-        })
-      })
+    const tempestCall = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(tempestCall.companyName).toBe("Tempest Network Solutions");
+    expect(tempestCall.queryCountry).toBe("KENYA");
+    expect(tempestCall.country).toBe("UNITED STATES");
+    expect(tempestCall.inferredCountry).toBe("UNITED STATES");
+    expect(tempestCall.countryConflict).toBe(false);
+    expect(["review", "qualified"]).toContain(tempestCall.status);
+    expect(tempestCall.icpScore.create.reasons.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("new-market exploration")
+      ])
     );
   });
 
@@ -816,7 +829,7 @@ describe("LeadQualificationService", () => {
         countryConflict: false
       })
     );
-    expect(createdLead.status).not.toBe("country_conflict_review");
+    expect(createdLead.status).not.toBe("review");
     expect(createdLead.icpScore.create.reasons).toEqual(
       expect.objectContaining({
         countryValidation: expect.objectContaining({
@@ -862,8 +875,8 @@ describe("LeadQualificationService", () => {
         countryConflict: false
       })
     );
-    expect(createdLead.status).not.toBe("country_conflict_review");
-    expect(createdLead.status).not.toBe("needs_country_review");
+    expect(createdLead.status).not.toBe("review");
+    expect(createdLead.status).not.toBe("review");
     expect(createdLead.status).not.toBe("rejected");
   });
 
@@ -952,9 +965,15 @@ describe("LeadQualificationService", () => {
 
     expect(uaeScore.status).not.toBe("rejected");
     expect(southAfricaScore.status).not.toBe("rejected");
-    expect(usScore.status).toBe("rejected");
-    expect(usScore.risks).toContain(
-      "Verified candidate country is outside the selected target markets; rejected instead of entering country review"
+    // 2026-05: US (outside the macro region) is now allowed through as
+    // a soft new-market lead, not hard-rejected. The US fixture above
+    // is a real DAS integrator with a verified phone, so it lands in
+    // "review" with a new-market-exploration risk note.
+    expect(usScore.status).not.toBe("rejected");
+    expect(usScore.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("new-market exploration")
+      ])
     );
   });
 
@@ -989,7 +1008,7 @@ describe("LeadQualificationService", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           website: "https://www.tendersontime.com/uae-tenders/",
-          status: "intelligence_review",
+          status: "intelligence",
           icpScore: expect.objectContaining({
             create: expect.objectContaining({
               score: expect.any(Number)
@@ -1321,7 +1340,7 @@ describe("LeadQualificationService", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           website: "https://procurement.gov/telecom-rfq.pdf",
-          status: "intelligence_review"
+          status: "intelligence"
         })
       })
     );
@@ -1410,7 +1429,12 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps contactless candidates out of high-confidence qualified status", () => {
+  it("keeps contactless service-company pages in review with the buyer-role floor instead of rejecting them", () => {
+    // 2026-05: a buyer-side service page (system integrator,
+    // maintenance company) without a phone/email is no longer dropped
+    // below 50. The buyer-role floor lifts it to ~55 so the human can
+    // decide whether to enrich. We still keep it under "qualified" and
+    // record "no usable contact" as a risk.
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(
       [
@@ -1427,8 +1451,9 @@ describe("LeadQualificationService", () => {
 
     const score = service.scoreCandidate(candidate!, criteria);
 
-    expect(score.score).toBeLessThan(50);
-    expect(score.status).toBe("evidence_review");
+    expect(score.score).toBeGreaterThanOrEqual(50);
+    expect(score.score).toBeLessThan(75);
+    expect(score.status).toBe("review");
     expect(score.risks).toContain("No usable email or phone found yet");
   });
 
@@ -1608,7 +1633,7 @@ describe("LeadQualificationService", () => {
     );
 
     expect(scores[0]?.status).toBe("rejected");
-    expect(scores[1]?.status).toBe("evidence_review");
+    expect(scores[1]?.status).toBe("rejected");
     expect(scores[1]?.leadType).toBe("government_information");
     expect(scores[2]?.status).toBe("rejected");
     expect(scores[3]?.score).toBeGreaterThan(scores[0]?.score ?? 0);
@@ -1747,7 +1772,7 @@ describe("LeadQualificationService", () => {
         html = `
           <html><body>
             <a href="mailto:info@qilantelecom.com">Email us</a>
-            <span>Phone: 0086-13735565568</span>
+            <span>Phone: +233 302 555 568</span>
           </body></html>
         `;
       }
@@ -1792,7 +1817,7 @@ describe("LeadQualificationService", () => {
             create: expect.arrayContaining([
               expect.objectContaining({ type: "email", value: "info@qilantelecom.com" }),
               expect.objectContaining({ type: "email", value: "sales@qilantelecom.com" }),
-              expect.objectContaining({ type: "phone", value: "0086-13735565568" })
+              expect.objectContaining({ type: "phone", value: "+233 302 555 568" })
             ])
           }
         })
@@ -2034,7 +2059,7 @@ describe("LeadQualificationService", () => {
     const governmentCreate = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
     expect(governmentCreate).toMatchObject({
       companyName: "The Official Platform of the UAE Government",
-      status: "evidence_review"
+      status: "rejected"
     });
     expect(governmentCreate.icpScore.create.score).toBeLessThanOrEqual(49);
     expect(governmentCreate.icpScore.create.reasons).toMatchObject({
@@ -2043,7 +2068,11 @@ describe("LeadQualificationService", () => {
     });
   });
 
-  it("keeps RCR Wireless project news as intelligence instead of a main customer", async () => {
+  it("hard rejects RCR Wireless project news instead of keeping it as intelligence", async () => {
+    // 2026-05 product policy: news / trade-media domains are noise. The
+    // user explicitly listed "新闻站不�? as a hard reject. RCR Wireless
+    // is a trade-media outlet, not a buyer or a procurement portal, so
+    // we drop it before any intelligence classification.
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -2066,15 +2095,8 @@ describe("LeadQualificationService", () => {
       "UAE"
     );
 
-    expect(result.createdCount).toBe(1);
-    const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
-    expect(createData.status).toBe("intelligence_review");
-    expect(createData.icpScore.create.score).toBeLessThanOrEqual(49);
-    expect(createData.icpScore.create.reasons).toMatchObject({
-      leadType: "intelligence",
-      intelligenceType: "project_news",
-      extractableCompanies: expect.arrayContaining(["ADNOC", "e&", "Nokia"])
-    });
+    expect(result.createdCount).toBe(0);
+    expect(prisma.leadCandidate.create).not.toHaveBeenCalled();
   });
 
   it("keeps operator vendor-registration pages as intelligence instead of main customers", async () => {
@@ -2100,7 +2122,7 @@ describe("LeadQualificationService", () => {
     );
 
     const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
-    expect(createData.status).toBe("intelligence_review");
+    expect(createData.status).toBe("intelligence");
     expect(createData.icpScore.create.score).toBeLessThanOrEqual(49);
     expect(createData.icpScore.create.reasons).toMatchObject({
       leadType: "intelligence",
@@ -2138,7 +2160,7 @@ describe("LeadQualificationService", () => {
 
     expect(prisma.leadCandidate.create).toHaveBeenCalledTimes(1);
     const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
-    expect(createData.status).toBe("intelligence_review");
+    expect(createData.status).toBe("intelligence");
     expect(createData.icpScore.create.score).toBeLessThanOrEqual(49);
     expect(createData.icpScore.create.reasons).toMatchObject({
       leadType: "intelligence",
@@ -2176,8 +2198,8 @@ describe("LeadQualificationService", () => {
     );
 
     expect(scores.map((score) => score.status)).toEqual([
-      "intelligence_review",
-      "intelligence_review"
+      "intelligence",
+      "intelligence"
     ]);
     expect(scores.map((score) => score.intelligenceType)).toEqual([
       "government_tender",
@@ -2221,8 +2243,8 @@ describe("LeadQualificationService", () => {
     );
 
     expect(scores.map((score) => score.status)).toEqual([
-      "intelligence_review",
-      "intelligence_review"
+      "intelligence",
+      "intelligence"
     ]);
     expect(scores.map((score) => score.intelligenceType)).toEqual([
       "project_news",
@@ -2277,7 +2299,12 @@ describe("LeadQualificationService", () => {
     ]);
   });
 
-  it("caps generic service pages without direct contacts below qualified", () => {
+  it("keeps generic service pages without direct contacts in review (not qualified) thanks to the buyer-role floor", () => {
+    // 2026-05: this test used to assert score <= 58 and status =
+    // "rejected". The new policy keeps buyer-role pages in review even
+    // when there is no email or phone yet (so the user can choose to
+    // enrich). We still cap the score under "qualified" so the human
+    // does not see false confidence.
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(
       [
@@ -2294,8 +2321,9 @@ describe("LeadQualificationService", () => {
 
     const score = service.scoreCandidate(candidate!, criteria);
 
-    expect(score.score).toBeLessThanOrEqual(58);
-    expect(score.status).toBe("evidence_review");
+    expect(score.score).toBeGreaterThanOrEqual(50);
+    expect(score.score).toBeLessThan(75);
+    expect(score.status).toBe("review");
   });
 
   it("keeps glossary and vendor knowledge pages out of country-review customer candidates", () => {
@@ -2315,8 +2343,103 @@ describe("LeadQualificationService", () => {
 
     const score = service.scoreCandidate(candidate!, criteria);
 
-    expect(score.status).not.toBe("needs_country_review");
+    expect(score.status).not.toBe("review");
     expect(["qualified", "review"]).not.toContain(score.status);
+    expect(score.score).toBeLessThanOrEqual(49);
+  });
+
+  it("rejects non-target China suppliers and product detail pages before country review", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "HUANET Huawei MA5800 OLT product",
+          url: "https://www.hua-network.com/optical-line-terminal-huawei-smartax-5800-olt-ma5800-x15-gpon-product/",
+          snippet: "Huawei OLT product supplier page for GPON equipment.",
+          source: "web"
+        },
+        {
+          title: "ETU-Link 10G SFP optical transceiver",
+          url: "https://www.etulinktechnology.com/products/10g-sfp-module.html",
+          snippet:
+            "Shenzhen Chinese supplier of SFP optical transceiver modules. Phone +86 755 1234 5678.",
+          source: "web"
+        },
+        {
+          title: "Fiberolt Huawei OLT product details",
+          url: "https://www.fiberolt.com/huawei-ma5800-olt.html",
+          snippet: "Product details and price for Huawei OLT equipment.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia"]
+      },
+      "Saudi Arabia"
+    );
+
+    expect(result.createdCount).toBe(0);
+    expect(result.skippedCount).toBe(3);
+    expect(prisma.leadCandidate.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps associations and conference pages out of country-review customer candidates", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Telecom Infra Project OpenRAN",
+          url: "https://www.telecominfraproject.com/openran",
+          snippet: "Open RAN industry initiative and technical community.",
+          source: "web"
+        },
+        {
+          title: "Technical Programme",
+          url: "https://icc2026.ieee-icc.org/technical-program",
+          snippet: "IEEE ICC 2026 technical programme, conference agenda and accepted papers.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia"]
+      },
+      "Saudi Arabia"
+    );
+
+    expect(prisma.leadCandidate.create).toHaveBeenCalledTimes(2);
+    for (const call of prisma.leadCandidate.create.mock.calls) {
+      const createData = call[0].data;
+      expect(createData.status).toBe("rejected");
+      expect(createData.icpScore.create.score).toBeLessThanOrEqual(49);
+    }
+  });
+
+  it("keeps marketing article pages out of the main customer list even on local domains", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "5G-Ready Network Infrastructure in UAE",
+          url: "https://powerlinkitss.ae/5g-ready-network-infrastructure-future-proofing-uae-businesses-in-2026/",
+          snippet:
+            "Article about future-proofing UAE businesses with 5G network infrastructure.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "UAE" }
+    );
+
+    const score = service.scoreCandidate(candidate!, criteria);
+
+    expect(score.status).toBe("rejected");
     expect(score.score).toBeLessThanOrEqual(49);
   });
 
