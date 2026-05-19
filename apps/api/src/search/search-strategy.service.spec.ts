@@ -42,7 +42,10 @@ describe("SearchStrategyService", () => {
           operatorName: expect.any(String),
           strategyTemplate: expect.any(String),
           keywordGroups: expect.objectContaining({
-            productTerms: expect.arrayContaining(["telecom equipment"])
+            // 2026-05: telecom-specific defaults removed; structure
+            // is asserted instead of specific telecom vocabulary.
+            productTerms: expect.any(Array),
+            customerIntentTerms: expect.any(Array)
           }),
           effectivenessScore: expect.any(Number)
         })

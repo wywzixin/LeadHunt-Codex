@@ -24,129 +24,37 @@ export type ExpandedKeywords = {
 
 type ProfileHints = Partial<ExpandedKeywords>;
 
-const defaultMainProducts = [
-  "equipment",
-  "components",
-  "spare parts",
-  "industrial equipment",
-  "telecom equipment"
-];
+// 2026-05: Telecom-only static defaults removed. The system is a
+// generic foreign-trade lead generator, not a telecom-specific tool.
+// Telecom-specific keywords used to be appended unconditionally to
+// every prompt's keywordGroups, which polluted GPT's context for
+// non-telecom industries (oil & gas, valves, textiles, etc.). The
+// detect*() functions below still fire when the prompt actually
+// mentions telecom signals (5G, RAN, RRU, BBU, base station, etc.),
+// so telecom prompts continue to work correctly. For every other
+// industry, GPT now drives keyword choice from productProfile and
+// customerProfile alone, with no static telecom contamination.
+const defaultMainProducts: string[] = [];
 
-const defaultRelatedProducts = [
-  "maintenance parts",
-  "replacement parts",
-  "field service parts",
-  "spare parts",
-  "industrial components",
-  "network equipment",
-  "5G telecom equipment",
-  "5G base station equipment",
-  "radio access network equipment",
-  "base station spare parts",
-  "RRU",
-  "BBU",
-  "AAU",
-  "microwave backhaul",
-  "telecom power",
-  "remote radio unit",
-  "baseband unit",
-  "rectifier module",
-  "optical module"
-];
+const defaultRelatedProducts: string[] = [];
 
-const defaultLongTailProducts = [
-  "equipment spare parts replacement",
-  "field service replacement parts",
-  "maintenance spare parts",
-  "industrial equipment replacement",
-  "base station spare parts replacement",
-  "Huawei ZTE spare parts",
-  "Huawei RRU spare parts",
-  "ZTE BBU boards",
-  "telecom power rectifier module",
-  "microwave backhaul spare parts",
-  "5G RAN spare parts",
-  "tower power IBS service"
-];
+const defaultLongTailProducts: string[] = [];
 
-const defaultUpstreamDownstreamTerms = [
-  "system integration",
-  "engineering services",
-  "maintenance services",
-  "power module",
-  "RF module",
-  "antenna feeder",
-  "site power",
-  "IBS solution",
-  "equipment refurbishment"
-];
+const defaultUpstreamDownstreamTerms: string[] = [];
 
-const primaryCustomerIntentTerms = [
-  "maintenance company",
-  "network maintenance company",
-  "base station maintenance company",
-  "RAN maintenance",
-  "cell site maintenance",
-  "telecom field services",
-  "field service company",
-  "service provider",
-  "operations company",
-  "tower maintenance company",
-  "tower company",
-  "wireless infrastructure contractor",
-  "telecom power maintenance",
-  "telecom contractor",
-  "telecom system integrator",
-  "system integrator",
-  "mobile network operator",
-  "telecom operator procurement",
-  "vendor registration",
-  "ISP network operations",
-  "WISP",
-  "FTTH operator",
-  "equipment repair service",
-  "spare parts management",
-  "project procurement",
-  "purchasing",
-  "procurement",
-  "turnkey contractor",
-  "engineering contractor",
-  "tower contractor",
-  "project supply"
-];
+const primaryCustomerIntentTerms: string[] = [];
 
 const channelCustomerIntentTerms = [
   "supplier",
-  "telecom equipment distributor",
-  "stockist",
   "distributor",
+  "stockist",
   "reseller",
   "dealer",
   "wholesaler",
-  "telecom importer"
+  "importer"
 ];
 
-const defaultScenarioTerms = [
-  "B2B buyer scenario",
-  "equipment replacement",
-  "maintenance service",
-  "project procurement",
-  "telecom infrastructure",
-  "5G network rollout",
-  "network rollout",
-  "site maintenance",
-  "base station maintenance",
-  "RAN maintenance",
-  "cell site maintenance",
-  "tower maintenance",
-  "telecom power maintenance",
-  "rectifier replacement",
-  "spare parts replacement",
-  "FTTH network maintenance",
-  "tower power",
-  "IBS service",
-  "equipment replacement"
-];
+const defaultScenarioTerms: string[] = [];
 
 const defaultMarketTerms = [
   "UAE",

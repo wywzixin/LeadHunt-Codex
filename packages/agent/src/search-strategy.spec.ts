@@ -36,8 +36,14 @@ describe("search strategy library", () => {
   });
 
   it("keeps channel-customer templates out of the default buyer-led query mix", () => {
+    // 2026-05: with telecom static defaults removed, customerIntentTerms
+    // only contains telecom vocabulary when the prompt actually triggers
+    // detectCustomerIntentTerms. The "5G telecom equipment customers"
+    // text triggers detectMainProducts (5G/telecom equipment) but not
+    // the maintenance/operator detector — those need explicit
+    // maintenance/operator/RAN/tower/ISP/FTTH signals in the prompt.
     const queries = generateSearchQueries({
-      taskText: "Find 5G telecom equipment customers",
+      taskText: "Find 5G telecom equipment maintenance and operator customers",
       targetMarkets: ["UAE"],
       minQueryCount: 20
     });
@@ -48,11 +54,7 @@ describe("search strategy library", () => {
     expect(queries[0]?.keywordGroups.customerIntentTerms).toEqual(
       expect.arrayContaining([
         "network maintenance company",
-        "telecom system integrator",
-        "mobile network operator",
-        "ISP network operations",
-        "FTTH operator",
-        "procurement"
+        "mobile network operator"
       ])
     );
     expect(queries[0]?.keywordGroups.customerIntentTerms.join(" ")).not.toMatch(
@@ -127,8 +129,14 @@ describe("search strategy library", () => {
   });
 
   it("uses product and reference customer profile URLs to create similar-customer queries", () => {
+    // 2026-05: with telecom static defaults removed, telecom vocabulary
+    // in queries comes from the prompt itself (detectMainProducts /
+    // detectCustomerIntentTerms / detectScenarioTerms). The Chinese
+    // task text "5G通信设备相关的客户" matches "5g" via detectMainProducts
+    // and "通信设备" via the telecom-equipment detector, so the queries
+    // still legitimately include telecom vocabulary.
     const queries = generateSearchQueries({
-      taskText: "帮我找5G通信设备相关的客户",
+      taskText: "帮我找5G通信设备相关的客户，找运营商和维护商",
       productProfileUrls: ["https://telecorenet.com/", "https://telecorenet.com/products"],
       referenceCustomerUrls: ["https://spectrummea.com/", "https://highcloud.ae/"],
       targetMarkets: ["UAE"],
@@ -142,7 +150,6 @@ describe("search strategy library", () => {
     expect(queryText).not.toMatch(/\binpage:|\bloc:|\blang:/);
     expect(queries[0]?.keywordGroups.customerIntentTerms).toEqual(
       expect.arrayContaining([
-        "telecom system integrator",
         "network maintenance company",
         "base station maintenance company"
       ])
@@ -263,6 +270,11 @@ describe("search strategy library", () => {
   });
 
   it("records operator source, execution status, template, keyword groups, and score", () => {
+    // 2026-05: with telecom static defaults removed, an empty prompt
+    // generates queries with empty productTerms / customerIntentTerms.
+    // The structural metadata (operatorSource, executionStatus, etc.)
+    // is what this test guards. excludeTerms keeps generic exclusion
+    // defaults because they are industry-agnostic.
     const [query] = generateSearchQueries({ targetMarkets: ["UAE"], minQueryCount: 1 });
 
     expect(query).toEqual(
@@ -272,14 +284,8 @@ describe("search strategy library", () => {
         operatorName: expect.any(String),
         strategyTemplate: expect.any(String),
         keywordGroups: expect.objectContaining({
-          productTerms: expect.arrayContaining(["telecom equipment"]),
-          customerIntentTerms: expect.arrayContaining([
-            "network maintenance company",
-            "telecom system integrator",
-            "mobile network operator",
-            "ISP network operations",
-            "procurement"
-          ]),
+          productTerms: expect.any(Array),
+          customerIntentTerms: expect.any(Array),
           excludeTerms: expect.arrayContaining(["job", "training", "course"])
         }),
         effectivenessScore: expect.any(Number)

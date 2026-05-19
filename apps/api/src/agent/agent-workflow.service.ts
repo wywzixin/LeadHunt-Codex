@@ -142,6 +142,19 @@ const CUSTOMER_PROFILE_TIMEOUT_MS = 75_000;
 const KEYWORD_EXPANSION_TIMEOUT_MS = 90_000;
 const SEARCH_STRATEGY_TIMEOUT_MS = 90_000;
 const SEARCH_STRATEGY_REFILL_TIMEOUT_MS = 90_000;
+// 2026-05 P1: per-query outer timeouts. Without these the Brave HTTP
+// request, candidate-page contact probes, or saveCandidates can stall
+// indefinitely and freeze the entire for-loop, leaving the task in
+// "running" state forever (we observed 34 zombie tasks, the oldest
+// 15 days old). With these timeouts the offending query gets marked
+// failed and the loop continues to the next one.
+const PER_QUERY_BRAVE_SEARCH_TIMEOUT_MS = 30_000;
+const PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS = 60_000;
+// 2026-05 P1: stale running-task cutoff. Tasks that sit in "running"
+// status without an updatedAt heartbeat for more than this many hours
+// are considered orphaned (process crashed / OOM / lost websocket) and
+// auto-marked failed during recovery so they don't accumulate forever.
+const STALE_RUNNING_TASK_HOURS = 24;
 const FIRST_STAGE_SEARCH_QUERY_LIMIT = 15;
 const RUNNING_TASK_RECOVERY_LIMIT = 5;
 const RUNNING_TASK_RECOVERY_WINDOW_HOURS = 24;
@@ -493,6 +506,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // 2026-05 P1: First clean up zombie running tasks. A task counts as
+    // a zombie when it sits in "running" status without an updatedAt
+    // heartbeat for more than STALE_RUNNING_TASK_HOURS. These are
+    // process-crash / OOM / lost-websocket leftovers that the recovery
+    // window (also 24h) deliberately won't touch — without this cleanup
+    // they accumulate forever (we observed 34 such tasks, oldest 15
+    // days). Mark them failed so the UI shows a final state instead of
+    // a perpetual spinner.
+    await this.markStaleRunningTasksFailed();
+
     const updatedAfter = new Date(Date.now() - RUNNING_TASK_RECOVERY_WINDOW_HOURS * 60 * 60 * 1000);
     const tasks = await this.prisma.leadTask.findMany({
       where: {
@@ -515,6 +538,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     });
 
     for (const task of tasks) {
+      // 2026-05 P1: also reset any "running" search queries on the
+      // recovered task back to "pending" so the next loop iteration
+      // can pick them up. A query stuck on "running" before the crash
+      // would otherwise be skipped by countPendingSearchQueries.
+      await this.resetStuckRunningSearchQueries(task.id);
+
       const input = createTaskInputFromPayload(task.inputPayload, task.targetCount ?? undefined);
       if (!input) {
         await this.markAutonomousDiscoveryFailed(
@@ -529,6 +558,43 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         skipPlanning: task._count.searchQueries > 0
       });
     }
+  }
+
+  private async markStaleRunningTasksFailed() {
+    const staleCutoff = new Date(Date.now() - STALE_RUNNING_TASK_HOURS * 60 * 60 * 1000);
+    const stale = await this.prisma.leadTask.findMany({
+      where: {
+        status: "running",
+        updatedAt: { lt: staleCutoff }
+      },
+      select: { id: true }
+    });
+    if (!stale.length) {
+      return;
+    }
+    await this.prisma.leadTask.updateMany({
+      where: { id: { in: stale.map((t) => t.id) } },
+      data: { status: "failed" }
+    });
+    // Also clear the running flag on any orphaned search queries so the
+    // task page doesn't keep showing them in a stuck "running" state.
+    await this.prisma.searchQuery.updateMany({
+      where: {
+        taskId: { in: stale.map((t) => t.id) },
+        executionStatus: "running"
+      },
+      data: { executionStatus: "failed" }
+    });
+  }
+
+  private async resetStuckRunningSearchQueries(taskId: string) {
+    await this.prisma.searchQuery.updateMany({
+      where: {
+        taskId,
+        executionStatus: "running"
+      },
+      data: { executionStatus: "pending" }
+    });
   }
 
   private async runAutonomousLeadDiscovery(
@@ -1329,10 +1395,10 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
             qualifiedCount: 0
           }
         });
-        const search = await this.runSearchWithDevelopmentFallback(
-          query.id,
-          searchParams,
-          query.country
+        const search = await withTimeout(
+          this.runSearchWithDevelopmentFallback(query.id, searchParams, query.country),
+          PER_QUERY_BRAVE_SEARCH_TIMEOUT_MS,
+          `Brave search query ${query.id.slice(0, 8)}`
         );
         await this.prisma.searchQuery.update({
           where: { id: query.id },
@@ -1342,18 +1408,26 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         });
         const candidateResults = search.results.slice(0, MAX_CANDIDATE_RESULTS_PER_QUERY);
         const saved = candidateAiEvaluator
-          ? await this.leadQualificationService.saveCandidates(
-              taskId,
-              candidateResults,
-              criteria,
-              query.country ?? undefined,
-              candidateAiEvaluator
+          ? await withTimeout(
+              this.leadQualificationService.saveCandidates(
+                taskId,
+                candidateResults,
+                criteria,
+                query.country ?? undefined,
+                candidateAiEvaluator
+              ),
+              PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS,
+              `Save candidates for query ${query.id.slice(0, 8)}`
             )
-          : await this.leadQualificationService.saveCandidates(
-              taskId,
-              candidateResults,
-              criteria,
-              query.country ?? undefined
+          : await withTimeout(
+              this.leadQualificationService.saveCandidates(
+                taskId,
+                candidateResults,
+                criteria,
+                query.country ?? undefined
+              ),
+              PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS,
+              `Save candidates for query ${query.id.slice(0, 8)}`
             );
         usedDevelopmentFallback ||= search.fallback;
         resultCount += search.count;
@@ -3414,6 +3488,15 @@ function normalizeAiQueryText(
   let sanitized = stripGeneratedNegativeTerms(
     stripEvidenceNegativeTerms(removeQuotedMarketPhrases(cleaned, targetMarkets))
   );
+
+  // 2026-05 P1: GPT frequently generates quoted phrases with 4-5 words
+  // (e.g. "mobile network base station deployment") which produce 0
+  // Brave results because exact-match on that many words is too narrow
+  // for niche B2B markets. Shorten any quoted phrase longer than 3 words
+  // by keeping only the first 3 words and removing the quotes, turning
+  // it into a fuzzy match. Phrases inside OR groups are left alone
+  // because they are typically brand names (1-2 words).
+  sanitized = shortenLongQuotedPhrases(sanitized);
   const conflicts = findMentionedKnownMarkets(sanitized).filter(
     (market) => !marketMatches(country, market)
   );
@@ -3629,28 +3712,179 @@ function stripGeneratedNegativeTerms(query: string) {
     .trim();
 }
 
-// Brave does not reliably honor inline -site: / -inurl: / -intext: operators,
-// and they consume scarce query-length budget. The post-search candidate
-// filter (lead-qualification.service) already removes alibaba/made-in-china/
-// content/marketplace/Chinese-supplier results by domain and content rules,
-// so we deliberately stop appending any backend exclusions to the query
-// string here. These constants are retained as documentation of the
-// historical exclusion vocabulary; they are no longer concatenated into
-// queries sent to Brave.
-const mainCustomerBackendExclusions: string[] = [];
+// 2026-05 (P0 fix): Backend exclusions are now actually appended to the
+// Brave query. The previous no-op design was wrong: while Brave does not
+// reliably honor `-site:alibaba.com` against marketplace giants, it DOES
+// reliably honor `-site:` against single-domain OEM / encyclopedia /
+// trade-media filters. The previous design left Lane B brand-OR queries
+// (e.g. `("Flowserve" OR "Emerson") UAE pumps`) returning 80%+ OEM-self
+// pages in the top 20 results, crowding out real buyer companies.
+//
+// Strategy:
+//  1. Always exclude Wikipedia (industry-agnostic, 100% noise).
+//  2. For Lane B queries with a brand OR group, parse brand names out of
+//     the OR group and exclude each brand's likely official domain. This
+//     applies to ANY industry (Flowserve, KSB, Sulzer, Schneider, etc.)
+//     because the rule is structural (OR group with quoted brand names),
+//     not a hard-coded telecom brand list.
+//  3. Skip exclusion when the query already uses site:.tld (Lane A) or
+//     site:reference_customer (Lane D) — those lanes are already locked
+//     to the target country / reference network.
+//  4. Hard cap: at most 3 -site: terms per query, total length <= 180.
+//
+// The post-search hard-reject filter (lead-qualification.service) is
+// kept as the second line of defense for marketplaces, news sites, and
+// directory pages where -site: would consume too many query slots.
 
-const channelCustomerBackendExclusions: string[] = [];
+// Industry-agnostic exclusions appended to every applicable query.
+// Wikipedia is always noise; trade-media domains return news, not buyer
+// pages. Kept to 1 entry to minimize query budget — the rest are caught
+// by the post-search hard-reject filter.
+const universalNegativeSiteExclusions: string[] = ["wikipedia.org"];
 
-const chinaSupplierBackendExclusions: string[] = [];
+// Brand-name -> official-domain hint. When a brand name appears in a
+// query OR group AND its mapped domain is a known OEM/manufacturer
+// official site, we add `-site:<domain>` so the OEM's own product /
+// about / contact pages do not flood the top-20 result slots.
+//
+// Each brand maps to ONE primary domain so that an OR group of N
+// brands can be excluded with exactly N -site: terms. Listing multiple
+// domains per brand wastes budget and would hide the most-recognized
+// canonical site for users who could understand the result.
+const brandNameToOfficialDomain: Record<string, string> = {
+  // Telecom OEMs
+  huawei: "huawei.com",
+  zte: "zte.com.cn",
+  ericsson: "ericsson.com",
+  nokia: "nokia.com",
+  "alcatel-lucent": "alcatel-lucent.com",
+  // Industrial pumps / valves / flow control
+  flowserve: "flowserve.com",
+  emerson: "emerson.com",
+  ksb: "ksb.com",
+  sulzer: "sulzer.com",
+  grundfos: "grundfos.com",
+  pentair: "pentair.com",
+  weir: "global.weir",
+  itt: "itt.com",
+  rotork: "rotork.com",
+  metso: "metso.com",
+  fisher: "fisher.com",
+  tyco: "tycoflowcontrol.com",
+  // Industrial automation / electrical
+  abb: "abb.com",
+  siemens: "siemens.com",
+  schneider: "se.com",
+  honeywell: "honeywell.com",
+  yokogawa: "yokogawa.com",
+  rockwell: "rockwellautomation.com",
+  // HVAC / mechanical
+  daikin: "daikin.com",
+  trane: "trane.com",
+  carrier: "carrier.com",
+  york: "johnsoncontrols.com",
+  mitsubishi: "mitsubishielectric.com"
+};
+
+function extractQuotedOrGroupBrands(query: string): string[] {
+  // Match a parenthesized OR group with at least one quoted phrase, e.g.
+  //   ("Flowserve" OR "Emerson")  or  ("Flowserve" OR "KSB" OR "Sulzer")
+  const orGroupMatch = query.match(/\(\s*(?:"[^"]+"\s+OR\s+)+"[^"]+"\s*\)/i);
+  if (!orGroupMatch) {
+    return [];
+  }
+  const phrases = Array.from(orGroupMatch[0].matchAll(/"([^"]+)"/g)).map((m) =>
+    (m[1] ?? "").trim().toLowerCase()
+  );
+  return phrases.filter(Boolean);
+}
+
+function brandsToExcludedDomains(brands: string[]): string[] {
+  const domains = new Set<string>();
+  for (const brand of brands) {
+    const key = brand.toLowerCase().trim();
+    const mapped = brandNameToOfficialDomain[key];
+    if (mapped) {
+      domains.add(mapped);
+    }
+  }
+  return Array.from(domains);
+}
+
+function queryAlreadyAnchoredToTargetSite(query: string): boolean {
+  // Lane A: site:.{tld} (.ae, .sa, .qa, etc.) — already locked to the
+  // target country, no need for OEM exclusions which would only shrink
+  // the result pool further.
+  if (/site:\.[a-z]{2,4}(?:\s|$)/i.test(query)) {
+    return true;
+  }
+  // Lane D: site:reference_customer_domain — query is intentionally
+  // narrowed to one specific company's own site, so OEM exclusions
+  // would do nothing useful.
+  if (/site:[a-z0-9.-]+\.[a-z]{2,}\b/i.test(query) && !/site:\.[a-z]{2,4}\b/i.test(query)) {
+    return true;
+  }
+  return false;
+}
 
 function appendBackendSearchExclusions(query: string) {
-  // No-op: backend exclusions are now applied post-search via candidate
-  // filtering, not by mutating the Brave query text. Keeping the function
-  // signature avoids ripple-effect refactors at all call sites.
-  void mainCustomerBackendExclusions;
-  void channelCustomerBackendExclusions;
-  void chinaSupplierBackendExclusions;
-  return query.replace(/\s+/g, " ").trim();
+  const cleaned = query.replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return cleaned;
+  }
+
+  // Skip exclusion injection for queries that are already site-anchored.
+  // For Lane A (site:.ae) and Lane D (site:reference.com) the result
+  // pool is intentionally narrow; adding -site: would only erode it.
+  if (queryAlreadyAnchoredToTargetSite(cleaned)) {
+    return cleaned;
+  }
+
+  const exclusionsToAdd: string[] = [];
+
+  // 1. Universal exclusions (Wikipedia, etc.).
+  for (const domain of universalNegativeSiteExclusions) {
+    exclusionsToAdd.push(`-site:${domain}`);
+  }
+
+  // 2. Brand OR-group -> OEM official domains.
+  const brands = extractQuotedOrGroupBrands(cleaned);
+  const brandDomains = brandsToExcludedDomains(brands);
+  const hasRecognizedBrandGroup = brandDomains.length > 0;
+  for (const domain of brandDomains) {
+    if (exclusionsToAdd.length >= 5) {
+      break; // budget: max 5 -site: terms incl. universals + linkedin
+    }
+    exclusionsToAdd.push(`-site:${domain}`);
+  }
+
+  // 3. Lane B branded OR-group queries: LinkedIn brand pages and
+  // Thomasnet directory consistently flood the top 20 results because
+  // Brave indexes them as the "official" social/aggregator presence
+  // for big OEMs. We only add these when a recognized brand group is
+  // present so non-brand queries can still surface real LinkedIn
+  // company pages of buyer prospects.
+  if (hasRecognizedBrandGroup && exclusionsToAdd.length < 5) {
+    exclusionsToAdd.push("-site:linkedin.com");
+  }
+
+  if (exclusionsToAdd.length === 0) {
+    return cleaned;
+  }
+
+  // Compose, then trim while respecting the 180-char hard cap. We append
+  // exclusions from highest to lowest priority (universal first, then
+  // brand). If the composed string exceeds 180 chars, drop the lowest-
+  // priority exclusions one at a time until it fits.
+  let composed = `${cleaned} ${exclusionsToAdd.join(" ")}`.replace(/\s+/g, " ").trim();
+  while (composed.length > 180 && exclusionsToAdd.length > 0) {
+    exclusionsToAdd.pop();
+    composed = `${cleaned}${exclusionsToAdd.length ? " " + exclusionsToAdd.join(" ") : ""}`
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  return composed;
 }
 
 function stripEvidenceNegativeTerms(query: string) {
@@ -3661,6 +3895,65 @@ function stripEvidenceNegativeTerms(query: string) {
     )
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// 2026-05 P1: Shorten quoted phrases that are too long for Brave exact-
+// match. In niche B2B markets (telecom, industrial, GCC), a 4-5 word
+// exact phrase like "mobile network base station deployment" returns 0
+// results because no page contains that exact string. We keep the first
+// 3 words as bare (unquoted) text so Brave can fuzzy-match them.
+//
+// Exception: phrases inside parenthesized OR groups are left alone
+// because they are typically short brand names or 2-word buyer roles.
+function shortenLongQuotedPhrases(query: string) {
+  // First, identify OR-group regions so we can skip them.
+  const orGroupRanges: Array<[number, number]> = [];
+  for (const match of query.matchAll(/\([^)]*\bOR\b[^)]*\)/gi)) {
+    orGroupRanges.push([match.index!, match.index! + match[0].length]);
+  }
+
+  function isInsideOrGroup(index: number) {
+    return orGroupRanges.some(([start, end]) => index >= start && index < end);
+  }
+
+  return query.replace(/"([^"]+)"/g, (match, phrase: string, offset: number) => {
+    if (isInsideOrGroup(offset)) {
+      return match; // leave OR-group phrases alone
+    }
+    const words = phrase.trim().split(/\s+/);
+    if (words.length <= 3) {
+      return match; // short enough, keep quoted
+    }
+    // Keep first 3 words unquoted for fuzzy matching
+    return words.slice(0, 3).join(" ");
+  });
+}
+
+// 2026-05 P1: A reference company name may come back from GPT as a
+// slash-joined alias bundle (e.g. "HCT Group / High Cloud Technologies"
+// or "stc / Saudi Telecom Company"). Brave exact-matches the full quoted
+// string and returns 0 results. We pick the SHORTEST alias from the
+// slash split, which is usually the canonical short brand name. As a
+// secondary safeguard, we also drop trailing legal-entity suffixes that
+// hurt exact match (LLC, FZE, FZCO, etc.).
+function trimReferenceCompanyName(name: string): string {
+  const aliases = name
+    .split(/\s*[\/|,]\s*/)
+    .map((alias) => alias.trim())
+    .filter(Boolean);
+  if (aliases.length === 0) {
+    return name.trim();
+  }
+  // Prefer the alias that has 2-3 words (most searchable). Fall back to
+  // the shortest alias by word count.
+  const sortedByWordCount = [...aliases].sort(
+    (a, b) => a.split(/\s+/).length - b.split(/\s+/).length
+  );
+  const idealAlias = sortedByWordCount.find((a) => {
+    const wc = a.split(/\s+/).length;
+    return wc >= 1 && wc <= 4;
+  });
+  return (idealAlias ?? sortedByWordCount[0] ?? name).trim();
 }
 
 function isSafeQueryNegativeTerm(term: string) {
@@ -3978,6 +4271,11 @@ function buildReverseCustomerNetworkQueries(input: {
     if (referenceName) {
       const market = secondaryMarket || primaryMarket;
       const trailingMarket = market ? ` ${market}` : "";
+      // 2026-05 P1: GPT may emit referenceCompanies entries that combine
+      // two names with "/" (e.g. "HCT Group / High Cloud Technologies"),
+      // producing a 6-word quoted phrase that returns 0 Brave results.
+      // Pick the first short alternative if the slash form is too long.
+      const safeName = trimReferenceCompanyName(referenceName);
       queries.push({
         provider: "brave",
         operatorSource: "brave_official",
@@ -3985,7 +4283,7 @@ function buildReverseCustomerNetworkQueries(input: {
         operatorName: "Reverse customer network mining",
         strategyTemplate: "lane-D reference-customer name pivot",
         strategyType: "main_customer",
-        query: `"${referenceName}" ("client" OR "partner" OR "deployment")${trailingMarket}`.slice(
+        query: `"${safeName}" ("client" OR "partner" OR "deployment")${trailingMarket}`.slice(
           0,
           140
         ),
@@ -4870,7 +5168,11 @@ function parseTaskPayload(value: Prisma.JsonValue | null): {
     notes?: string | null;
   } | null;
   productProfileAnalysis?: Record<string, unknown> | null;
-  customerProfile?: { targetRegions?: string[]; notes?: string | null } | null;
+  customerProfile?: {
+    targetRegions?: string[];
+    referenceCustomerUrls?: string[];
+    notes?: string | null;
+  } | null;
   customerProfileAnalysis?: Record<string, unknown> | null;
   keywordGroups?: Partial<KeywordGroups>;
 } {
@@ -4906,6 +5208,15 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
     productProfile?.productPageUrl,
     ...asStringArray(productProfile?.documentUrls)
   ]);
+  // 2026-05 P1+: extract reference-customer domains. These are
+  // companies the seller gave us as look-alike evidence; they should
+  // never be classified as new buyer leads. Lane D Pattern A
+  // (site:reference.com) queries call them out explicitly, and
+  // shouldHardRejectCandidate uses this list to drop the reference's
+  // own pages from the candidate table.
+  const referenceCustomerDomains = domainsFromUrls(
+    asStringArray(payload.customerProfile?.referenceCustomerUrls)
+  );
 
   return {
     targetRegions: targetRegions.length ? targetRegions : profileRegions,
@@ -4916,6 +5227,7 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
     customerTypeKeywords: asStringArray(keywordGroups.customerIntentTerms).slice(0, 8),
     ownDomains,
     brandTerms: asStringArray(keywordGroups.brandTerms).slice(0, 12),
+    referenceCustomerDomains,
     disqualifiers: [
       "job",
       "career",

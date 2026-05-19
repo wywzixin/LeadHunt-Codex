@@ -16,6 +16,13 @@ export type IcpScoringCriteria = {
   disqualifiers?: string[];
   ownDomains?: string[];
   brandTerms?: string[];
+  // 2026-05 P1+: domains of the seller's own reference customers. These
+  // companies are NOT new buyer leads — they are evidence the seller
+  // gave us as look-alike anchors. They must be hard-rejected from the
+  // candidate table so a Lane D query like
+  // `site:spectrummea.com ("partners" OR ...)` does not turn the
+  // reference customer back into a "qualified" lead.
+  referenceCustomerDomains?: string[];
 };
 
 export type NormalizedLeadCandidate = {
@@ -155,8 +162,12 @@ type EvidenceLeadClassification = {
 // commonly sit behind a CDN with 4-6s TTFB or render contact info via
 // JS. Old values were 5s timeout / 6 main pages / 3 linked pages,
 // which timed out on roughly half of legitimate target-country sites
-// (notably .ae integrators with React shells and slow CDNs).
-const contactProbeTimeoutMs = 9000;
+// (notably .ae integrators with React shells and slow CDNs). Bumped
+// to 9s after observing blackcatqatar.com (Qatar EPC) responding in
+// 4-5s normally but occasionally spiking to 7-8s during peak hours.
+// 12s was too aggressive — it made each candidate take 30-60s total
+// when multiple URLs were slow, dragging the whole task to 25+ min.
+const contactProbeTimeoutMs = 8000;
 const contactProbePageLimit = 8;
 const contactLinkedProbePageLimit = 5;
 const maxAiCandidateEvaluationsPerBatch = 15;
@@ -1260,9 +1271,38 @@ function assessCountryValidation(candidate: NormalizedLeadCandidate) {
       ? mediumCountries
       : lowCountries;
   const evidenceConflict = candidateCountries.length > 1;
-  const countryConflict = evidenceConflict;
-  const countryConflictCountries = countryConflict ? uniqueCountries(candidateCountries) : [];
-  const inferredCountry = candidateCountries.length === 1 ? candidateCountries[0]! : null;
+
+  // 2026-05 (B): Local-branch bias. When evidence points to multiple
+  // countries (e.g. a Lebanese mother company with a Qatar branch that
+  // has both +961 and +974 phones), and one of the conflicting countries
+  // matches the queryCountry (the market we were searching for), prefer
+  // that country. This resolves the common "multinational EPC with local
+  // office" pattern correctly — the user searched for Qatar, the company
+  // has a Qatar branch, so we infer Qatar.
+  let inferredCountry: string | null = null;
+  let countryConflict = evidenceConflict;
+  let countryConflictCountries = countryConflict ? uniqueCountries(candidateCountries) : [];
+
+  if (candidateCountries.length === 1) {
+    inferredCountry = candidateCountries[0]!;
+  } else if (evidenceConflict && candidate.queryCountry) {
+    const queryCountryNorm = normalizeCountry(candidate.queryCountry);
+    const matchingCountry = candidateCountries.find(
+      (c) => countryMatchesTarget(c, queryCountryNorm)
+    );
+    if (matchingCountry) {
+      // Resolve the conflict in favor of the local branch that matches
+      // the search target. We still record the conflict for transparency
+      // but treat the candidate as having a resolved country.
+      inferredCountry = matchingCountry;
+      // Downgrade conflict: we resolved it via query-country bias, so
+      // the candidate is not truly "conflicted" — it has a local branch
+      // in the target market. Keep countryConflictCountries for audit
+      // but mark countryConflict as false so scoring does not penalize.
+      countryConflict = false;
+    }
+  }
+
   const countryConfidence: CountryConfidence =
     countryConflict || !inferredCountry
       ? countryConflict
@@ -1507,6 +1547,15 @@ function inferCountryFromLegacySignals(text: string) {
 
 function normalizeCountry(country: string) {
   return normalizeCountryName(country);
+}
+
+function countryMatchesTarget(candidateCountry: string, targetCountry: string) {
+  const candidateKey = countryMatchKey(candidateCountry);
+  const targetKey = countryMatchKey(targetCountry);
+  if (!candidateKey || !targetKey) {
+    return false;
+  }
+  return candidateKey === targetKey;
 }
 
 function extractContacts(text: string, sourceUrl: string): NormalizedLeadCandidate["contacts"] {
@@ -2109,6 +2158,21 @@ function shouldHardRejectCandidate(
   const nonTargetChinaSupplier = hasNonTargetChinaSupplierSignal(candidate, criteria);
 
   if (pageType === "own_site") {
+    return true;
+  }
+
+  // 2026-05 P1+: reference-customer self-rejection. The seller gave us
+  // these domains as look-alike anchors, NOT as buyer leads. A Lane D
+  // Pattern A query (`site:reference.com (...)`) will return the
+  // reference's own pages, and without this guard those pages flow
+  // into the qualified table as if they were new customers. We reject
+  // any candidate whose domain matches a reference-customer domain
+  // (exact match or subdomain).
+  if (
+    domain &&
+    criteria.referenceCustomerDomains &&
+    criteria.referenceCustomerDomains.some((refDomain) => domainMatches(domain, refDomain))
+  ) {
     return true;
   }
 
@@ -4234,7 +4298,26 @@ const knownBrandOemDomains = [
   "netcracker.com",
   "comverse.com",
   "subex.com",
-  "optiva.com"
+  "optiva.com",
+  // 2026-05 P1+: global tier-1 telecom carriers / hyperscalers. They
+  // appear on 5G/RAN/private-5G queries via product/solutions pages,
+  // but they are NOT buyers in target markets — they are competitors
+  // or solution providers. Treating them as buyers pollutes the list.
+  "verizon.com",
+  "att.com",
+  "t-mobile.com",
+  "sprint.com",
+  "vodafone.com",
+  "vodafone.co.uk",
+  "telefonica.com",
+  "orange.com",
+  "deutschetelekom.com",
+  "ntt.com",
+  "softbank.jp",
+  "kt.com",
+  "skt.com",
+  "ntt-docomo.com",
+  "rakuten.com"
 ];
 
 const blockedContentDomains = [
@@ -4314,6 +4397,31 @@ const blockedContentDomains = [
   "nuoptima.com",
   "smart-minded.com",
   "accio.com",
+  // 2026-05 P1 additions: cross-industry trade media and SEO "Top X
+  // suppliers" content farms that reliably show up in branded OR-group
+  // queries (e.g. "Flowserve" OR "Emerson") and crowd out real buyer
+  // companies in the top 20 results.
+  "petro-online.com",
+  "automation.com",
+  "linquip.com",
+  "everlastingvalveusa.com",
+  "valveworld.net",
+  "pumpsandsystems.com",
+  "flowcontrolnetwork.com",
+  "processingmagazine.com",
+  "controlglobal.com",
+  "instrumentationandcontrol.net",
+  "oilandgasonline.com",
+  "offshore-technology.com",
+  "hydrocarbonprocessing.com",
+  "oilandgasiq.com",
+  "rigzone.com",
+  // 2026-05 P1+: consumer-complaint sites that aggregate brand
+  // contact info but are not buyer companies.
+  "pissedconsumer.com",
+  "complaintsboard.com",
+  "consumeraffairs.com",
+  "trustpilot.com",
   // Free-host / template-site platforms. Real B2B companies do not
   // build their public site on these; nearly every result is either
   // an SEO content page, a course landing page, or a pseudo-company.
@@ -4474,7 +4582,21 @@ const newsMediaDomains = [
   "developingtelecoms.com",
   "capacitymedia.com",
   "lightreading.com",
-  "totaltele.com"
+  "totaltele.com",
+  // 2026-05 P1: mainstream news outlets that appear in telecom/5G
+  // queries via brand acquisition / partnership articles.
+  "theguardian.com",
+  "bbc.com",
+  "bbc.co.uk",
+  "reuters.com",
+  "bloomberg.com",
+  "cnbc.com",
+  "ft.com",
+  "techcrunch.com",
+  "zdnet.com",
+  "cnet.com",
+  "theverge.com",
+  "wired.com"
 ];
 
 // Market-research / industry-report firms. These are noise per the
@@ -4666,7 +4788,32 @@ const blockedMarketplaceDomains = [
   "gulftalent.com",
   "monster.com",
   "monstergulf.com",
-  "linkedin.com/jobs"
+  "linkedin.com/jobs",
+  // 2026-05 P1 additions: GCC / regional business directories that
+  // reliably flood the top 20 result slots on branded OR-group
+  // queries (e.g. "Flowserve" OR "KSB" OR "Sulzer" UAE pumps). These
+  // are profile-aggregator pages, never reachable buyer companies.
+  "yellowpages-uae.com",
+  "reachuae.com",
+  "atninfo.com",
+  "uaecontact.com",
+  "uaedirectory.com",
+  "saudiyp.com",
+  "saudidir.com",
+  "qatardirectory.com",
+  "qataryp.com",
+  "omanyp.com",
+  "kuwaityp.com",
+  "industrystock.com",
+  "exportersindia.com",
+  "tradeford.com",
+  "go4worldbusiness.com",
+  // OEM-side distributor-finder sub-brands. The query
+  // ("Tyco" OR ...) routinely matches sub-brand sites like
+  // tycoaquamist.com that are still OEM-controlled, not buyers.
+  "tycoaquamist.com",
+  "tycofire.com",
+  "tycoint.com"
 ];
 
 const hardRejectedDiscoveryDomains = [

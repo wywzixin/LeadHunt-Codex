@@ -258,7 +258,21 @@ function readDurationEnv(name: string, fallback: number) {
 function createFetchImpl(): FetchLike {
   const proxyUrl = resolveProxyUrl();
   if (!proxyUrl) {
-    return globalThis.fetch.bind(globalThis) as FetchLike;
+    // 2026-05 P1: direct fetch was previously a bare globalThis.fetch
+    // bind with no timeout, so a hung TCP connection or stuck Brave
+    // response could freeze a whole task. Wrap with a per-request
+    // AbortController so direct calls get the same 25s ceiling that
+    // the proxy CONNECT path already enforces (line 386).
+    const directFetchTimeoutMs = readDurationEnv("BRAVE_SEARCH_DIRECT_TIMEOUT_MS", 25_000);
+    return ((url, init) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => {
+        controller.abort(new Error(`Brave direct fetch timed out after ${directFetchTimeoutMs}ms`));
+      }, directFetchTimeoutMs);
+      return globalThis
+        .fetch(url, { headers: init.headers, signal: controller.signal })
+        .finally(() => clearTimeout(timer)) as Promise<FetchResponse>;
+    }) as FetchLike;
   }
 
   return (url, init) => proxyFetch(url, init, proxyUrl);

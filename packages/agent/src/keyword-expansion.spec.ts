@@ -7,6 +7,9 @@ describe("keyword expansion", () => {
       taskText: "Find UAE telecom equipment distributors and stockists"
     });
 
+    // 2026-05: telecom-specific static defaults removed. The detect
+    // functions still emit telecom product terms when the prompt
+    // mentions "telecom equipment" directly.
     expect(keywords.mainProductTerms).toContain("telecom equipment");
     expect(keywords.customerIntentTerms).toEqual(
       expect.arrayContaining(["distributor", "stockist"])
@@ -24,17 +27,21 @@ describe("keyword expansion", () => {
     expect(keywords.excludeTerms).not.toContain("phone");
   });
 
-  it("keeps buyer-side customer intents ahead of channel terms by default", () => {
-    const keywords = expandLeadKeywords({ taskText: "Find 5G equipment customers" });
+  it("emits telecom buyer-side customer intents when the prompt mentions maintenance", () => {
+    // 2026-05: with telecom static defaults removed, telecom intent
+    // terms only appear when the prompt actually mentions a telecom
+    // signal that triggers detectCustomerIntentTerms (maintenance,
+    // operator, base station, RAN, tower, ISP, FTTH, etc.).
+    const keywords = expandLeadKeywords({
+      taskText: "Find 5G base station maintenance customers and operators"
+    });
 
     expect(keywords.customerIntentTerms).toEqual(
       expect.arrayContaining([
         "network maintenance company",
-        "telecom system integrator",
-        "mobile network operator",
-        "ISP network operations",
-        "FTTH operator",
-        "procurement"
+        "base station maintenance company",
+        "RAN maintenance",
+        "mobile network operator"
       ])
     );
     expect(keywords.customerIntentTerms.join(" ")).not.toMatch(
@@ -59,15 +66,22 @@ describe("keyword expansion", () => {
     );
   });
 
-  it("includes telecom default related and long-tail product dictionaries", () => {
+  it("does not include telecom defaults when the prompt has no telecom signal", () => {
+    // 2026-05: the system is now a generic foreign-trade lead generator.
+    // With telecom-specific static defaults removed, an empty prompt no
+    // longer produces telecom vocabulary. Telecom keywords only appear
+    // when the prompt explicitly mentions telecom signals (5G, RAN, RRU,
+    // BBU, base station, etc.).
     const keywords = expandLeadKeywords();
 
-    expect(keywords.relatedProductTerms).toEqual(
+    expect(keywords.relatedProductTerms).not.toEqual(
       expect.arrayContaining(["RRU", "BBU", "AAU", "microwave backhaul", "telecom power"])
     );
-    expect(keywords.longTailProductTerms).toEqual(
+    expect(keywords.longTailProductTerms).not.toEqual(
       expect.arrayContaining(["Huawei ZTE spare parts", "tower power IBS service"])
     );
+    expect(keywords.relatedProductTerms).toHaveLength(0);
+    expect(keywords.longTailProductTerms).toHaveLength(0);
   });
 
   it("returns a stable JSON-ready structure", () => {

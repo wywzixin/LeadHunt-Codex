@@ -53,74 +53,22 @@ export type GeneratedSearchQuery = {
   templateId: string;
 };
 
+// 2026-05: Telecom-only keyword defaults removed. The system is a
+// generic foreign-trade lead generator, not telecom-specific.
+// Telecom keywords used to be merged unconditionally into every
+// task's keywordGroups, polluting GPT's context for non-telecom
+// industries. The marketTerms and excludeTerms below are kept
+// because they are industry-agnostic geographic/exclusion fallbacks.
+// The detect*() functions in keyword-expansion.ts continue to emit
+// telecom keywords ONLY when the prompt explicitly mentions telecom
+// signals (5G, RAN, RRU, BBU, base station, etc.), so telecom users
+// still get full coverage; non-telecom users no longer see telecom
+// vocabulary leak into their queries.
 export const defaultKeywordGroups: KeywordGroups = {
   brandTerms: [],
-  productTerms: [
-    "equipment",
-    "components",
-    "spare parts",
-    "industrial equipment",
-    "maintenance parts",
-    "replacement parts",
-    "telecom equipment",
-    "telecom spare parts",
-    "5G telecom equipment",
-    "5G base station equipment",
-    "radio access network equipment",
-    "base station spare parts",
-    "RRU",
-    "BBU",
-    "AAU",
-    "microwave backhaul",
-    "telecom power",
-    "optical module",
-    "spare parts"
-  ],
-  longTailProductTerms: [
-    "equipment spare parts replacement",
-    "field service replacement parts",
-    "maintenance spare parts",
-    "industrial equipment replacement",
-    "base station spare parts replacement",
-    "Huawei RRU spare parts",
-    "ZTE BBU boards",
-    "telecom power rectifier module",
-    "microwave backhaul spare parts",
-    "5G RAN spare parts",
-    "refurbished telecom equipment"
-  ],
-  customerIntentTerms: [
-    "maintenance company",
-    "field service company",
-    "service provider",
-    "operations company",
-    "network maintenance company",
-    "base station maintenance company",
-    "RAN maintenance",
-    "cell site maintenance",
-    "telecom field services",
-    "tower maintenance company",
-    "tower company",
-    "wireless infrastructure contractor",
-    "telecom power maintenance",
-    "telecom contractor",
-    "telecom system integrator",
-    "system integrator",
-    "mobile network operator",
-    "telecom operator procurement",
-    "vendor registration",
-    "ISP network operations",
-    "WISP",
-    "FTTH operator",
-    "equipment repair service",
-    "spare parts management",
-    "project procurement",
-    "purchasing",
-    "procurement",
-    "turnkey contractor",
-    "engineering contractor",
-    "project supply"
-  ],
+  productTerms: [],
+  longTailProductTerms: [],
+  customerIntentTerms: [],
   marketTerms: [
     "UAE",
     "Saudi Arabia",
@@ -144,26 +92,7 @@ export const defaultKeywordGroups: KeywordGroups = {
     "Chile",
     "Peru"
   ],
-  scenarioTerms: [
-    "equipment replacement",
-    "maintenance service",
-    "project procurement",
-    "telecom infrastructure",
-    "5G network rollout",
-    "network rollout",
-    "site maintenance",
-    "base station maintenance",
-    "RAN maintenance",
-    "cell site maintenance",
-    "tower maintenance",
-    "telecom power maintenance",
-    "rectifier replacement",
-    "spare parts replacement",
-    "FTTH network maintenance",
-    "tower power",
-    "IBS solution",
-    "equipment replacement"
-  ],
+  scenarioTerms: [],
   excludeTerms: [
     "job",
     "jobs",
