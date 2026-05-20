@@ -9,7 +9,11 @@
 ## 当前状态（基线）
 
 - ✅ **Step 1 已完成**：抽出 `buildLaneKQueriesFromKeywordGroups`，可只吃 `keywordGroups + productProfileAnalysis + customerProfileAnalysis` 生成 Lane K queries，不再依赖 plan_search_queries 输出的 keywordPool。
-- ⏳ **Step 2-6 未做**：用户体感不变，brave_search 仍等 plan_search_queries 完成才启动。
+- ✅ **Step 2 已完成**：拆 `buildAiPlanningContext` → `runFastPlanning` + `runSlowPlanning`，保持行为不变。
+- ✅ **Step 4 已完成**：`executeBraveSearchBatchForTask` 改为 polling + 原子 claim（`findFirst pending → updateMany → process`），支持 `slowPlanningPromise` 参数动态等待后台追加的 query。
+- ✅ **Step 3+5 已完成**：`runAutonomousLeadDiscovery` 改为并发路径：`buildTaskFastContext` → 注入 Lane K + reverse → 启动 brave_search polling + slowPlanning 后台 → GPT query dedupe 追加。
+- ✅ **Step 6 已完成**：slowPlanning 失败兜底（`.catch` → `querySource: "lane_k_only"` + `markStepFailed`）。
+- ⏳ **Step 7 待做**：集成测试 + 真实任务验收。
 
 ## 当前流程（串行，慢）
 
