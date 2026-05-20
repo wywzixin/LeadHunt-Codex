@@ -2261,9 +2261,17 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   }
 
   markStepRunning(taskId: string, nodeName: LeadHuntWorkflowNode) {
-    return this.updateStep(taskId, nodeName, "running", {
-      startedAt: new Date(),
-      error: null
+    // 2026-05 V1-MVP: do NOT overwrite startedAt if the step was
+    // already started (e.g. brave_search polling re-enters after the
+    // first batch). Only set startedAt when transitioning from a
+    // non-running state. Use a conditional update to avoid the race.
+    return this.prisma.agentStep.updateMany({
+      where: { taskId, nodeName, status: { not: "running" } },
+      data: {
+        status: "running",
+        startedAt: new Date(),
+        error: null
+      }
     });
   }
 
@@ -6103,6 +6111,10 @@ function parseTaskPayload(value: Prisma.JsonValue | null): {
   } | null;
   customerProfileAnalysis?: Record<string, unknown> | null;
   keywordGroups?: Partial<KeywordGroups>;
+  profileSignals?: {
+    referenceCustomerUrlsUsed?: string[];
+    referenceCustomerUrlsRead?: string[];
+  } | null;
 } {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as ReturnType<typeof parseTaskPayload>)
@@ -6142,9 +6154,13 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
   // (site:reference.com) queries call them out explicitly, and
   // shouldHardRejectCandidate uses this list to drop the reference's
   // own pages from the candidate table.
-  const referenceCustomerDomains = domainsFromUrls(
-    asStringArray(payload.customerProfile?.referenceCustomerUrls)
-  );
+  // Also include domains from profileSignals.referenceCustomerUrlsRead
+  // which contains the FINAL URLs after redirects (e.g. highcloud.ae
+  // may redirect to hctgroup.ae — both must be blocked).
+  const referenceCustomerDomains = domainsFromUrls([
+    ...asStringArray(payload.customerProfile?.referenceCustomerUrls),
+    ...asStringArray(payload.profileSignals?.referenceCustomerUrlsRead)
+  ]);
 
   return {
     targetRegions: targetRegions.length ? targetRegions : profileRegions,
@@ -6159,9 +6175,13 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
     // 2026-05 P0: fuzzy company-name match for reference customers.
     // Extracted from GPT's customerProfileAnalysis.referenceCompanies
     // (which typically contains ["HCT Group", "Spectrum MEA"]).
-    referenceCustomerNames: asStringArray(
-      payload.customerProfileAnalysis?.referenceCompanies
-    ).slice(0, 10),
+    // Also derive names from reference domains as a fallback — GPT
+    // may not always emit the correct company name, but the domain
+    // itself (e.g. "hctgroup" → "HCT Group") is a reliable signal.
+    referenceCustomerNames: uniqueStrings([
+      ...asStringArray(payload.customerProfileAnalysis?.referenceCompanies),
+      ...referenceCustomerDomains.map((d) => domainToReferenceCompanyName(d))
+    ]).filter(Boolean).slice(0, 20),
     disqualifiers: [
       "job",
       "career",
@@ -6211,6 +6231,30 @@ function domainsFromUrls(urls: Array<string | null | undefined>) {
       })
       .filter(Boolean)
   );
+}
+
+// 2026-05 V1-MVP: derive a human-readable company name from a
+// reference-customer domain for use in fuzzy name matching. Strips
+// TLD, splits on hyphens/underscores, and title-cases each word.
+// Examples: "hctgroup.ae" → "Hctgroup", "spectrummea.com" → "Spectrummea"
+// These are intentionally kept as single-word fallbacks — the
+// refNameQualifiesForFuzzyMatch guard will reject them if they're
+// too generic. The real value is when GPT's referenceCompanies list
+// is incomplete and the domain-derived name is specific enough.
+function domainToReferenceCompanyName(domain: string): string {
+  const stripped = domain.replace(/\.[a-z]{2,}(?:\.[a-z]{2})?$/i, "").replace(/^www\./, "");
+  if (!stripped) {
+    return "";
+  }
+  // Split camelCase-like patterns (e.g. "highCloud" → "high Cloud")
+  // and explicit separators (hyphens, underscores).
+  const parts = stripped
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .split(/[-_]/)
+    .filter(Boolean);
+  return parts
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function resolveSearchBatchLimit(limit: number | undefined) {
