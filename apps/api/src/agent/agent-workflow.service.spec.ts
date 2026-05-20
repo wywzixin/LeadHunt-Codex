@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AgentWorkflowService } from "./agent-workflow.service.js";
+import { AgentWorkflowService, splitReferenceCompanyAliases } from "./agent-workflow.service.js";
 
 function createPrismaMock() {
   return {
@@ -1994,6 +1994,48 @@ describe("AgentWorkflowService", () => {
     expect(prisma.leadTask.update).toHaveBeenCalledWith({
       where: { id: "task-1" },
       data: { status: "completed" }
+    });
+  });
+
+  // 2026-05 V1-MVP: directly test splitReferenceCompanyAliases. The
+  // qualification-layer tests in lead-qualification.service.spec.ts
+  // pass pre-split arrays, so they don't actually exercise this helper.
+  // Without this test, a regression in the splitter (e.g. forgetting
+  // to handle " aka ", or breaking on multiple separators) would
+  // silently slip through.
+  describe("splitReferenceCompanyAliases", () => {
+    it("splits combined names on / separator and keeps the original", () => {
+      expect(splitReferenceCompanyAliases("HighCloud / HCT Group")).toEqual([
+        "HighCloud / HCT Group",
+        "HighCloud",
+        "HCT Group"
+      ]);
+    });
+
+    it("splits on , and ; separators", () => {
+      expect(splitReferenceCompanyAliases("ABC, XYZ; LMN")).toEqual([
+        "ABC, XYZ; LMN",
+        "ABC",
+        "XYZ",
+        "LMN"
+      ]);
+    });
+
+    it("splits on case-insensitive ' aka ' separator", () => {
+      expect(splitReferenceCompanyAliases("ACME AKA Acme Corp")).toEqual([
+        "ACME AKA Acme Corp",
+        "ACME",
+        "Acme Corp"
+      ]);
+    });
+
+    it("returns the trimmed name unchanged when there is no separator", () => {
+      expect(splitReferenceCompanyAliases("  HCT Group  ")).toEqual(["HCT Group"]);
+    });
+
+    it("returns an empty array for empty or whitespace input", () => {
+      expect(splitReferenceCompanyAliases("")).toEqual([]);
+      expect(splitReferenceCompanyAliases("   ")).toEqual([]);
     });
   });
 });

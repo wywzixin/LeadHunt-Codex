@@ -6280,7 +6280,9 @@ function domainToReferenceCompanyName(domain: string): string {
 //   - the original combined string (for verbatim matches)
 //   - each side of the split as an independent alias
 // Separators: / ; , and " aka " (case-insensitive).
-function splitReferenceCompanyAliases(name: string): string[] {
+//
+// Exported for unit testing.
+export function splitReferenceCompanyAliases(name: string): string[] {
   if (!name) {
     return [];
   }
