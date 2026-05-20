@@ -617,6 +617,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     let hasSearchPlan = Boolean(options.skipPlanning);
 
     try {
+      let slowPromise: Promise<unknown> | undefined;
+
       if (options.skipPlanning) {
         const queryCount = await this.prisma.searchQuery.count({ where: { taskId } });
         await this.markStepCompleted(taskId, "plan_search_queries", {
@@ -624,19 +626,128 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           queryCount
         });
       } else {
-        const { workflow } = await this.planTaskSearchQueries(userId, taskId, input);
-        if (workflow.status === "failed") {
-          return;
+        // 2026-05 V1-MVP Step 3: concurrent planning + search.
+        // 1) Fast phase (product/customer + expand_keywords) — must wait.
+        // 2) Insert Lane K + reverse queries into search_queries.
+        // 3) Launch slow phase (GPT search-strategy) as a background
+        //    promise that appends GPT queries via dedupe + createMany.
+        // 4) Start brave_search polling immediately; the polling loop
+        //    consumes Lane K right away and picks up the GPT queries
+        //    once the slow phase finishes.
+        await this.markStepRunning(taskId, "load_task");
+        const fastBundle = await this.buildTaskFastContext(userId, input, taskId);
+        await this.markStepCompleted(taskId, "load_task", {
+          prompt: input.prompt,
+          targetCount: input.targetCount ?? DEFAULT_SEARCH_QUERY_COUNT,
+          hasProductProfile: Boolean(fastBundle.context.productProfile),
+          hasCustomerProfile: Boolean(fastBundle.context.customerProfile)
+        });
+
+        // Persist fast context to inputPayload and seed search_queries.
+        await this.prisma.leadTask.update({
+          where: { id: taskId },
+          data: {
+            status: "running",
+            inputPayload: toJsonValue({
+              ...input,
+              ...fastBundle.context
+            }) as Prisma.InputJsonValue
+          }
+        });
+
+        if (fastBundle.context.searchQueries.length > 0) {
+          await this.prisma.searchQuery.createMany({
+            data: fastBundle.context.searchQueries.map((query) => ({
+              taskId,
+              provider: query.provider,
+              operatorSource: query.operatorSource,
+              executionStatus: "pending",
+              operatorName: query.operatorName,
+              strategyTemplate: query.strategyTemplate,
+              query: query.query,
+              keywordGroups: query.keywordGroups,
+              country: query.country,
+              effectivenessScore: query.effectivenessScore
+            }))
+          });
         }
+
+        // Launch slow phase in the background. The catch swallows the
+        // error so the brave_search polling loop is not interrupted —
+        // we record the failure on the plan_search_queries step instead.
+        slowPromise = this.runSlowPlanningAndAppendGptQueries(
+          taskId,
+          fastBundle.fastResult,
+          fastBundle.targetMarkets ?? []
+        )
+          .then(async (result) => {
+            // Record success on plan_search_queries step + update
+            // inputPayload.profileSignals.aiPlanning so downstream
+            // consumers (UI / quality gate) see the final state.
+            const { slowResult, appendedCount } = result;
+            const fallbackReasons = [
+              ...fastBundle.fastResult.fallbackReasons,
+              ...slowResult.fallbackReasons
+            ];
+            await this.markStepCompleted(taskId, "plan_search_queries", {
+              queryCount: appendedCount + fastBundle.context.searchQueries.length,
+              createdCount: appendedCount,
+              gptQueryCount: slowResult.aiQueryCount,
+              gptRefillAttempts: slowResult.gptRefillAttempts,
+              gptRefillAcceptedCount: slowResult.gptRefillAcceptedCount,
+              rejectedQueryCount: slowResult.rejectedAiQueries.length,
+              fallbackReasons
+            });
+            await this.updateTaskAiPlanningSignals(taskId, {
+              enabled: true,
+              querySource: slowResult.aiQueryCount
+                ? "gpt55_only"
+                : "gpt55_failed_or_rejected",
+              gptSearchQueryCount: slowResult.aiQueryCount,
+              gptRefillAttempts: slowResult.gptRefillAttempts,
+              gptRefillAcceptedCount: slowResult.gptRefillAcceptedCount,
+              fallbackQueryCount: 0,
+              rejectedQueryCount: slowResult.rejectedAiQueries.length,
+              rejectedQueries: slowResult.rejectedAiQueries,
+              fallbackReasons
+            });
+          })
+          .catch(async (error) => {
+            const message = searchErrorMessage(error);
+            // Slow phase failure does NOT fail the task. Lane K
+            // continues, querySource is downgraded to lane_k_only.
+            await this.markStepFailed(taskId, "plan_search_queries", message).catch(
+              () => {}
+            );
+            await this.updateTaskAiPlanningSignals(taskId, {
+              enabled: true,
+              querySource: "lane_k_only",
+              gptSearchQueryCount: 0,
+              gptRefillAttempts: 0,
+              gptRefillAcceptedCount: 0,
+              fallbackQueryCount: 0,
+              rejectedQueryCount: 0,
+              rejectedQueries: [],
+              fallbackReasons: [
+                ...fastBundle.fastResult.fallbackReasons,
+                `slow planning failed: ${message}`
+              ]
+            }).catch(() => {});
+          });
         hasSearchPlan = true;
       }
 
       await this.resetStaleRunningSearchQueries(taskId);
       let searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, {
-        limit: FIRST_STAGE_SEARCH_QUERY_LIMIT
+        limit: FIRST_STAGE_SEARCH_QUERY_LIMIT,
+        slowPlanningPromise: slowPromise
       });
       let qualityGateOutput: Record<string, unknown> | null = null;
       if (!searchResult.ok) {
+        // Make sure slow promise settles before returning.
+        if (slowPromise) {
+          await slowPromise.catch(() => {});
+        }
         await this.prisma.leadTask.update({
           where: { id: taskId },
           data: { status: "failed" }
@@ -668,9 +779,13 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
       while (searchResult.hasMore) {
         searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, {
-          limit: FIRST_STAGE_SEARCH_QUERY_LIMIT
+          limit: FIRST_STAGE_SEARCH_QUERY_LIMIT,
+          slowPlanningPromise: slowPromise
         });
         if (!searchResult.ok) {
+          if (slowPromise) {
+            await slowPromise.catch(() => {});
+          }
           await this.prisma.leadTask.update({
             where: { id: taskId },
             data: { status: "failed" }
@@ -683,6 +798,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           ...searchResult,
           qualityGate: qualityGateOutput
         });
+      }
+
+      // Ensure slow phase is fully settled before pausing.
+      if (slowPromise) {
+        await slowPromise.catch(() => {});
       }
 
       const pausedWorkflow = await this.pauseWorkflowAt(taskId, "human_approval");
@@ -699,6 +819,37 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
       await this.markAutonomousDiscoveryFailed(taskId, error, "brave_search");
     }
+  }
+
+  // 2026-05 V1-MVP Step 6: helper to update the persisted aiPlanning
+  // signals on inputPayload after slow phase resolves (success or
+  // failure). Reads + merges so we don't clobber other inputPayload
+  // fields written by the fast phase.
+  private async updateTaskAiPlanningSignals(
+    taskId: string,
+    aiPlanning: Record<string, unknown>
+  ) {
+    const task = await this.prisma.leadTask.findUnique({
+      where: { id: taskId },
+      select: { inputPayload: true }
+    });
+    if (!task?.inputPayload) {
+      return;
+    }
+    const payload = (task.inputPayload as Record<string, unknown>) ?? {};
+    const profileSignals = ((payload.profileSignals as Record<string, unknown> | undefined) ??
+      {}) as Record<string, unknown>;
+    const merged = {
+      ...payload,
+      profileSignals: {
+        ...profileSignals,
+        aiPlanning
+      }
+    };
+    await this.prisma.leadTask.update({
+      where: { id: taskId },
+      data: { inputPayload: toJsonValue(merged) as Prisma.InputJsonValue }
+    });
   }
 
   private resetStaleRunningSearchQueries(taskId: string) {
@@ -2979,6 +3130,281 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         fallbackReasons
       }
     };
+  }
+
+  // 2026-05 V1-MVP Step 3: build a partial task context that contains
+  // only the fast-phase outputs (product/customer profile + expand_keywords)
+  // plus Lane K and reverse-network queries assembled deterministically
+  // from those keywords. The slow GPT search-strategy phase is NOT run
+  // here — it's launched in parallel and its queries are appended to
+  // search_queries via runSlowPlanningAndAppendGptQueries.
+  //
+  // Returns the same shape as buildTaskContext (so the inputPayload can
+  // be populated immediately), but with searchQueries containing only
+  // Lane K + reverse-network queries and profileSignals.aiPlanning
+  // marked as "fast_only_pending_slow".
+  private async buildTaskFastContext(
+    userId: string,
+    input: CreateTaskInput,
+    taskId: string
+  ): Promise<{
+    context: TaskExecutionContext;
+    fastResult: Awaited<ReturnType<AgentWorkflowService["runFastPlanning"]>>;
+    profileKeywordInput: Parameters<AgentWorkflowService["runFastPlanning"]>[0]["profileKeywordInput"];
+    ruleKeywordGroups: KeywordGroups;
+    siteEvidence: ProfileSiteEvidence;
+    targetMarkets: string[];
+    customer: Parameters<AgentWorkflowService["runFastPlanning"]>[0]["customer"];
+    product: Parameters<AgentWorkflowService["runFastPlanning"]>[0]["product"];
+    crmSamplesCount: number;
+    marketSelection: ReturnType<typeof resolveTargetMarketSelection>;
+    referenceCustomerUrls: string[];
+    productProfileUrls: string[];
+  }> {
+    const [productProfile, customerProfile] = await Promise.all([
+      this.prisma.productProfile.findUnique({ where: { userId } }),
+      this.prisma.customerProfile.findUnique({ where: { userId } })
+    ]);
+    const product = productProfile
+      ? {
+          websiteUrl: productProfile.websiteUrl,
+          productPageUrl: productProfile.productPageUrl,
+          documentUrls: asStringArray(productProfile.documentUrls),
+          notes: productProfile.notes
+        }
+      : null;
+    const customer = customerProfile
+      ? {
+          targetRegions: asStringArray(customerProfile.targetRegions),
+          referenceCustomerUrls: asStringArray(customerProfile.referenceCustomerUrls),
+          crmSampleIds: asStringArray(customerProfile.crmSampleIds),
+          notes: customerProfile.notes
+        }
+      : null;
+    const crmSamples = customer?.crmSampleIds?.length
+      ? await this.prisma.leadCandidate.findMany({
+          where: { id: { in: customer.crmSampleIds } },
+          select: {
+            companyName: true,
+            website: true,
+            country: true,
+            sourceUrl: true,
+            contacts: { select: { value: true } }
+          },
+          take: 20
+        })
+      : [];
+    const productProfileUrls = compactStrings([
+      product?.websiteUrl,
+      product?.productPageUrl,
+      ...(product?.documentUrls ?? [])
+    ]);
+    const referenceCustomerUrls = customer?.referenceCustomerUrls ?? [];
+    const siteEvidence =
+      (await this.websiteContentService?.readProfileSites({
+        productUrls: productProfileUrls,
+        referenceCustomerUrls
+      })) ?? emptyProfileSiteEvidence();
+    const siteKeywordHints = collectSiteKeywordHints(siteEvidence);
+    const ruleProductProfileAnalysis = buildProductProfileAnalysis(
+      product,
+      siteEvidence.productSites
+    );
+    const ruleCustomerProfileAnalysis = buildCustomerProfileAnalysis(
+      customer,
+      siteEvidence.referenceCustomerSites
+    );
+    const marketSelection = resolveTargetMarketSelection(input.prompt, customer?.targetRegions);
+    const targetMarkets = marketSelection.targetMarkets ?? [];
+    const profileKeywordInput = {
+      taskText: input.prompt,
+      productProfileUrls,
+      productProfileNotes: buildEvidenceNotes(product?.notes, siteEvidence.productSites),
+      referenceCustomerUrls,
+      crmSampleNames: crmSamples.map((sample) =>
+        compactStrings([
+          sample.companyName,
+          sample.website,
+          sample.country,
+          sample.sourceUrl,
+          ...sample.contacts.map((contact) => contact.value)
+        ]).join(" ")
+      ),
+      customerProfileNotes: buildEvidenceNotes(
+        customer?.notes,
+        siteEvidence.referenceCustomerSites
+      ),
+      targetMarkets,
+      productTerms: siteKeywordHints.productTerms,
+      customerIntentTerms: siteKeywordHints.customerIntentTerms,
+      scenarioTerms: siteKeywordHints.scenarioTerms
+    };
+    const ruleKeywordGroups = createKeywordGroups({ ...profileKeywordInput });
+
+    // Run fast phase only (product/customer analysis + expand_keywords).
+    const fastResult = await this.runFastPlanning({
+      taskId,
+      input,
+      product,
+      customer,
+      siteEvidence,
+      profileKeywordInput,
+      ruleProductProfileAnalysis,
+      ruleCustomerProfileAnalysis,
+      ruleKeywordGroups,
+      targetMarkets
+    });
+
+    const productProfileAnalysis = fastResult.productProfileAnalysis;
+    const customerProfileAnalysis = fastResult.customerProfileAnalysis;
+    const keywordGroups = fastResult.keywordGroups;
+
+    // Reverse-network queries (deterministic, 0-cost — kept identical
+    // to buildTaskContext).
+    const reverseNetworkQueries = buildReverseCustomerNetworkQueries({
+      siteEvidence,
+      customerProfileAnalysis,
+      keywordGroups,
+      targetMarkets
+    });
+
+    // Lane K queries (deterministic, no GPT keywordPool yet — slow
+    // phase may produce one later but Lane K doesn't need it). Use the
+    // full LANE_K_DEFAULT_QUERY_COUNT budget here, minus reverse slots,
+    // because GPT queries are not yet in the mix.
+    const laneKTargetCount = Math.max(
+      0,
+      LANE_K_DEFAULT_QUERY_COUNT - reverseNetworkQueries.length
+    );
+    const laneKQueries = buildLaneKQueriesFromKeywordGroups({
+      keywordGroups,
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      targetMarkets: targetMarkets ?? [],
+      maxQueries: laneKTargetCount
+    });
+
+    // Front-load: K front 12 + reverse + K tail. GPT queries are
+    // appended later by the slow phase.
+    const LANE_K_FRONT_LOAD_COUNT = 12;
+    const laneKFront = laneKQueries.slice(0, LANE_K_FRONT_LOAD_COUNT);
+    const laneKTail = laneKQueries.slice(LANE_K_FRONT_LOAD_COUNT);
+    const fastSearchQueries: PlannedSearchQuery[] = [
+      ...laneKFront,
+      ...reverseNetworkQueries.filter(
+        (q) => !laneKFront.some((k) => k.query.toLowerCase() === q.query.toLowerCase())
+      ),
+      ...laneKTail
+    ];
+
+    const profileSignals = {
+      productUrlsUsed: profileKeywordInput.productProfileUrls,
+      referenceCustomerUrlsUsed: profileKeywordInput.referenceCustomerUrls ?? [],
+      productUrlsRead: siteEvidence.productSites
+        .filter((site) => site.status === "read")
+        .map((site) => site.finalUrl),
+      referenceCustomerUrlsRead: siteEvidence.referenceCustomerSites
+        .filter((site) => site.status === "read")
+        .map((site) => site.finalUrl),
+      failedUrlCount: siteEvidence.summary.failed,
+      crmSampleCount: crmSamples.length,
+      marketSelection,
+      aiPlanning: {
+        enabled: fastResult.serviceAvailable,
+        querySource: "fast_only_pending_slow",
+        fallbackQueryCount: 0,
+        fallbackReasons: fastResult.fallbackReasons
+      }
+    };
+
+    const context: TaskExecutionContext = {
+      productProfile: product as Record<string, unknown> | null,
+      customerProfile: customer as Record<string, unknown> | null,
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      siteEvidence: siteEvidence as unknown as Record<string, unknown>,
+      profileSignals,
+      executionPlan: buildExecutionPlan(Boolean(product), Boolean(customer)),
+      keywordGroups,
+      searchQueries: fastSearchQueries
+    };
+
+    return {
+      context,
+      fastResult,
+      profileKeywordInput,
+      ruleKeywordGroups,
+      siteEvidence,
+      targetMarkets,
+      customer,
+      product,
+      crmSamplesCount: crmSamples.length,
+      marketSelection,
+      referenceCustomerUrls,
+      productProfileUrls
+    };
+  }
+
+  // 2026-05 V1-MVP Step 5: run slow GPT search-strategy phase, dedupe
+  // against the queries already in search_queries (Lane K + reverse),
+  // and append the new GPT queries via createMany. Returns the slow
+  // phase result and the inserted-query count.
+  private async runSlowPlanningAndAppendGptQueries(
+    taskId: string,
+    fastResult: Awaited<ReturnType<AgentWorkflowService["runFastPlanning"]>>,
+    targetMarkets: string[]
+  ): Promise<{
+    slowResult: Awaited<ReturnType<AgentWorkflowService["runSlowPlanning"]>>;
+    appendedCount: number;
+  }> {
+    const slowResult = await this.runSlowPlanning({
+      taskId,
+      fastResult: {
+        productProfileAnalysis: fastResult.productProfileAnalysis,
+        customerProfileAnalysis: fastResult.customerProfileAnalysis,
+        keywordGroups: fastResult.keywordGroups,
+        aiKeywordExpansion: fastResult.aiKeywordExpansion,
+        channelCustomersRequested: fastResult.channelCustomersRequested
+      },
+      targetMarkets
+    });
+
+    if (!slowResult.searchQueries.length) {
+      return { slowResult, appendedCount: 0 };
+    }
+
+    // Dedupe against existing queries (Lane K + reverse already inserted).
+    const existing = await this.prisma.searchQuery.findMany({
+      where: { taskId },
+      select: { query: true }
+    });
+    const existingSet = new Set(
+      existing.map((q) => q.query.toLowerCase().trim())
+    );
+    const newQueries = slowResult.searchQueries.filter(
+      (q) => !existingSet.has(q.query.toLowerCase().trim())
+    );
+
+    if (newQueries.length === 0) {
+      return { slowResult, appendedCount: 0 };
+    }
+
+    await this.prisma.searchQuery.createMany({
+      data: newQueries.map((query) => ({
+        taskId,
+        provider: query.provider,
+        operatorSource: query.operatorSource,
+        executionStatus: "pending",
+        operatorName: query.operatorName,
+        strategyTemplate: query.strategyTemplate,
+        query: query.query,
+        keywordGroups: query.keywordGroups,
+        country: query.country,
+        effectivenessScore: query.effectivenessScore
+      }))
+    });
+
+    return { slowResult, appendedCount: newQueries.length };
   }
 
   private async markOptionalPlanningStepRunning(
