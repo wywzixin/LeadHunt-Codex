@@ -2260,18 +2260,24 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     return steps;
   }
 
-  markStepRunning(taskId: string, nodeName: LeadHuntWorkflowNode) {
-    // 2026-05 V1-MVP: do NOT overwrite startedAt if the step was
-    // already started (e.g. brave_search polling re-enters after the
-    // first batch). Only set startedAt when transitioning from a
-    // non-running state. Use a conditional update to avoid the race.
+  async markStepRunning(taskId: string, nodeName: LeadHuntWorkflowNode) {
+    // 2026-05 V1-MVP: NEVER overwrite startedAt once set. brave_search
+    // polling re-enters this method on every batch — if we re-set
+    // startedAt the timestamp would point at the LAST batch instead of
+    // the first one, breaking the verification check
+    // brave_search.startedAt < plan_search_queries.endedAt.
+    //
+    // Two-phase update:
+    //   1. Set startedAt only if it's currently NULL (first entry).
+    //   2. Always set status='running', clear error and endedAt for
+    //      the new run.
+    await this.prisma.agentStep.updateMany({
+      where: { taskId, nodeName, startedAt: null },
+      data: { startedAt: new Date() }
+    });
     return this.prisma.agentStep.updateMany({
-      where: { taskId, nodeName, status: { not: "running" } },
-      data: {
-        status: "running",
-        startedAt: new Date(),
-        error: null
-      }
+      where: { taskId, nodeName },
+      data: { status: "running", error: null, endedAt: null }
     });
   }
 
@@ -6178,10 +6184,19 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
     // Also derive names from reference domains as a fallback — GPT
     // may not always emit the correct company name, but the domain
     // itself (e.g. "hctgroup" → "HCT Group") is a reliable signal.
+    //
+    // 2026-05 V1-MVP: GPT sometimes emits combined aliases like
+    // "HighCloud / HCT Group" or "ABC, XYZ", which `candidateName.includes`
+    // can never match against a candidate named just "HCT Group" or
+    // "ABC". We split each entry on /, ;, ,, and " aka " so each side
+    // becomes an independent alias, then keep the original combined
+    // form too (in case the candidate literally contains it).
     referenceCustomerNames: uniqueStrings([
-      ...asStringArray(payload.customerProfileAnalysis?.referenceCompanies),
+      ...asStringArray(payload.customerProfileAnalysis?.referenceCompanies).flatMap(
+        (name) => splitReferenceCompanyAliases(name)
+      ),
       ...referenceCustomerDomains.map((d) => domainToReferenceCompanyName(d))
-    ]).filter(Boolean).slice(0, 20),
+    ]).filter(Boolean).slice(0, 30),
     disqualifiers: [
       "job",
       "career",
@@ -6255,6 +6270,35 @@ function domainToReferenceCompanyName(domain: string): string {
   return parts
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+// 2026-05 V1-MVP: split a combined-alias reference company name into
+// its individual aliases. GPT-5.5 sometimes emits entries like
+// "HighCloud / HCT Group" or "ABC, XYZ" or "ACME aka Acme Corp".
+// `candidateName.includes` can never match these against a candidate
+// named just "HCT Group", so we expand each entry into:
+//   - the original combined string (for verbatim matches)
+//   - each side of the split as an independent alias
+// Separators: / ; , and " aka " (case-insensitive).
+function splitReferenceCompanyAliases(name: string): string[] {
+  if (!name) {
+    return [];
+  }
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return [];
+  }
+  // Replace " aka " with a regular separator first so we can do a
+  // single split below. \s+aka\s+ to match " aka ", " AKA ", etc.
+  const normalizedForSplit = trimmed.replace(/\s+aka\s+/gi, "/");
+  const parts = normalizedForSplit
+    .split(/\s*[\/;,]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length <= 1) {
+    return [trimmed];
+  }
+  return [trimmed, ...parts];
 }
 
 function resolveSearchBatchLimit(limit: number | undefined) {

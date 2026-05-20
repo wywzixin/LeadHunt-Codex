@@ -2197,17 +2197,38 @@ function shouldHardRejectCandidate(
   // also operates as hctgroup.ae). When the candidate company name
   // contains a reference customer's name (subject to multi-word and
   // non-generic constraints), hard-reject.
+  //
+  // 2026-05 V1-MVP: also support single-word aliases like "HighCloud"
+  // (split out from "HighCloud / HCT Group" by buildIcpCriteria).
+  // For safety, single-word aliases use a STRICTER match: word-boundary
+  // OR the candidate's compact-form name (lowercased, spaces removed)
+  // must contain the lowercased alias. Generic single words like
+  // "Spectrum" are still rejected by refNameQualifiesForFuzzyMatch.
   if (
     criteria.referenceCustomerNames &&
     criteria.referenceCustomerNames.length > 0 &&
     candidate.companyName
   ) {
     const candidateName = candidate.companyName.toLowerCase();
+    const candidateCompact = candidateName.replace(/\s+/g, "");
     const matched = criteria.referenceCustomerNames.some((refName) => {
-      if (!refNameQualifiesForFuzzyMatch(refName)) {
+      const refLower = refName.toLowerCase().trim();
+      if (!refLower) {
         return false;
       }
-      return candidateName.includes(refName.toLowerCase());
+      // Multi-word alias: existing fuzzy rule (substring after lowercase).
+      if (refNameQualifiesForFuzzyMatch(refName)) {
+        return candidateName.includes(refLower);
+      }
+      // Single-word alias: only if length >= 6, non-generic, and the
+      // candidate's compact name contains it OR the candidate name
+      // has it as a whole word.
+      if (refNameQualifiesAsSingleWordAlias(refName)) {
+        const refCompact = refLower.replace(/\s+/g, "");
+        const wordBoundary = new RegExp(`\\b${escapeRegex(refLower)}\\b`, "i");
+        return wordBoundary.test(candidateName) || candidateCompact.includes(refCompact);
+      }
+      return false;
     });
     if (matched) {
       return true;
@@ -2948,6 +2969,54 @@ function refNameQualifiesForFuzzyMatch(name: string): boolean {
     (w) => !genericRefNameWords.has(w.toLowerCase().replace(/[.,&]/g, ""))
   );
   return nonGenericWords.length > 0;
+}
+
+// 2026-05 V1-MVP: single-word reference alias qualifier. Used after
+// splitting combined GPT aliases like "HighCloud / HCT Group" into
+// individual entries. Single words must be:
+//   1. Length >= 6 (rules out short ambiguous tokens)
+//   2. Not in the generic word blocklist (Spectrum, Solutions, ...)
+// Examples that qualify: "HighCloud" (9 chars, non-generic)
+// Examples that don't: "Spectrum" (generic), "ABC" (too short)
+function refNameQualifiesAsSingleWordAlias(name: string): boolean {
+  const trimmed = name.trim();
+  if (trimmed.length < 6) {
+    return false;
+  }
+  const words = trimmed.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length !== 1) {
+    return false;
+  }
+  const word = words[0]!.toLowerCase().replace(/[.,&]/g, "");
+  const genericRefNameWords = new Set([
+    "group",
+    "solutions",
+    "solution",
+    "telecom",
+    "telecoms",
+    "connect",
+    "spectrum",
+    "communications",
+    "communication",
+    "company",
+    "corp",
+    "corporation",
+    "limited",
+    "international",
+    "global",
+    "technology",
+    "technologies",
+    "network",
+    "networks",
+    "systems",
+    "service",
+    "services"
+  ]);
+  return !genericRefNameWords.has(word);
+}
+
+function escapeRegex(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function hasProcurementIntent(text: string) {
