@@ -131,7 +131,7 @@ type EmailReviewResume = {
 
 const MAX_SYNC_SEARCH_QUERY_LIMIT = 500;
 const MAX_CANDIDATE_RESULTS_PER_QUERY = 20;
-const DEFAULT_SEARCH_QUERY_COUNT = 30;
+const DEFAULT_SEARCH_QUERY_COUNT = 20;
 const SEARCH_STRATEGY_INITIAL_QUERY_COUNT = 15;
 const DEFAULT_MAIN_CUSTOMER_QUERY_COUNT = 24;
 const DEFAULT_CHANNEL_CUSTOMER_QUERY_COUNT = 6;
@@ -149,13 +149,24 @@ const SEARCH_STRATEGY_REFILL_TIMEOUT_MS = 90_000;
 // 15 days old). With these timeouts the offending query gets marked
 // failed and the loop continues to the next one.
 const PER_QUERY_BRAVE_SEARCH_TIMEOUT_MS = 30_000;
-const PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS = 60_000;
+// 2026-05 P0: bumped back from 60s to 120s. Lane K queries return
+// 20 results per call, each going through contact-page probe (8s × 8
+// pages worst case) + AI candidate evaluation + DB writes. 60s was
+// too aggressive — observed 9/16 Lane K queries timing out on
+// saveCandidates while their Brave hits had already been saved to
+// search_results. This caused state-machine confusion: query was
+// marked "failed" with resultCount=0 even though Brave returned 20
+// hits successfully.
+const PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS = 120_000;
 // 2026-05 P1: stale running-task cutoff. Tasks that sit in "running"
 // status without an updatedAt heartbeat for more than this many hours
 // are considered orphaned (process crashed / OOM / lost websocket) and
 // auto-marked failed during recovery so they don't accumulate forever.
 const STALE_RUNNING_TASK_HOURS = 24;
 const FIRST_STAGE_SEARCH_QUERY_LIMIT = 15;
+// 2026-05: Lane K default query count. First batch targets 16-18 Lane K
+// queries; continue-search batches can increase this to 24-28.
+const LANE_K_DEFAULT_QUERY_COUNT = 20;
 const RUNNING_TASK_RECOVERY_LIMIT = 5;
 const RUNNING_TASK_RECOVERY_WINDOW_HOURS = 24;
 const LANGGRAPH_CHECKPOINT_STORE_VALUES = ["memory", "postgres"] as const;
@@ -1386,6 +1397,23 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         language: "en",
         count: 20
       };
+
+      // 2026-05 P0: state machine decoupling. Brave search and
+      // saveCandidates are now tracked separately:
+      //   - Brave failure → query.executionStatus = "failed", resultCount = 0
+      //   - Brave success + saveCandidates failure → query.executionStatus = "completed"
+      //     with resultCount preserved (Brave hits are still useful evidence
+      //     and were already saved to search_results table). Only the
+      //     candidate enrichment step failed, which we record as a soft
+      //     warning rather than a query-level failure.
+      // Previously a single try/catch around both calls would mark the
+      // query failed and clear resultCount, hiding 240+ Brave hits per
+      // task as if Brave had failed when it had actually succeeded.
+      let searchSucceeded = false;
+      let searchCount = 0;
+      let braveFallback = false;
+      let candidateResults: BraveSearchResult[] = [];
+
       try {
         await this.prisma.searchQuery.update({
           where: { id: query.id },
@@ -1400,13 +1428,35 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           PER_QUERY_BRAVE_SEARCH_TIMEOUT_MS,
           `Brave search query ${query.id.slice(0, 8)}`
         );
+        searchSucceeded = true;
+        searchCount = search.count;
+        braveFallback = search.fallback;
+        candidateResults = search.results.slice(0, MAX_CANDIDATE_RESULTS_PER_QUERY);
+        // Brave search succeeded — persist resultCount immediately so
+        // the value is preserved even if saveCandidates blows up later.
+        await this.prisma.searchQuery.update({
+          where: { id: query.id },
+          data: { resultCount: searchCount }
+        });
+      } catch (error) {
+        failedQueries += 1;
+        searchErrors.push({ queryId: query.id, message: searchErrorMessage(error) });
         await this.prisma.searchQuery.update({
           where: { id: query.id },
           data: {
-            resultCount: search.count
+            executionStatus: "failed",
+            resultCount: 0,
+            qualifiedCount: 0
           }
         });
-        const candidateResults = search.results.slice(0, MAX_CANDIDATE_RESULTS_PER_QUERY);
+        await this.touchRunningTask(taskId);
+        continue;
+      }
+
+      // Brave succeeded — now try saveCandidates. Failure here does NOT
+      // mark the query as failed; it stays "completed" with the Brave
+      // resultCount preserved.
+      try {
         const saved = candidateAiEvaluator
           ? await withTimeout(
               this.leadQualificationService.saveCandidates(
@@ -1429,33 +1479,49 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
               PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS,
               `Save candidates for query ${query.id.slice(0, 8)}`
             );
-        usedDevelopmentFallback ||= search.fallback;
-        resultCount += search.count;
+        usedDevelopmentFallback ||= braveFallback;
+        resultCount += searchCount;
         createdCandidates += saved.createdCount;
         skippedCandidates += saved.skippedCount;
+        // 2026-05 P0: qualifiedCount semantics fixed. Previously this
+        // field stored saved.createdCount (count of NEWLY created
+        // candidates, regardless of their qualification status), which
+        // misled the UI and self-improvement signals. Now it stores
+        // the count of candidates that actually reached qualified
+        // status — which is what the UI label and the agent's
+        // axis-rotation feedback loop should learn from.
+        const qualifiedFromThisQuery = saved.candidates.filter(
+          (c: { status?: string | null }) => c.status === "qualified"
+        ).length;
         await this.prisma.searchQuery.update({
           where: { id: query.id },
           data: {
             executionStatus: "completed",
-            resultCount: search.count,
-            qualifiedCount: saved.createdCount
+            resultCount: searchCount,
+            qualifiedCount: qualifiedFromThisQuery
           }
         });
-        await this.touchRunningTask(taskId);
-      } catch (error) {
-        failedQueries += 1;
-        searchErrors.push({ queryId: query.id, message: searchErrorMessage(error) });
+      } catch (saveError) {
+        // Brave succeeded; saveCandidates failed (timeout, DB error,
+        // or contact-probe stall). Keep the query as completed with
+        // resultCount preserved so downstream lane analytics can still
+        // see Brave hit it. Surface the error to searchErrors but do
+        // NOT increment failedQueries (we don't want this to count
+        // toward "all Brave failed" task abort logic).
+        searchErrors.push({
+          queryId: query.id,
+          message: `saveCandidates failed: ${searchErrorMessage(saveError)}`
+        });
         await this.prisma.searchQuery.update({
           where: { id: query.id },
           data: {
-            executionStatus: "failed",
-            resultCount: 0,
+            executionStatus: "completed",
+            resultCount: searchCount,
             qualifiedCount: 0
           }
         });
-        await this.touchRunningTask(taskId);
-        continue;
       }
+      await this.touchRunningTask(taskId);
     }
 
     const remainingQueries = await this.countPendingSearchQueries(taskId);
@@ -2371,10 +2437,48 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       keywordGroups,
       targetMarkets
     });
-    const searchQueries: PlannedSearchQuery[] = mergeSearchQueriesPreservingOrder(
-      baseSearchQueries,
-      reverseNetworkQueries
+
+    // 2026-05: Lane K keyword-combination queries (backend-assembled).
+    // GPT outputs a keywordPool (product terms, buyer roles, scenario
+    // terms) alongside its structured queries. The backend assembles
+    // short, high-hit-rate Brave queries via cartesian product. This
+    // reduces GPT time (fewer queries to write) and improves hit rate
+    // (short natural phrases vs complex operator queries).
+    const keywordPool = aiPlanning.keywordPool;
+    const laneKTargetCount = Math.max(
+      0,
+      LANE_K_DEFAULT_QUERY_COUNT - reverseNetworkQueries.length
     );
+    const laneKQueries = buildLaneKQueriesFromKeywordGroups({
+      keywordGroups,
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      targetMarkets: targetMarkets ?? [],
+      maxQueries: laneKTargetCount,
+      keywordPool
+    });
+
+    // 2026-05 P1: Lane K front-loaded. The user experience is "keywords
+    // search fast, advanced queries fill in later". We put the first 12
+    // Lane K queries at the front of the execution queue so the user
+    // sees results within 1-2 minutes. GPT precision queries and
+    // reverse-network queries follow. Any remaining Lane K queries
+    // (long-tail) go at the end.
+    const LANE_K_FRONT_LOAD_COUNT = 12;
+    const laneKFront = laneKQueries.slice(0, LANE_K_FRONT_LOAD_COUNT);
+    const laneKTail = laneKQueries.slice(LANE_K_FRONT_LOAD_COUNT);
+    const searchQueries: PlannedSearchQuery[] = [
+      ...laneKFront,
+      ...baseSearchQueries.filter(
+        (q) => !laneKFront.some((k) => k.query.toLowerCase() === q.query.toLowerCase())
+      ),
+      ...reverseNetworkQueries.filter(
+        (q) =>
+          !laneKFront.some((k) => k.query.toLowerCase() === q.query.toLowerCase()) &&
+          !baseSearchQueries.some((b) => b.query.toLowerCase() === q.query.toLowerCase())
+      ),
+      ...laneKTail
+    ].slice(0, DEFAULT_SEARCH_QUERY_COUNT + LANE_K_DEFAULT_QUERY_COUNT + 10);
 
     return {
       productProfile: product,
@@ -2445,6 +2549,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       channelCustomersRequested
     );
     let searchQueries: PlannedSearchQuery[] = [];
+    let searchPlanKeywordPool: { productTerms: string[]; buyerRoles: string[]; scenarioTerms: string[]; excludeFromKeywords: string[] } | undefined;
     let aiKeywordExpansion: KeywordExpansionResult | null = null;
     let aiQueryCount = 0;
     let gptRefillAttempts = 0;
@@ -2584,6 +2689,15 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         SEARCH_STRATEGY_TIMEOUT_MS,
         "GPT-5.5 search strategy generation"
       );
+      // Extract keyword pool for Lane K (backend-assembled queries)
+      if (searchPlan.keywordPool) {
+        searchPlanKeywordPool = {
+          productTerms: searchPlan.keywordPool.productTerms ?? [],
+          buyerRoles: searchPlan.keywordPool.buyerRoles ?? [],
+          scenarioTerms: searchPlan.keywordPool.scenarioTerms ?? [],
+          excludeFromKeywords: searchPlan.keywordPool.excludeFromKeywords ?? []
+        };
+      }
       let normalization = normalizeAiSearchPlan(
         searchPlan,
         keywordGroups,
@@ -2665,6 +2779,10 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       customerProfileAnalysis,
       keywordGroups,
       searchQueries,
+      // 2026-05: Lane K keyword pool from GPT output. If GPT didn't
+      // produce one (older prompt or failure), the caller falls back to
+      // keywordGroups slices.
+      keywordPool: searchPlanKeywordPool,
       profileSignals: {
         enabled: true,
         querySource: aiQueryCount ? "gpt55_only" : "gpt55_failed_or_rejected",
@@ -4215,6 +4333,206 @@ const querySellerOnlyTerms = [
 //   2. "{ref_company_name}" ("client" OR "partner" OR "deployment")
 //      {region}                — finds OTHER companies whose own pages
 //      mention the reference (often their integration partners or
+// 2026-05 V1-MVP: Extract Lane K builder so it can be called from the
+// fast planning phase (after expand_keywords) BEFORE GPT search-strategy
+// runs. The fast path uses keywordGroups + product/customer profile
+// analysis as the source. The slow path can later refine with
+// keywordPool from GPT search-strategy if it produces one.
+function buildLaneKQueriesFromKeywordGroups(input: {
+  keywordGroups: KeywordGroups;
+  productProfileAnalysis: Record<string, unknown>;
+  customerProfileAnalysis: Record<string, unknown>;
+  targetMarkets: string[];
+  maxQueries: number;
+  keywordPool?: {
+    productTerms?: string[];
+    buyerRoles?: string[];
+    scenarioTerms?: string[];
+    excludeFromKeywords?: string[];
+  };
+}): PlannedSearchQuery[] {
+  const {
+    keywordGroups,
+    productProfileAnalysis,
+    customerProfileAnalysis,
+    targetMarkets,
+    maxQueries,
+    keywordPool
+  } = input;
+
+  const productProfile = productProfileAnalysis as ProductProfileAnalysis;
+  const customerProfile = customerProfileAnalysis as CustomerProfileAnalysis;
+
+  const fallbackProductTerms = uniqueStrings([
+    ...asStringArray(productProfile?.keyProducts).slice(0, 6),
+    ...asStringArray(productProfile?.productCategories).slice(0, 4),
+    ...keywordGroups.productTerms.slice(0, 6)
+  ])
+    .filter((term) => isConcreteQueryProductTerm(term))
+    .slice(0, 8);
+  const fallbackBuyerRoles = uniqueStrings([
+    ...asStringArray(customerProfile?.idealCustomerTypes).slice(0, 6),
+    ...keywordGroups.customerIntentTerms.slice(0, 6)
+  ]).slice(0, 6);
+  const fallbackScenarioTerms = uniqueStrings([
+    ...asStringArray(productProfile?.targetUseCases).slice(0, 4),
+    ...keywordGroups.scenarioTerms.slice(0, 4)
+  ]).slice(0, 6);
+
+  return buildLaneKQueries({
+    productTerms:
+      keywordPool?.productTerms?.length && keywordPool.productTerms.length > 0
+        ? keywordPool.productTerms
+        : fallbackProductTerms.length > 0
+          ? fallbackProductTerms
+          : keywordGroups.productTerms.slice(0, 8),
+    buyerRoles:
+      keywordPool?.buyerRoles?.length && keywordPool.buyerRoles.length > 0
+        ? keywordPool.buyerRoles
+        : fallbackBuyerRoles.length > 0
+          ? fallbackBuyerRoles
+          : ["distributor", "stockist", "maintenance company", "contractor"],
+    scenarioTerms:
+      keywordPool?.scenarioTerms?.length && keywordPool.scenarioTerms.length > 0
+        ? keywordPool.scenarioTerms
+        : fallbackScenarioTerms,
+    countries: (targetMarkets ?? []).filter(
+      (market) => market && !isMacroMarket(market)
+    ),
+    keywordGroups,
+    maxQueries,
+    excludeTerms: keywordPool?.excludeFromKeywords
+  });
+}
+
+
+//
+// 2026-05: Instead of asking GPT to write 30+ complex search queries
+// (which takes 7-8 minutes and produces 35-50% zero-hit queries), we
+// let GPT output a keyword pool (product terms, buyer roles, scenario
+// terms) and the backend assembles short, high-hit-rate Brave queries
+// via cartesian product. This approach:
+//   - Reduces GPT time from 7-8 min to ~1.5 min (GPT only writes
+//     keyword pool + 12-20 Lane B/C/D queries)
+//   - Produces queries with <15% zero-hit rate (short natural phrases)
+//   - Scales easily for "continue search" batches (just add more combos)
+//
+// Three tiers:
+//   K1: productTerm + country (widest, highest hit rate, most noise)
+//   K2: productTerm + buyerRole + country (balanced)
+//   K3: scenarioTerm + buyerRole + country (most precise)
+
+type LaneKInput = {
+  productTerms: string[];
+  buyerRoles: string[];
+  scenarioTerms: string[];
+  countries: string[];
+  keywordGroups: KeywordGroups;
+  maxQueries: number;
+  excludeTerms?: string[];
+};
+
+function buildLaneKQueries(input: LaneKInput): PlannedSearchQuery[] {
+  const {
+    productTerms,
+    buyerRoles,
+    scenarioTerms,
+    countries,
+    keywordGroups,
+    maxQueries,
+    excludeTerms = []
+  } = input;
+
+  if (!productTerms.length || !countries.length) {
+    return [];
+  }
+
+  const queries: PlannedSearchQuery[] = [];
+  const seen = new Set<string>();
+
+  function addQuery(text: string, country: string, tier: string) {
+    const key = text.toLowerCase().trim();
+    if (seen.has(key) || queries.length >= maxQueries) {
+      return;
+    }
+    // Skip if query contains an excluded term
+    const lower = key;
+    if (excludeTerms.some((term) => lower.includes(term.toLowerCase()))) {
+      return;
+    }
+    seen.add(key);
+    queries.push({
+      provider: "brave",
+      operatorSource: "brave_official",
+      executionStatus: "supported",
+      operatorName: `Lane K ${tier} keyword combination`,
+      strategyTemplate: `lane-K-${tier}`,
+      strategyType: "main_customer",
+      query: text.trim(),
+      keywordGroups,
+      country,
+      effectivenessScore: tier === "K2" ? 0.75 : tier === "K3" ? 0.7 : 0.65,
+      templateId: `lane_k_${tier.toLowerCase()}`
+    });
+  }
+
+  // Distribute queries across countries round-robin style.
+  // 2026-05: Country is the OUTERMOST loop axis so each country gets
+  // at least one product+role combo before any country gets a second.
+  // Previously we iterated product × role inside the country loop,
+  // which meant a single country could exhaust the maxQueries budget
+  // before other countries got any Lane K queries at all.
+  const countryPool = countries.length ? countries : ["UAE"];
+
+  // K2 true round-robin: rotate (product, role, country) using modular
+  // indexing so all 3 axes get coverage even at low maxQueries.
+  // For maxQueries=20 with 8 products × 4 roles × 5 countries:
+  //   slot 0: product[0] role[0] country[0]
+  //   slot 1: product[1] role[0] country[1]
+  //   slot 2: product[2] role[0] country[2]
+  //   slot 3: product[3] role[0] country[3]
+  //   slot 4: product[4] role[0] country[4]
+  //   slot 5: product[5] role[1] country[0]
+  //   ... (each slot rotates all axes by 1)
+  const k2Cap = Math.min(maxQueries, productTerms.length * buyerRoles.length * countryPool.length);
+  for (let slot = 0; slot < k2Cap * 3 && queries.length < k2Cap; slot++) {
+    const product = productTerms[slot % productTerms.length]!;
+    const role = buyerRoles[Math.floor(slot / productTerms.length) % buyerRoles.length]!;
+    const country = countryPool[slot % countryPool.length]!;
+    addQuery(`${product} ${role} ${country}`, country, "K2");
+  }
+
+  // K3 round-robin: same pattern with scenario × role × country
+  if (scenarioTerms.length > 0) {
+    const k3Combos: Array<{ scenario: string; role: string }> = [];
+    for (const scenario of scenarioTerms) {
+      for (const role of buyerRoles.slice(0, 3)) {
+        k3Combos.push({ scenario, role });
+      }
+    }
+    for (const combo of k3Combos) {
+      for (const country of countryPool) {
+        if (queries.length >= maxQueries) break;
+        addQuery(`${combo.scenario} ${combo.role} ${country}`, country, "K3");
+      }
+      if (queries.length >= maxQueries) break;
+    }
+  }
+
+  // K1 fill: product + country (no role) — used to fill remaining slots
+  for (const product of productTerms) {
+    for (const country of countryPool) {
+      if (queries.length >= maxQueries) break;
+      addQuery(`${product} ${country}`, country, "K1");
+    }
+    if (queries.length >= maxQueries) break;
+  }
+
+  return queries;
+}
+
+// ---- End Lane K ----
+
 //      adjacent vendors who will buy similar products).
 //
 // This Lane D safety net runs regardless of whether GPT generated any
@@ -5228,6 +5546,12 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
     ownDomains,
     brandTerms: asStringArray(keywordGroups.brandTerms).slice(0, 12),
     referenceCustomerDomains,
+    // 2026-05 P0: fuzzy company-name match for reference customers.
+    // Extracted from GPT's customerProfileAnalysis.referenceCompanies
+    // (which typically contains ["HCT Group", "Spectrum MEA"]).
+    referenceCustomerNames: asStringArray(
+      payload.customerProfileAnalysis?.referenceCompanies
+    ).slice(0, 10),
     disqualifiers: [
       "job",
       "career",

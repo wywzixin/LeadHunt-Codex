@@ -23,6 +23,14 @@ export type IcpScoringCriteria = {
   // `site:spectrummea.com ("partners" OR ...)` does not turn the
   // reference customer back into a "qualified" lead.
   referenceCustomerDomains?: string[];
+  // 2026-05 P0: fuzzy company-name match for reference customers.
+  // Domain match alone misses cases where the seller's reference URL
+  // (e.g. https://highcloud.ae/) maps to a different actual company
+  // domain (e.g. hctgroup.ae). When the candidate's company name
+  // contains a reference customer's name, hard-reject regardless of
+  // domain. Only multi-word names with non-generic content qualify
+  // (see refNameQualifiesForFuzzyMatch).
+  referenceCustomerNames?: string[];
 };
 
 export type NormalizedLeadCandidate = {
@@ -308,6 +316,13 @@ export class LeadQualificationService {
         );
       }
     } else if (targetCountryMismatch) {
+      // 2026-05: country mismatch is a soft signal. We deduct 20 but
+      // do NOT hard-cap the score, so candidates with weak country
+      // evidence (e.g. country=null from missing contact-page probe)
+      // can still pass through if they have strong product+role
+      // signals. The earlier "hard cap at 49" was too aggressive — it
+      // killed 80% of legitimate candidates whose country was simply
+      // not yet verified.
       score -= 20;
       risks.push("Official country evidence does not match the selected target markets");
     } else if (!hasTargetMarketConstraint && hasAny(text, criteria.targetRegions)) {
@@ -2176,6 +2191,29 @@ function shouldHardRejectCandidate(
     return true;
   }
 
+  // 2026-05 P0: fuzzy company-name match. Domain match is not enough —
+  // the seller's reference URL might not match the actual company
+  // domain (e.g. picture: profile lists highcloud.ae but the company
+  // also operates as hctgroup.ae). When the candidate company name
+  // contains a reference customer's name (subject to multi-word and
+  // non-generic constraints), hard-reject.
+  if (
+    criteria.referenceCustomerNames &&
+    criteria.referenceCustomerNames.length > 0 &&
+    candidate.companyName
+  ) {
+    const candidateName = candidate.companyName.toLowerCase();
+    const matched = criteria.referenceCustomerNames.some((refName) => {
+      if (!refNameQualifiesForFuzzyMatch(refName)) {
+        return false;
+      }
+      return candidateName.includes(refName.toLowerCase());
+    });
+    if (matched) {
+      return true;
+    }
+  }
+
   if (nonTargetChinaSupplier) {
     return true;
   }
@@ -2850,6 +2888,66 @@ function isVendorOemDomain(domain: string) {
 function domainMatches(domain: string, expectedDomain: string) {
   const normalized = expectedDomain.replace(/^www\./, "").toLowerCase();
   return Boolean(normalized) && (domain === normalized || domain.endsWith(`.${normalized}`));
+}
+
+// 2026-05 P0: reference-customer fuzzy name match qualifier.
+// A reference name only qualifies for fuzzy matching against candidate
+// company names if it is specific enough to be unambiguous:
+//   1. Multi-word (>= 2 words)
+//   2. Length >= 6 chars
+//   3. After removing generic corporate suffix words (Group, Solutions,
+//      Telecom, Connect, Spectrum, Communications, Company, Corp, Ltd,
+//      LLC, Co), at least one non-generic word remains.
+// Examples:
+//   "HCT Group"           -> qualifies (HCT is non-generic)
+//   "Spectrum MEA"        -> qualifies (MEA is non-generic)
+//   "High Cloud Technologies" -> qualifies
+//   "Spectrum"            -> rejects (single word + generic-only)
+//   "Solutions"           -> rejects (single word + generic-only)
+//   "Telecom Connect"     -> rejects (both words generic)
+function refNameQualifiesForFuzzyMatch(name: string): boolean {
+  const trimmed = name.trim();
+  if (trimmed.length < 6) {
+    return false;
+  }
+  const words = trimmed.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length < 2) {
+    return false;
+  }
+  const genericRefNameWords = new Set([
+    "group",
+    "solutions",
+    "solution",
+    "telecom",
+    "telecoms",
+    "connect",
+    "spectrum",
+    "communications",
+    "communication",
+    "company",
+    "corp",
+    "corporation",
+    "ltd",
+    "limited",
+    "llc",
+    "co",
+    "inc",
+    "international",
+    "global",
+    "tech",
+    "technology",
+    "technologies",
+    "network",
+    "networks",
+    "systems",
+    "system",
+    "services",
+    "service"
+  ]);
+  const nonGenericWords = words.filter(
+    (w) => !genericRefNameWords.has(w.toLowerCase().replace(/[.,&]/g, ""))
+  );
+  return nonGenericWords.length > 0;
 }
 
 function hasProcurementIntent(text: string) {
@@ -4813,7 +4911,32 @@ const blockedMarketplaceDomains = [
   // tycoaquamist.com that are still OEM-controlled, not buyers.
   "tycoaquamist.com",
   "tycofire.com",
-  "tycoint.com"
+  "tycoint.com",
+  // 2026-05 P2: more B2B platforms / aggregator sites that look like
+  // buyer companies but are actually directories or content farms.
+  "tradekey.com",
+  "eworldtrade.com",
+  "famaga.ae",
+  "famaga.com",
+  "famaga.de",
+  "ec21.com",
+  "panjiva.com",
+  "importgenius.com",
+  "tradeatlas.com",
+  // OEM partner-directory pages (Legrand / Atlassian / etc list their
+  // distributors but those are still controlled by the OEM).
+  "partnerdirectory.atlassian.com",
+  "legrand.ng",
+  "legrand.com",
+  // SEO content / "guest blogging" platforms
+  "anselec.com",
+  "linquip.com",
+  "everlastingvalveusa.com",
+  // Mobile phone repair shops (Lane K's "spare parts" keyword pulls
+  // these in; they are not telecom network equipment buyers).
+  "mobilepartsdubai.com",
+  "phonerestore.in",
+  "techycompany.com"
 ];
 
 const hardRejectedDiscoveryDomains = [

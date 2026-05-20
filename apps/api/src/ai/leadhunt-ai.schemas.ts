@@ -45,6 +45,17 @@ export const searchStrategyPlanSchema = z.object({
       confidence: z.number().min(0).max(1).default(0.5)
     })
     .optional(),
+  // 2026-05: keyword pool for Lane K (backend-assembled queries).
+  // GPT outputs raw keyword arrays; the backend combines them into
+  // Brave queries via cartesian product (product × role × country).
+  keywordPool: z
+    .object({
+      productTerms: z.array(z.string().min(1)).default([]),
+      buyerRoles: z.array(z.string().min(1)).default([]),
+      scenarioTerms: z.array(z.string().min(1)).default([]),
+      excludeFromKeywords: z.array(z.string().min(1)).default([])
+    })
+    .optional(),
   productUnderstanding: z
     .object({
       productCategory: z.string().optional(),
