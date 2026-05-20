@@ -1334,47 +1334,35 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   private async executeBraveSearchBatchForTask(
     userId: string,
     taskId: string,
-    input: { limit?: number } = {}
+    input: { limit?: number; slowPlanningPromise?: Promise<unknown> } = {}
   ) {
     if (!this.braveSearchService || !this.leadQualificationService) {
       throw new BadRequestException("Search services are not configured");
     }
 
     const queryLimit = resolveSearchBatchLimit(input.limit);
+    // 2026-05 V1-MVP Step 4: brave_search runner is now a polling loop.
+    // Instead of reading task.searchQueries once at the start (and being
+    // blind to queries appended later by the slow GPT planning phase),
+    // each iteration re-queries the DB for pending queries and atomically
+    // claims one via updateMany WHERE id+pending → running. This lets the
+    // runner consume queries that arrive mid-execution while still
+    // preserving the existing batch-limit behavior (when limit is set).
     const task = await this.prisma.leadTask.findFirst({
       where: { id: taskId, userId },
-      include: {
-        searchQueries: {
-          where: { executionStatus: "pending" },
-          orderBy: { createdAt: "asc" },
-          ...(queryLimit ? { take: queryLimit } : {})
-        }
-      }
+      select: { id: true, inputPayload: true }
     });
 
     if (!task) {
       throw new NotFoundException("Lead task not found");
     }
 
-    if (!task.searchQueries.length) {
-      await this.markStepCompleted(taskId, "brave_search", {
-        executedQueries: 0,
-        resultCount: 0,
-        createdCandidates: 0,
-        skippedCandidates: 0,
-        hasMore: false,
-        remainingQueries: 0
+    const slowPlanningPromise = input.slowPlanningPromise;
+    let slowPlanningSettled = !slowPlanningPromise;
+    if (slowPlanningPromise) {
+      void slowPlanningPromise.finally(() => {
+        slowPlanningSettled = true;
       });
-
-      return {
-        ok: true,
-        executedQueries: 0,
-        resultCount: 0,
-        createdCandidates: 0,
-        skippedCandidates: 0,
-        hasMore: false,
-        remainingQueries: 0
-      };
     }
 
     await this.markStepRunning(taskId, "brave_search");
@@ -1388,9 +1376,61 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
     let usedDevelopmentFallback = false;
     let failedQueries = 0;
+    let processedQueries = 0;
     const searchErrors: Array<{ queryId: string; message: string }> = [];
 
-    for (const query of task.searchQueries) {
+    // Hard timeout to prevent the polling loop from running forever if
+    // slowPlanning never settles or the DB lock-claim contention is
+    // pathological. 10 minutes is well above the worst-case observed
+    // batch time (~7 minutes for 15 Lane K queries).
+    const HARD_TIMEOUT_MS = 10 * 60 * 1000;
+    const POLL_IDLE_INTERVAL_MS = 2_000;
+    const startedAt = Date.now();
+
+    while (true) {
+      if (queryLimit !== undefined && processedQueries >= queryLimit) {
+        break;
+      }
+      if (Date.now() - startedAt > HARD_TIMEOUT_MS) {
+        break;
+      }
+
+      // 1) Find next pending candidate (ordered by createdAt to preserve
+      //    the Lane K → GPT → reverse merge order set up at planning time).
+      const candidate = await this.prisma.searchQuery.findFirst({
+        where: { taskId, executionStatus: "pending" },
+        orderBy: { createdAt: "asc" }
+      });
+
+      if (!candidate) {
+        // No pending query right now. If slow planning is still running,
+        // wait a bit and re-poll — new queries may arrive shortly.
+        if (!slowPlanningSettled) {
+          await new Promise((resolve) => setTimeout(resolve, POLL_IDLE_INTERVAL_MS));
+          continue;
+        }
+        // Slow planning settled and no pending queries — we're done.
+        break;
+      }
+
+      // 2) Atomic claim. updateMany returns count=1 only if the row was
+      //    still pending; if a parallel worker (future scaling) won the
+      //    race, count=0 and we move on to the next candidate.
+      const claimed = await this.prisma.searchQuery.updateMany({
+        where: { id: candidate.id, executionStatus: "pending" },
+        data: {
+          executionStatus: "running",
+          resultCount: 0,
+          qualifiedCount: 0
+        }
+      });
+      if (claimed.count === 0) {
+        continue;
+      }
+
+      const query = candidate;
+      processedQueries += 1;
+      {
       const searchParams = {
         query: query.query,
         country: countryToBraveCode(),
@@ -1415,14 +1455,6 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       let candidateResults: BraveSearchResult[] = [];
 
       try {
-        await this.prisma.searchQuery.update({
-          where: { id: query.id },
-          data: {
-            executionStatus: "running",
-            resultCount: 0,
-            qualifiedCount: 0
-          }
-        });
         const search = await withTimeout(
           this.runSearchWithDevelopmentFallback(query.id, searchParams, query.country),
           PER_QUERY_BRAVE_SEARCH_TIMEOUT_MS,
@@ -1522,12 +1554,13 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         });
       }
       await this.touchRunningTask(taskId);
-    }
+      } // end while-iteration block (was inner for-body)
+    } // end while polling loop
 
     const remainingQueries = await this.countPendingSearchQueries(taskId);
     const hasMore = remainingQueries > 0;
 
-    if (failedQueries === task.searchQueries.length) {
+    if (processedQueries > 0 && failedQueries === processedQueries) {
       await this.markStepFailed(
         taskId,
         "brave_search",
@@ -1536,7 +1569,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
       return {
         ok: false,
-        executedQueries: task.searchQueries.length,
+        executedQueries: processedQueries,
         successfulQueries: 0,
         failedQueries,
         resultCount,
@@ -1550,8 +1583,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     }
 
     const queryStats = await this.aggregateSearchQueryStats(taskId, {
-      executedQueries: task.searchQueries.length,
-      successfulQueries: task.searchQueries.length - failedQueries,
+      executedQueries: processedQueries,
+      successfulQueries: processedQueries - failedQueries,
       failedQueries,
       resultCount,
       hasMore,
@@ -2506,7 +2539,21 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private async buildAiPlanningContext(input: {
+  // 2026-05 V1-MVP Step 2: split planning into fast and slow phases.
+  // Fast phase = product profile + customer profile + expand_keywords.
+  //   These are the inputs Lane K needs. Once fast phase completes,
+  //   we have enough to assemble keyword-combination queries and start
+  //   Brave search immediately.
+  // Slow phase = plan_search_queries (GPT search-strategy generation).
+  //   This is the slowest part (60-180s with refills). It runs in
+  //   parallel with the first batch of Brave searches in the V1-MVP
+  //   concurrent path.
+  // Backwards compatible: buildAiPlanningContext still exists and
+  // produces the same shape as before by calling fast + slow in
+  // series. New code paths can call runFastPlanning + runSlowPlanning
+  // independently.
+
+  private async runFastPlanning(input: {
     taskId?: string;
     input: CreateTaskInput;
     product: {
@@ -2538,7 +2585,15 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     ruleCustomerProfileAnalysis: Record<string, unknown>;
     ruleKeywordGroups: KeywordGroups;
     targetMarkets?: string[];
-  }) {
+  }): Promise<{
+    productProfileAnalysis: Record<string, unknown>;
+    customerProfileAnalysis: Record<string, unknown>;
+    keywordGroups: KeywordGroups;
+    aiKeywordExpansion: KeywordExpansionResult | null;
+    fallbackReasons: string[];
+    channelCustomersRequested: boolean;
+    serviceAvailable: boolean;
+  }> {
     const fallbackReasons: string[] = [];
     let productProfileAnalysis = input.ruleProductProfileAnalysis;
     let customerProfileAnalysis = input.ruleCustomerProfileAnalysis;
@@ -2548,26 +2603,17 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       input.ruleKeywordGroups,
       channelCustomersRequested
     );
-    let searchQueries: PlannedSearchQuery[] = [];
-    let searchPlanKeywordPool: { productTerms: string[]; buyerRoles: string[]; scenarioTerms: string[]; excludeFromKeywords: string[] } | undefined;
     let aiKeywordExpansion: KeywordExpansionResult | null = null;
-    let aiQueryCount = 0;
-    let gptRefillAttempts = 0;
-    let gptRefillAcceptedCount = 0;
-    let rejectedAiQueries: Array<{ query: string; country: string; reason: string }> = [];
 
     if (!this.leadHuntAiService) {
       return {
         productProfileAnalysis,
         customerProfileAnalysis,
         keywordGroups,
-        searchQueries,
-        profileSignals: {
-          enabled: false,
-          querySource: "gpt55_unavailable",
-          fallbackQueryCount: 0,
-          fallbackReasons: ["LeadHuntAiService is required for search planning"]
-        }
+        aiKeywordExpansion,
+        fallbackReasons: ["LeadHuntAiService is required for search planning"],
+        channelCustomersRequested,
+        serviceAvailable: false
       };
     }
 
@@ -2670,6 +2716,68 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
+    return {
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      keywordGroups,
+      aiKeywordExpansion,
+      fallbackReasons,
+      channelCustomersRequested,
+      serviceAvailable: true
+    };
+  }
+
+  private async runSlowPlanning(input: {
+    taskId?: string;
+    fastResult: {
+      productProfileAnalysis: Record<string, unknown>;
+      customerProfileAnalysis: Record<string, unknown>;
+      keywordGroups: KeywordGroups;
+      aiKeywordExpansion: KeywordExpansionResult | null;
+      channelCustomersRequested: boolean;
+    };
+    targetMarkets?: string[];
+  }): Promise<{
+    searchQueries: PlannedSearchQuery[];
+    keywordPool?: {
+      productTerms: string[];
+      buyerRoles: string[];
+      scenarioTerms: string[];
+      excludeFromKeywords: string[];
+    };
+    fallbackReasons: string[];
+    aiQueryCount: number;
+    gptRefillAttempts: number;
+    gptRefillAcceptedCount: number;
+    rejectedAiQueries: Array<{ query: string; country: string; reason: string }>;
+  }> {
+    const fallbackReasons: string[] = [];
+    let searchQueries: PlannedSearchQuery[] = [];
+    let keywordPool: {
+      productTerms: string[];
+      buyerRoles: string[];
+      scenarioTerms: string[];
+      excludeFromKeywords: string[];
+    } | undefined;
+    let aiQueryCount = 0;
+    let gptRefillAttempts = 0;
+    let gptRefillAcceptedCount = 0;
+    let rejectedAiQueries: Array<{ query: string; country: string; reason: string }> = [];
+
+    if (!this.leadHuntAiService) {
+      return {
+        searchQueries,
+        keywordPool,
+        fallbackReasons: ["LeadHuntAiService is required for search-strategy planning"],
+        aiQueryCount,
+        gptRefillAttempts,
+        gptRefillAcceptedCount,
+        rejectedAiQueries
+      };
+    }
+
+    const { productProfileAnalysis, customerProfileAnalysis, keywordGroups, aiKeywordExpansion, channelCustomersRequested } = input.fastResult;
+
     try {
       await this.markOptionalPlanningStepRunning(input.taskId, "plan_search_queries");
       const searchTargetMarkets = input.targetMarkets?.length
@@ -2689,9 +2797,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         SEARCH_STRATEGY_TIMEOUT_MS,
         "GPT-5.5 search strategy generation"
       );
-      // Extract keyword pool for Lane K (backend-assembled queries)
       if (searchPlan.keywordPool) {
-        searchPlanKeywordPool = {
+        keywordPool = {
           productTerms: searchPlan.keywordPool.productTerms ?? [],
           buyerRoles: searchPlan.keywordPool.buyerRoles ?? [],
           scenarioTerms: searchPlan.keywordPool.scenarioTerms ?? [],
@@ -2775,23 +2882,100 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     }
 
     return {
-      productProfileAnalysis,
-      customerProfileAnalysis,
-      keywordGroups,
       searchQueries,
-      // 2026-05: Lane K keyword pool from GPT output. If GPT didn't
-      // produce one (older prompt or failure), the caller falls back to
-      // keywordGroups slices.
-      keywordPool: searchPlanKeywordPool,
+      keywordPool,
+      fallbackReasons,
+      aiQueryCount,
+      gptRefillAttempts,
+      gptRefillAcceptedCount,
+      rejectedAiQueries
+    };
+  }
+
+  private async buildAiPlanningContext(input: {
+    taskId?: string;
+    input: CreateTaskInput;
+    product: {
+      websiteUrl?: string | null;
+      productPageUrl?: string | null;
+      documentUrls?: string[];
+      notes?: string | null;
+    } | null;
+    customer: {
+      targetRegions?: string[];
+      referenceCustomerUrls?: string[];
+      crmSampleIds?: string[];
+      notes?: string | null;
+    } | null;
+    siteEvidence: ProfileSiteEvidence;
+    profileKeywordInput: {
+      taskText: string;
+      productProfileUrls: string[];
+      productProfileNotes?: string;
+      referenceCustomerUrls: string[];
+      crmSampleNames: string[];
+      customerProfileNotes?: string;
+      targetMarkets?: string[];
+      productTerms: string[];
+      customerIntentTerms: string[];
+      scenarioTerms: string[];
+    };
+    ruleProductProfileAnalysis: Record<string, unknown>;
+    ruleCustomerProfileAnalysis: Record<string, unknown>;
+    ruleKeywordGroups: KeywordGroups;
+    targetMarkets?: string[];
+  }) {
+    // 2026-05 V1-MVP Step 2: thin wrapper around runFastPlanning +
+    // runSlowPlanning. Behavior is identical to the pre-refactor
+    // single-method implementation. The two phases are now separable
+    // for the V1-MVP concurrent execution path (see Step 3).
+    const fastResult = await this.runFastPlanning(input);
+
+    if (!fastResult.serviceAvailable) {
+      return {
+        productProfileAnalysis: fastResult.productProfileAnalysis,
+        customerProfileAnalysis: fastResult.customerProfileAnalysis,
+        keywordGroups: fastResult.keywordGroups,
+        searchQueries: [] as PlannedSearchQuery[],
+        keywordPool: undefined,
+        profileSignals: {
+          enabled: false,
+          querySource: "gpt55_unavailable",
+          fallbackQueryCount: 0,
+          fallbackReasons: fastResult.fallbackReasons
+        }
+      };
+    }
+
+    const slowResult = await this.runSlowPlanning({
+      taskId: input.taskId,
+      fastResult: {
+        productProfileAnalysis: fastResult.productProfileAnalysis,
+        customerProfileAnalysis: fastResult.customerProfileAnalysis,
+        keywordGroups: fastResult.keywordGroups,
+        aiKeywordExpansion: fastResult.aiKeywordExpansion,
+        channelCustomersRequested: fastResult.channelCustomersRequested
+      },
+      targetMarkets: input.targetMarkets
+    });
+
+    const fallbackReasons = [...fastResult.fallbackReasons, ...slowResult.fallbackReasons];
+
+    return {
+      productProfileAnalysis: fastResult.productProfileAnalysis,
+      customerProfileAnalysis: fastResult.customerProfileAnalysis,
+      keywordGroups: fastResult.keywordGroups,
+      searchQueries: slowResult.searchQueries,
+      keywordPool: slowResult.keywordPool,
       profileSignals: {
         enabled: true,
-        querySource: aiQueryCount ? "gpt55_only" : "gpt55_failed_or_rejected",
-        gptSearchQueryCount: aiQueryCount,
-        gptRefillAttempts,
-        gptRefillAcceptedCount,
+        querySource: slowResult.aiQueryCount ? "gpt55_only" : "gpt55_failed_or_rejected",
+        gptSearchQueryCount: slowResult.aiQueryCount,
+        gptRefillAttempts: slowResult.gptRefillAttempts,
+        gptRefillAcceptedCount: slowResult.gptRefillAcceptedCount,
         fallbackQueryCount: 0,
-        rejectedQueryCount: rejectedAiQueries.length,
-        rejectedQueries: rejectedAiQueries,
+        rejectedQueryCount: slowResult.rejectedAiQueries.length,
+        rejectedQueries: slowResult.rejectedAiQueries,
         fallbackReasons
       }
     };

@@ -114,8 +114,21 @@ function createPrismaMock() {
       createMany: vi.fn().mockResolvedValue({ count: 15 }),
       deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
       findMany: vi.fn().mockResolvedValue([{ executionStatus: "completed", resultCount: 1 }]),
+      // 2026-05 V1-MVP Step 4: brave_search runner is now a polling
+      // loop that calls findFirst pending → updateMany claim → process.
+      // Default: return one pending query, then null on subsequent calls.
+      findFirst: vi
+        .fn()
+        .mockResolvedValueOnce({
+          id: "query-1",
+          query: "telecom equipment distributor UAE",
+          country: "UAE",
+          createdAt: new Date("2026-04-30T01:00:00.000Z")
+        })
+        .mockResolvedValue(null),
       update: vi.fn().mockResolvedValue({}),
-      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      // claim returns count=1 by default (atomic claim succeeds)
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       count: vi.fn().mockResolvedValue(0)
     },
     agentStep: {
@@ -1547,6 +1560,19 @@ describe("AgentWorkflowService", () => {
         }
       ]
     });
+    // 2026-05 V1-MVP Step 4: polling runner reads pending queries via
+    // searchQuery.findFirst, not leadTask.findFirst include. Mirror
+    // the per-test override here so the polling loop sees one pending
+    // query with country=Oman, then null.
+    prisma.searchQuery.findFirst
+      .mockReset()
+      .mockResolvedValueOnce({
+        id: "query-1",
+        query: "telecom contractor Oman contact",
+        country: "Oman",
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      })
+      .mockResolvedValue(null);
     const braveSearch = createBraveSearchMock();
     const leadQualification = createLeadQualificationMock();
     const service = new AgentWorkflowService(
@@ -1697,6 +1723,24 @@ describe("AgentWorkflowService", () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
     const leadQualification = createLeadQualificationMock();
+    // 2026-05 V1-MVP Step 4: polling runner. With no limit, the loop
+    // should drain all pending queries — simulate two pending then
+    // null to terminate. Both queries should be processed.
+    prisma.searchQuery.findFirst
+      .mockReset()
+      .mockResolvedValueOnce({
+        id: "query-1",
+        query: "telecom equipment distributor UAE",
+        country: "UAE",
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      })
+      .mockResolvedValueOnce({
+        id: "query-2",
+        query: "RRU stockist UAE",
+        country: "UAE",
+        createdAt: new Date("2026-04-30T01:00:01.000Z")
+      })
+      .mockResolvedValue(null);
     const service = new AgentWorkflowService(
       prisma as any,
       braveSearch as any,
@@ -1705,15 +1749,8 @@ describe("AgentWorkflowService", () => {
 
     await service.executeBraveSearchForTask("user-1", "task-1");
 
-    expect(prisma.leadTask.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        include: {
-          searchQueries: expect.not.objectContaining({
-            take: expect.any(Number)
-          })
-        }
-      })
-    );
+    // Both queries processed — searchAndSaveResults called twice.
+    expect(braveSearch.searchAndSaveResults).toHaveBeenCalledTimes(2);
   });
 
   it("requests and processes up to 20 Brave results per query", async () => {

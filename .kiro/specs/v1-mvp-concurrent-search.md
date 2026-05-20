@@ -50,6 +50,26 @@ runAutonomousLeadDiscovery
 
 ## 实施步骤（剩余 Step 2-6）
 
+### 实施顺序（修正版）
+
+**重要**：原本写"Step 2+3 一起做"是错的。Step 3 让 brave_search 并发启动 + slowPlanning 后台跑，但 brave_search 是一次性读取 `task.searchQueries`，**没 Step 4 的 polling runner，slowPlanning 后追加的 GPT query 不会被消费**。
+
+**正确顺序**：
+
+```
+阶段 1: Step 2     拆 fastPlanning/slowPlanning（结构拆开，行为不变）
+                   验证：现有 214 测试不破
+↓
+阶段 2: Step 4     brave_search 改 polling + 原子 claim（可动态消费 pending）
+                   验证：行为等价
+↓
+阶段 3: Step 3+5   并发启动 + dedupe 追加（真正用户加速）
+                   验证：brave_search.startedAt < plan_search_queries.completedAt
+↓
+阶段 4: Step 6+7   失败兜底 + 测试
+                   验证：5 条验收标准
+```
+
 ### Step 2: 拆 buildAiPlanningContext
 
 **文件**：`apps/api/src/agent/agent-workflow.service.ts`
