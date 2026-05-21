@@ -1548,17 +1548,41 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       // workers from both passing the limit check then both succeeding
       // in claiming and going over budget.
       claimedCount: 0,
+      // lastProgressAt: timestamp of the most recent successful claim
+      // or processed query. Used by the idle-timeout watchdog so we
+      // don't kill a healthy long-running task that is still making
+      // forward progress.
+      lastProgressAt: Date.now(),
       searchErrors: [] as Array<{ queryId: string; message: string }>
     };
 
-    const HARD_TIMEOUT_MS = 10 * 60 * 1000;
+    // 2026-05 V1-MVP+: timeout strategy.
+    //   - The legacy outer `while (hasMore)` loop was removed in this
+    //     refactor, so executeBraveSearchBatchForTask must now drain
+    //     the entire pending queue in a single call.
+    //   - A flat 10min total cap would prematurely truncate normal
+    //     tasks (V1-MVP target is 14-17min). Replaced with a 60min
+    //     emergency cap as a process safety net only.
+    //   - The real protection against "slowPlanning never settles" or
+    //     "all workers stuck on a poison query" is the IDLE timeout:
+    //     if there has been no forward progress (no claim, no processed
+    //     query) for IDLE_TIMEOUT_MS, the workers exit. This catches
+    //     the genuinely stuck cases without killing healthy tasks.
+    const EMERGENCY_TIMEOUT_MS = 60 * 60 * 1000; // 60min hard cap
+    const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10min no-progress
     const POLL_IDLE_INTERVAL_MS = 2_000;
     const startedAt = Date.now();
     const concurrency = resolveSearchQueryConcurrency();
 
     const worker = async (): Promise<void> => {
       while (true) {
-        if (Date.now() - startedAt > HARD_TIMEOUT_MS) {
+        if (Date.now() - startedAt > EMERGENCY_TIMEOUT_MS) {
+          return;
+        }
+        if (Date.now() - stats.lastProgressAt > IDLE_TIMEOUT_MS) {
+          // No claim and no processed query for IDLE_TIMEOUT_MS.
+          // Either slowPlanning is hung or all workers are wedged on
+          // a poison input — give up rather than spin forever.
           return;
         }
         if (queryLimit !== undefined && stats.claimedCount >= queryLimit) {
@@ -1609,20 +1633,51 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
+        // Successful claim: reset the idle clock.
+        stats.lastProgressAt = Date.now();
         stats.processedQueries += 1;
         await this.processClaimedSearchQuery(taskId, candidate, {
           criteria,
           candidateAiEvaluator,
           stats
         });
+        // Reset again after processing finishes (long process times
+        // shouldn't trip idle timeout on the next iteration).
+        stats.lastProgressAt = Date.now();
         await this.touchRunningTask(taskId);
       }
     };
 
-    // Spawn N workers and wait for all to finish. allSettled used so
-    // one worker throwing doesn't abort the others mid-flight.
+    // 2026-05 V1-MVP+ P1 fix: Promise.allSettled silently swallows
+    // worker rejections. We capture rejections and surface them in
+    // searchErrors so they show up in the agent_step output instead
+    // of vanishing. We also re-check for stale "running" queries
+    // afterward — if a worker died mid-processing, its claimed query
+    // would be stuck in "running" forever otherwise.
     const workers = Array.from({ length: concurrency }, () => worker());
-    await Promise.allSettled(workers);
+    const settled = await Promise.allSettled(workers);
+    for (let i = 0; i < settled.length; i++) {
+      const result = settled[i]!;
+      if (result.status === "rejected") {
+        stats.searchErrors.push({
+          queryId: `worker-${i}`,
+          message: `worker crashed: ${searchErrorMessage(result.reason)}`
+        });
+      }
+    }
+
+    // Reset any "running" queries left over by crashed/timeout workers
+    // so a later batch (or the recovery path) can re-claim them.
+    const stillRunning = await this.prisma.searchQuery.updateMany({
+      where: { taskId, executionStatus: "running" },
+      data: { executionStatus: "pending" }
+    });
+    if (stillRunning.count > 0) {
+      stats.searchErrors.push({
+        queryId: "*",
+        message: `${stillRunning.count} queries left in running state by worker pool exit (reset to pending)`
+      });
+    }
 
     const remainingQueries = await this.countPendingSearchQueries(taskId);
     const hasMore = remainingQueries > 0;

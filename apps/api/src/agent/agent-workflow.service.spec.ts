@@ -127,8 +127,17 @@ function createPrismaMock() {
         })
         .mockResolvedValue(null),
       update: vi.fn().mockResolvedValue({}),
-      // claim returns count=1 by default (atomic claim succeeds)
-      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      // updateMany: claim path (where.executionStatus === "pending")
+      // returns count=1 by default. Cleanup path
+      // (where.executionStatus === "running", used by the worker pool
+      // to reset stale running queries) returns count=0 — no leftover
+      // running queries in the default test fixture.
+      updateMany: vi.fn().mockImplementation(async ({ where }: any) => {
+        if (where?.executionStatus === "running") {
+          return { count: 0 };
+        }
+        return { count: 1 };
+      }),
       count: vi.fn().mockResolvedValue(0)
     },
     agentStep: {
@@ -2109,6 +2118,8 @@ describe("AgentWorkflowService", () => {
 
       // updateMany simulates atomic claim. The first worker to call
       // wins; subsequent calls for the same id return count=0.
+      // Cleanup path (executionStatus="running") returns count=0
+      // because in this mock, the worker pool finishes cleanly.
       prisma.searchQuery.updateMany = vi
         .fn()
         .mockImplementation(async ({ where, data }: any) => {
@@ -2116,6 +2127,10 @@ describe("AgentWorkflowService", () => {
             if (claimedSet.has(where.id)) return { count: 0 };
             claimedSet.add(where.id);
             return { count: 1 };
+          }
+          if (where?.executionStatus === "running") {
+            // No leftover running queries in this mock.
+            return { count: 0 };
           }
           return { count: 1 };
         });
@@ -2219,6 +2234,61 @@ describe("AgentWorkflowService", () => {
       );
       expect(seenIds.size).toBe(12); // exactly 12 unique queries
       expect(braveSearch.searchAndSaveResults).toHaveBeenCalledTimes(12);
+    });
+
+    // 2026-05 V1-MVP+ P0 fix: idle timeout (not total cap) governs
+    // worker exit. A long but progressing task must NOT be truncated
+    // at 10min. A truly stuck task (no claim, no progress) is still
+    // killed by the IDLE_TIMEOUT_MS watchdog.
+    it("processes all queries even when total elapsed time would exceed the legacy 10min cap", async () => {
+      // We can't actually wait 10min in a unit test. Instead we verify
+      // the EMERGENCY cap is at least 30min (a safe upper bound). This
+      // is a structural guard that catches regressions where someone
+      // re-introduces a 10min total cap.
+      const sourceText = (await import("node:fs")).readFileSync(
+        new URL("./agent-workflow.service.ts", import.meta.url),
+        "utf-8"
+      );
+      // EMERGENCY_TIMEOUT_MS must be >= 30min; IDLE_TIMEOUT_MS may be
+      // smaller but should not be the sole termination mechanism.
+      const emergencyMatch = sourceText.match(/EMERGENCY_TIMEOUT_MS\s*=\s*(\d+)\s*\*\s*(\d+)\s*\*\s*(\d+)/);
+      expect(emergencyMatch).not.toBeNull();
+      const emergencyMs =
+        Number(emergencyMatch![1]) * Number(emergencyMatch![2]) * Number(emergencyMatch![3]);
+      expect(emergencyMs).toBeGreaterThanOrEqual(30 * 60 * 1000);
+    });
+
+    // 2026-05 V1-MVP+ P1 fix: stale running queries left by crashed
+    // workers must be reset to pending so a later pass (or recovery)
+    // can re-claim them. Verify the worker pool calls updateMany with
+    // {executionStatus:"running"} → {executionStatus:"pending"} after
+    // the workers finish.
+    it("resets stale running queries to pending after workers exit", async () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "2";
+      const queries = [
+        { id: "q-1", query: "k1", country: "UAE" },
+        { id: "q-2", query: "k2", country: "UAE" }
+      ];
+      const { prisma } = makePoolPrismaMock(queries);
+      const braveSearch = createBraveSearchMock();
+      const leadQualification = createLeadQualificationMock();
+      const service = new AgentWorkflowService(
+        prisma as any,
+        braveSearch as any,
+        leadQualification as any
+      );
+
+      await service.executeBraveSearchForTask("user-1", "task-1");
+
+      // The worker pool must call updateMany with the cleanup pattern
+      // (where.executionStatus === "running", data.executionStatus ===
+      // "pending") at least once after the workers finish.
+      const cleanupCall = prisma.searchQuery.updateMany.mock.calls.find(
+        ([args]: any[]) =>
+          args?.where?.executionStatus === "running" &&
+          args?.data?.executionStatus === "pending"
+      );
+      expect(cleanupCall).toBeDefined();
     });
   });
 });
