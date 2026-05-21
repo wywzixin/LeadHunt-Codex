@@ -1713,6 +1713,36 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       remainingQueries
     });
 
+    // 2026-05 V1-MVP+ P1: if the worker pool exited with pending
+    // queries remaining AND no queryLimit was set (meaning this was
+    // the autonomous "drain everything" path), something went wrong
+    // (idle timeout, emergency timeout, or worker crash). We must NOT
+    // mark brave_search as completed — the task is incomplete.
+    //
+    // When queryLimit IS set (manual/test batch path), hasMore=true
+    // is expected and ok=true is correct — the caller knows it only
+    // asked for a partial batch.
+    if (hasMore && queryLimit === undefined) {
+      const errorMsg = stats.searchErrors.length
+        ? stats.searchErrors.map((e) => e.message).join("; ")
+        : `Worker pool exited with ${remainingQueries} pending queries (idle/emergency timeout or crash)`;
+      await this.markStepFailed(taskId, "brave_search", errorMsg);
+
+      return {
+        ok: false,
+        executedQueries: queryStats.executedQueries,
+        successfulQueries: queryStats.successfulQueries,
+        failedQueries: queryStats.failedQueries,
+        resultCount: queryStats.resultCount,
+        createdCandidates: stats.createdCandidates,
+        skippedCandidates: stats.skippedCandidates,
+        fallback: stats.usedDevelopmentFallback,
+        errors: stats.searchErrors,
+        hasMore,
+        remainingQueries
+      };
+    }
+
     await this.markStepCompleted(taskId, "brave_search", {
       executedQueries: queryStats.executedQueries,
       successfulQueries: queryStats.successfulQueries,

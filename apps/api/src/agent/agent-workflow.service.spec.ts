@@ -2236,7 +2236,7 @@ describe("AgentWorkflowService", () => {
       expect(braveSearch.searchAndSaveResults).toHaveBeenCalledTimes(12);
     });
 
-    // 2026-05 V1-MVP+ P0 fix: idle timeout (not total cap) governs
+    // 2026-05 V1-MVP+ P1 fix: idle timeout (not total cap) governs
     // worker exit. A long but progressing task must NOT be truncated
     // at 10min. A truly stuck task (no claim, no progress) is still
     // killed by the IDLE_TIMEOUT_MS watchdog.
@@ -2256,6 +2256,102 @@ describe("AgentWorkflowService", () => {
       const emergencyMs =
         Number(emergencyMatch![1]) * Number(emergencyMatch![2]) * Number(emergencyMatch![3]);
       expect(emergencyMs).toBeGreaterThanOrEqual(30 * 60 * 1000);
+    });
+
+    // 2026-05 V1-MVP+ P1: remainingQueries > 0 semantics.
+    // When queryLimit is NOT set (autonomous path) and pending queries
+    // remain after the worker pool exits, the result must be ok=false
+    // and brave_search must NOT be marked completed.
+    it("returns ok=false when autonomous path exits with pending queries remaining", async () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "2";
+      // Set up 5 queries but make findFirst only return 2 then null
+      // (simulating idle timeout — slow planning settled but queries
+      // were never inserted, or workers crashed).
+      const prisma = createPrismaMock();
+      let callCount = 0;
+      prisma.searchQuery.findFirst = vi.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount <= 2) {
+          return { id: `q-${callCount}`, query: `kw ${callCount}`, country: "UAE", createdAt: new Date() };
+        }
+        return null;
+      });
+      prisma.searchQuery.updateMany = vi.fn().mockImplementation(async ({ where }: any) => {
+        if (where?.executionStatus === "running") return { count: 0 };
+        return { count: 1 };
+      });
+      // After workers exit, countPendingSearchQueries returns 3
+      // (simulating 3 queries that were never claimed).
+      prisma.searchQuery.count = vi.fn().mockResolvedValue(3);
+      prisma.searchQuery.findMany = vi.fn().mockResolvedValue([
+        { executionStatus: "completed", resultCount: 1 },
+        { executionStatus: "completed", resultCount: 1 },
+        { executionStatus: "pending", resultCount: 0 },
+        { executionStatus: "pending", resultCount: 0 },
+        { executionStatus: "pending", resultCount: 0 }
+      ]);
+      const braveSearch = createBraveSearchMock();
+      const leadQualification = createLeadQualificationMock();
+      const service = new AgentWorkflowService(
+        prisma as any,
+        braveSearch as any,
+        leadQualification as any
+      );
+
+      // No queryLimit → autonomous path. Should return ok=false.
+      const result = await service.executeBraveSearchForTask("user-1", "task-1");
+
+      expect(result.ok).toBe(false);
+      expect(result.hasMore).toBe(true);
+      expect(result.remainingQueries).toBe(3);
+      // brave_search should be marked FAILED, not completed.
+      expect(prisma.agentStep.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { taskId: "task-1", nodeName: "brave_search" },
+          data: expect.objectContaining({ status: "failed" })
+        })
+      );
+    });
+
+    // When queryLimit IS set (batch path), hasMore=true is expected
+    // and ok=true is correct.
+    it("returns ok=true with hasMore when queryLimit is set and pending remain", async () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "2";
+      const queries = Array.from({ length: 8 }, (_, i) => ({
+        id: `q-${i + 1}`,
+        query: `keyword ${i + 1}`,
+        country: "UAE"
+      }));
+      const { prisma } = makePoolPrismaMock(queries);
+      // After limit=3 is consumed, countPendingSearchQueries returns 5.
+      prisma.searchQuery.count = vi.fn().mockResolvedValue(5);
+      // aggregateSearchQueryStats also calls findMany — include pending
+      // entries so it computes hasMore=true.
+      prisma.searchQuery.findMany = vi.fn().mockResolvedValue([
+        { executionStatus: "completed", resultCount: 1 },
+        { executionStatus: "completed", resultCount: 1 },
+        { executionStatus: "completed", resultCount: 1 },
+        { executionStatus: "pending", resultCount: 0 },
+        { executionStatus: "pending", resultCount: 0 },
+        { executionStatus: "pending", resultCount: 0 },
+        { executionStatus: "pending", resultCount: 0 },
+        { executionStatus: "pending", resultCount: 0 }
+      ]);
+      const braveSearch = createBraveSearchMock();
+      const leadQualification = createLeadQualificationMock();
+      const service = new AgentWorkflowService(
+        prisma as any,
+        braveSearch as any,
+        leadQualification as any
+      );
+
+      const result = await service.executeBraveSearchForTask("user-1", "task-1", {
+        limit: 3
+      });
+
+      // With queryLimit set, hasMore=true is expected, ok=true.
+      expect(result.ok).toBe(true);
+      expect(result.hasMore).toBe(true);
     });
 
     // 2026-05 V1-MVP+ P1 fix: stale running queries left by crashed
