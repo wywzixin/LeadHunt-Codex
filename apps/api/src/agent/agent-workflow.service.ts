@@ -167,6 +167,25 @@ const FIRST_STAGE_SEARCH_QUERY_LIMIT = 15;
 // 2026-05: Lane K default query count. First batch targets 16-18 Lane K
 // queries; continue-search batches can increase this to 24-28.
 const LANE_K_DEFAULT_QUERY_COUNT = 20;
+// 2026-05 V1-MVP+: query-level worker pool concurrency. Default 3 means
+// up to 3 search queries are processed in parallel. JS is single-threaded
+// but the per-query work spends most of its time in Brave HTTP, contact
+// page probes, AI evaluator, and DB writes — all I/O bound. Running 3
+// concurrently overlaps these waits.
+//
+// Why 3 by default:
+//   - Brave SDK has minIntervalMs=1000 internal mutex, so >3 workers
+//     don't gain much on the Brave HTTP stage anyway.
+//   - GPT-5.5 candidate evaluator gets ~3x concurrent calls; safe for
+//     self-hosted endpoint.
+//   - Contact-page probe uses fetch — 3 concurrent batches = up to 60
+//     simultaneous fetches (3 workers × ~20 candidates), within reason.
+//   - DB connection pool has headroom for 3 concurrent updates.
+//
+// Configurable via LEADHUNT_SEARCH_QUERY_CONCURRENCY (1..5).
+const SEARCH_QUERY_CONCURRENCY_DEFAULT = 3;
+const SEARCH_QUERY_CONCURRENCY_MIN = 1;
+const SEARCH_QUERY_CONCURRENCY_MAX = 5;
 const RUNNING_TASK_RECOVERY_LIMIT = 5;
 const RUNNING_TASK_RECOVERY_WINDOW_HOURS = 24;
 const LANGGRAPH_CHECKPOINT_STORE_VALUES = ["memory", "postgres"] as const;
@@ -739,7 +758,6 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
       await this.resetStaleRunningSearchQueries(taskId);
       let searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, {
-        limit: FIRST_STAGE_SEARCH_QUERY_LIMIT,
         slowPlanningPromise: slowPromise
       });
       let qualityGateOutput: Record<string, unknown> | null = null;
@@ -777,22 +795,10 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         });
       }
 
-      while (searchResult.hasMore) {
-        searchResult = await this.executeBraveSearchBatchForTask(userId, taskId, {
-          limit: FIRST_STAGE_SEARCH_QUERY_LIMIT,
-          slowPlanningPromise: slowPromise
-        });
-        if (!searchResult.ok) {
-          if (slowPromise) {
-            await slowPromise.catch(() => {});
-          }
-          await this.prisma.leadTask.update({
-            where: { id: taskId },
-            data: { status: "failed" }
-          });
-          return;
-        }
-      }
+      // 2026-05 V1-MVP+: worker pool consumes the entire pending queue
+      // in a single executeBraveSearchBatchForTask call. The polling
+      // loop inside the workers handles slow-planning appended queries.
+      // The legacy outer while(hasMore) loop is no longer needed.
       if (qualityGateOutput) {
         await this.markStepCompleted(taskId, "brave_search", {
           ...searchResult,
@@ -1493,12 +1499,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
     const queryLimit = resolveSearchBatchLimit(input.limit);
     // 2026-05 V1-MVP Step 4: brave_search runner is now a polling loop.
-    // Instead of reading task.searchQueries once at the start (and being
-    // blind to queries appended later by the slow GPT planning phase),
-    // each iteration re-queries the DB for pending queries and atomically
-    // claims one via updateMany WHERE id+pending → running. This lets the
-    // runner consume queries that arrive mid-execution while still
-    // preserving the existing batch-limit behavior (when limit is set).
+    // 2026-05 V1-MVP+: extended to a worker pool of N concurrent
+    // workers (default 3, configurable via LEADHUNT_SEARCH_QUERY_CONCURRENCY).
+    // Each worker independently claims pending queries via the same
+    // atomic `updateMany WHERE id+pending → running` strategy. JS is
+    // single-threaded so the shared counters are safe for simple
+    // arithmetic; queryLimit needs special care to avoid over-claim.
     const task = await this.prisma.leadTask.findFirst({
       where: { id: taskId, userId },
       select: { id: true, inputPayload: true }
@@ -1516,228 +1522,138 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
+    // markStepRunning is called ONCE before the worker pool starts.
+    // Subsequent worker activity does not re-touch the agent_step row,
+    // so startedAt and ended_at remain accurate.
     await this.markStepRunning(taskId, "brave_search");
     await this.touchRunningTask(taskId);
+
     const payload = parseTaskPayload(task.inputPayload);
     const criteria = buildIcpCriteria(payload);
     const candidateAiEvaluator = this.createCandidateAiEvaluator(payload);
-    let resultCount = 0;
-    let createdCandidates = 0;
-    let skippedCandidates = 0;
 
-    let usedDevelopmentFallback = false;
-    let failedQueries = 0;
-    let processedQueries = 0;
-    const searchErrors: Array<{ queryId: string; message: string }> = [];
+    // Shared mutable counters. JS event-loop single-threaded mutation
+    // is safe; only queryLimit gating needs an extra check pattern
+    // (claimedCount preincrement + rollback on race loss).
+    const stats = {
+      resultCount: 0,
+      createdCandidates: 0,
+      skippedCandidates: 0,
+      usedDevelopmentFallback: false,
+      failedQueries: 0,
+      processedQueries: 0,
+      // claimedCount: incremented BEFORE attempting DB claim to enforce
+      // queryLimit budget across workers; rolled back if the claim
+      // loses the race (count=0 from updateMany). This prevents two
+      // workers from both passing the limit check then both succeeding
+      // in claiming and going over budget.
+      claimedCount: 0,
+      searchErrors: [] as Array<{ queryId: string; message: string }>
+    };
 
-    // Hard timeout to prevent the polling loop from running forever if
-    // slowPlanning never settles or the DB lock-claim contention is
-    // pathological. 10 minutes is well above the worst-case observed
-    // batch time (~7 minutes for 15 Lane K queries).
     const HARD_TIMEOUT_MS = 10 * 60 * 1000;
     const POLL_IDLE_INTERVAL_MS = 2_000;
     const startedAt = Date.now();
+    const concurrency = resolveSearchQueryConcurrency();
 
-    while (true) {
-      if (queryLimit !== undefined && processedQueries >= queryLimit) {
-        break;
-      }
-      if (Date.now() - startedAt > HARD_TIMEOUT_MS) {
-        break;
-      }
-
-      // 1) Find next pending candidate (ordered by createdAt to preserve
-      //    the Lane K → GPT → reverse merge order set up at planning time).
-      const candidate = await this.prisma.searchQuery.findFirst({
-        where: { taskId, executionStatus: "pending" },
-        orderBy: { createdAt: "asc" }
-      });
-
-      if (!candidate) {
-        // No pending query right now. If slow planning is still running,
-        // wait a bit and re-poll — new queries may arrive shortly.
-        if (!slowPlanningSettled) {
-          await new Promise((resolve) => setTimeout(resolve, POLL_IDLE_INTERVAL_MS));
-          continue;
+    const worker = async (): Promise<void> => {
+      while (true) {
+        if (Date.now() - startedAt > HARD_TIMEOUT_MS) {
+          return;
         }
-        // Slow planning settled and no pending queries — we're done.
-        break;
-      }
-
-      // 2) Atomic claim. updateMany returns count=1 only if the row was
-      //    still pending; if a parallel worker (future scaling) won the
-      //    race, count=0 and we move on to the next candidate.
-      const claimed = await this.prisma.searchQuery.updateMany({
-        where: { id: candidate.id, executionStatus: "pending" },
-        data: {
-          executionStatus: "running",
-          resultCount: 0,
-          qualifiedCount: 0
+        if (queryLimit !== undefined && stats.claimedCount >= queryLimit) {
+          return;
         }
-      });
-      if (claimed.count === 0) {
-        continue;
-      }
 
-      const query = candidate;
-      processedQueries += 1;
-      {
-      const searchParams = {
-        query: query.query,
-        country: countryToBraveCode(),
-        language: "en",
-        count: 20
-      };
-
-      // 2026-05 P0: state machine decoupling. Brave search and
-      // saveCandidates are now tracked separately:
-      //   - Brave failure → query.executionStatus = "failed", resultCount = 0
-      //   - Brave success + saveCandidates failure → query.executionStatus = "completed"
-      //     with resultCount preserved (Brave hits are still useful evidence
-      //     and were already saved to search_results table). Only the
-      //     candidate enrichment step failed, which we record as a soft
-      //     warning rather than a query-level failure.
-      // Previously a single try/catch around both calls would mark the
-      // query failed and clear resultCount, hiding 240+ Brave hits per
-      // task as if Brave had failed when it had actually succeeded.
-      let searchSucceeded = false;
-      let searchCount = 0;
-      let braveFallback = false;
-      let candidateResults: BraveSearchResult[] = [];
-
-      try {
-        const search = await withTimeout(
-          this.runSearchWithDevelopmentFallback(query.id, searchParams, query.country),
-          PER_QUERY_BRAVE_SEARCH_TIMEOUT_MS,
-          `Brave search query ${query.id.slice(0, 8)}`
-        );
-        searchSucceeded = true;
-        searchCount = search.count;
-        braveFallback = search.fallback;
-        candidateResults = search.results.slice(0, MAX_CANDIDATE_RESULTS_PER_QUERY);
-        // Brave search succeeded — persist resultCount immediately so
-        // the value is preserved even if saveCandidates blows up later.
-        await this.prisma.searchQuery.update({
-          where: { id: query.id },
-          data: { resultCount: searchCount }
+        // Find next pending candidate (createdAt order preserves
+        // Lane K → reverse → GPT planning order).
+        const candidate = await this.prisma.searchQuery.findFirst({
+          where: { taskId, executionStatus: "pending" },
+          orderBy: { createdAt: "asc" }
         });
-      } catch (error) {
-        failedQueries += 1;
-        searchErrors.push({ queryId: query.id, message: searchErrorMessage(error) });
-        await this.prisma.searchQuery.update({
-          where: { id: query.id },
+
+        if (!candidate) {
+          if (!slowPlanningSettled) {
+            await new Promise((resolve) => setTimeout(resolve, POLL_IDLE_INTERVAL_MS));
+            continue;
+          }
+          // No pending and slow planning settled — but other workers
+          // may still be processing claimed queries. We're done with
+          // this worker; the outer Promise.allSettled waits for them.
+          return;
+        }
+
+        // Reserve a slot in the global budget BEFORE the DB claim.
+        // If the claim later loses the race, we decrement.
+        if (queryLimit !== undefined) {
+          if (stats.claimedCount >= queryLimit) {
+            return;
+          }
+          stats.claimedCount += 1;
+        } else {
+          stats.claimedCount += 1;
+        }
+
+        const claimed = await this.prisma.searchQuery.updateMany({
+          where: { id: candidate.id, executionStatus: "pending" },
           data: {
-            executionStatus: "failed",
+            executionStatus: "running",
             resultCount: 0,
             qualifiedCount: 0
           }
         });
-        await this.touchRunningTask(taskId);
-        continue;
-      }
+        if (claimed.count === 0) {
+          // Race lost — another worker took it. Rollback the budget
+          // reservation and try again.
+          stats.claimedCount -= 1;
+          continue;
+        }
 
-      // Brave succeeded — now try saveCandidates. Failure here does NOT
-      // mark the query as failed; it stays "completed" with the Brave
-      // resultCount preserved.
-      try {
-        const saved = candidateAiEvaluator
-          ? await withTimeout(
-              this.leadQualificationService.saveCandidates(
-                taskId,
-                candidateResults,
-                criteria,
-                query.country ?? undefined,
-                candidateAiEvaluator
-              ),
-              PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS,
-              `Save candidates for query ${query.id.slice(0, 8)}`
-            )
-          : await withTimeout(
-              this.leadQualificationService.saveCandidates(
-                taskId,
-                candidateResults,
-                criteria,
-                query.country ?? undefined
-              ),
-              PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS,
-              `Save candidates for query ${query.id.slice(0, 8)}`
-            );
-        usedDevelopmentFallback ||= braveFallback;
-        resultCount += searchCount;
-        createdCandidates += saved.createdCount;
-        skippedCandidates += saved.skippedCount;
-        // 2026-05 P0: qualifiedCount semantics fixed. Previously this
-        // field stored saved.createdCount (count of NEWLY created
-        // candidates, regardless of their qualification status), which
-        // misled the UI and self-improvement signals. Now it stores
-        // the count of candidates that actually reached qualified
-        // status — which is what the UI label and the agent's
-        // axis-rotation feedback loop should learn from.
-        const qualifiedFromThisQuery = saved.candidates.filter(
-          (c: { status?: string | null }) => c.status === "qualified"
-        ).length;
-        await this.prisma.searchQuery.update({
-          where: { id: query.id },
-          data: {
-            executionStatus: "completed",
-            resultCount: searchCount,
-            qualifiedCount: qualifiedFromThisQuery
-          }
+        stats.processedQueries += 1;
+        await this.processClaimedSearchQuery(taskId, candidate, {
+          criteria,
+          candidateAiEvaluator,
+          stats
         });
-      } catch (saveError) {
-        // Brave succeeded; saveCandidates failed (timeout, DB error,
-        // or contact-probe stall). Keep the query as completed with
-        // resultCount preserved so downstream lane analytics can still
-        // see Brave hit it. Surface the error to searchErrors but do
-        // NOT increment failedQueries (we don't want this to count
-        // toward "all Brave failed" task abort logic).
-        searchErrors.push({
-          queryId: query.id,
-          message: `saveCandidates failed: ${searchErrorMessage(saveError)}`
-        });
-        await this.prisma.searchQuery.update({
-          where: { id: query.id },
-          data: {
-            executionStatus: "completed",
-            resultCount: searchCount,
-            qualifiedCount: 0
-          }
-        });
+        await this.touchRunningTask(taskId);
       }
-      await this.touchRunningTask(taskId);
-      } // end while-iteration block (was inner for-body)
-    } // end while polling loop
+    };
+
+    // Spawn N workers and wait for all to finish. allSettled used so
+    // one worker throwing doesn't abort the others mid-flight.
+    const workers = Array.from({ length: concurrency }, () => worker());
+    await Promise.allSettled(workers);
 
     const remainingQueries = await this.countPendingSearchQueries(taskId);
     const hasMore = remainingQueries > 0;
 
-    if (processedQueries > 0 && failedQueries === processedQueries) {
+    if (stats.processedQueries > 0 && stats.failedQueries === stats.processedQueries) {
       await this.markStepFailed(
         taskId,
         "brave_search",
-        searchErrors[0]?.message ?? "All Brave searches failed"
+        stats.searchErrors[0]?.message ?? "All Brave searches failed"
       );
 
       return {
         ok: false,
-        executedQueries: processedQueries,
+        executedQueries: stats.processedQueries,
         successfulQueries: 0,
-        failedQueries,
-        resultCount,
-        createdCandidates,
-        skippedCandidates,
-        fallback: usedDevelopmentFallback,
-        errors: searchErrors,
+        failedQueries: stats.failedQueries,
+        resultCount: stats.resultCount,
+        createdCandidates: stats.createdCandidates,
+        skippedCandidates: stats.skippedCandidates,
+        fallback: stats.usedDevelopmentFallback,
+        errors: stats.searchErrors,
         hasMore,
         remainingQueries
       };
     }
 
     const queryStats = await this.aggregateSearchQueryStats(taskId, {
-      executedQueries: processedQueries,
-      successfulQueries: processedQueries - failedQueries,
-      failedQueries,
-      resultCount,
+      executedQueries: stats.processedQueries,
+      successfulQueries: stats.processedQueries - stats.failedQueries,
+      failedQueries: stats.failedQueries,
+      resultCount: stats.resultCount,
       hasMore,
       remainingQueries
     });
@@ -1747,19 +1663,19 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       successfulQueries: queryStats.successfulQueries,
       failedQueries: queryStats.failedQueries,
       resultCount: queryStats.resultCount,
-      fallback: usedDevelopmentFallback,
+      fallback: stats.usedDevelopmentFallback,
       hasMore: queryStats.hasMore,
       remainingQueries: queryStats.remainingQueries
     });
     await this.markStepCompleted(taskId, "normalize_leads", {
-      createdCandidates,
-      skippedCandidates
+      createdCandidates: stats.createdCandidates,
+      skippedCandidates: stats.skippedCandidates
     });
     await this.markStepCompleted(taskId, "extract_contacts", {
-      createdCandidates
+      createdCandidates: stats.createdCandidates
     });
     await this.markStepCompleted(taskId, "score_icp", {
-      createdCandidates
+      createdCandidates: stats.createdCandidates
     });
 
     return {
@@ -1768,13 +1684,133 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       successfulQueries: queryStats.successfulQueries,
       failedQueries: queryStats.failedQueries,
       resultCount: queryStats.resultCount,
-      createdCandidates,
-      skippedCandidates,
-      fallback: usedDevelopmentFallback,
-      errors: searchErrors,
+      createdCandidates: stats.createdCandidates,
+      skippedCandidates: stats.skippedCandidates,
+      fallback: stats.usedDevelopmentFallback,
+      errors: stats.searchErrors,
       hasMore: queryStats.hasMore,
       remainingQueries: queryStats.remainingQueries
     };
+  }
+
+  // 2026-05 V1-MVP+: extracted per-query body. Called by each worker
+  // after a successful atomic claim. Mutates the shared `stats` object.
+  // The candidate row is already in `running` status when this is called.
+  private async processClaimedSearchQuery(
+    taskId: string,
+    query: { id: string; query: string; country: string | null },
+    context: {
+      criteria: ReturnType<typeof buildIcpCriteria>;
+      candidateAiEvaluator: ReturnType<AgentWorkflowService["createCandidateAiEvaluator"]>;
+      stats: {
+        resultCount: number;
+        createdCandidates: number;
+        skippedCandidates: number;
+        usedDevelopmentFallback: boolean;
+        failedQueries: number;
+        processedQueries: number;
+        claimedCount: number;
+        searchErrors: Array<{ queryId: string; message: string }>;
+      };
+    }
+  ): Promise<void> {
+    if (!this.leadQualificationService) {
+      return;
+    }
+    const { criteria, candidateAiEvaluator, stats } = context;
+    const searchParams = {
+      query: query.query,
+      country: countryToBraveCode(),
+      language: "en",
+      count: 20
+    };
+
+    // 2026-05 P0: state machine decoupling preserved. Brave failure
+    // marks failed; saveCandidates failure keeps query completed with
+    // resultCount preserved.
+    let searchCount = 0;
+    let braveFallback = false;
+    let candidateResults: BraveSearchResult[] = [];
+
+    try {
+      const search = await withTimeout(
+        this.runSearchWithDevelopmentFallback(query.id, searchParams, query.country),
+        PER_QUERY_BRAVE_SEARCH_TIMEOUT_MS,
+        `Brave search query ${query.id.slice(0, 8)}`
+      );
+      searchCount = search.count;
+      braveFallback = search.fallback;
+      candidateResults = search.results.slice(0, MAX_CANDIDATE_RESULTS_PER_QUERY);
+      await this.prisma.searchQuery.update({
+        where: { id: query.id },
+        data: { resultCount: searchCount }
+      });
+    } catch (error) {
+      stats.failedQueries += 1;
+      stats.searchErrors.push({ queryId: query.id, message: searchErrorMessage(error) });
+      await this.prisma.searchQuery.update({
+        where: { id: query.id },
+        data: {
+          executionStatus: "failed",
+          resultCount: 0,
+          qualifiedCount: 0
+        }
+      });
+      return;
+    }
+
+    try {
+      const saved = candidateAiEvaluator
+        ? await withTimeout(
+            this.leadQualificationService.saveCandidates(
+              taskId,
+              candidateResults,
+              criteria,
+              query.country ?? undefined,
+              candidateAiEvaluator
+            ),
+            PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS,
+            `Save candidates for query ${query.id.slice(0, 8)}`
+          )
+        : await withTimeout(
+            this.leadQualificationService.saveCandidates(
+              taskId,
+              candidateResults,
+              criteria,
+              query.country ?? undefined
+            ),
+            PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS,
+            `Save candidates for query ${query.id.slice(0, 8)}`
+          );
+      stats.usedDevelopmentFallback ||= braveFallback;
+      stats.resultCount += searchCount;
+      stats.createdCandidates += saved.createdCount;
+      stats.skippedCandidates += saved.skippedCount;
+      const qualifiedFromThisQuery = saved.candidates.filter(
+        (c: { status?: string | null }) => c.status === "qualified"
+      ).length;
+      await this.prisma.searchQuery.update({
+        where: { id: query.id },
+        data: {
+          executionStatus: "completed",
+          resultCount: searchCount,
+          qualifiedCount: qualifiedFromThisQuery
+        }
+      });
+    } catch (saveError) {
+      stats.searchErrors.push({
+        queryId: query.id,
+        message: `saveCandidates failed: ${searchErrorMessage(saveError)}`
+      });
+      await this.prisma.searchQuery.update({
+        where: { id: query.id },
+        data: {
+          executionStatus: "completed",
+          resultCount: searchCount,
+          qualifiedCount: 0
+        }
+      });
+    }
   }
 
   private async aggregateSearchQueryStats(
@@ -6310,6 +6346,24 @@ function resolveSearchBatchLimit(limit: number | undefined) {
 
   const requested = limit;
   return Math.min(Math.max(Math.trunc(requested), 1), MAX_SYNC_SEARCH_QUERY_LIMIT);
+}
+
+// 2026-05 V1-MVP+: resolve worker pool concurrency from env. Clamps to
+// [SEARCH_QUERY_CONCURRENCY_MIN, SEARCH_QUERY_CONCURRENCY_MAX].
+// Exported for testing.
+export function resolveSearchQueryConcurrency(): number {
+  const raw = process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY;
+  if (!raw) {
+    return SEARCH_QUERY_CONCURRENCY_DEFAULT;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < SEARCH_QUERY_CONCURRENCY_MIN) {
+    return SEARCH_QUERY_CONCURRENCY_MIN;
+  }
+  if (parsed > SEARCH_QUERY_CONCURRENCY_MAX) {
+    return SEARCH_QUERY_CONCURRENCY_MAX;
+  }
+  return parsed;
 }
 
 function countryToPhoneCode(country: string) {

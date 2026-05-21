@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { AgentWorkflowService, splitReferenceCompanyAliases } from "./agent-workflow.service.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentWorkflowService, splitReferenceCompanyAliases, resolveSearchQueryConcurrency } from "./agent-workflow.service.js";
 
 function createPrismaMock() {
   return {
@@ -2036,6 +2036,189 @@ describe("AgentWorkflowService", () => {
     it("returns an empty array for empty or whitespace input", () => {
       expect(splitReferenceCompanyAliases("")).toEqual([]);
       expect(splitReferenceCompanyAliases("   ")).toEqual([]);
+    });
+  });
+
+  // 2026-05 V1-MVP+: query-level worker pool tests. The pool spawns
+  // N concurrent workers that share an atomic claim mechanism. Tests
+  // verify (1) each query is processed exactly once, (2) the queryLimit
+  // budget is not exceeded by races, (3) the env-config resolver
+  // clamps to safe bounds.
+  describe("resolveSearchQueryConcurrency", () => {
+    const original = process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY;
+    afterEach(() => {
+      if (original === undefined) delete process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY;
+      else process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = original;
+    });
+
+    it("defaults to 3 when env var is not set", () => {
+      delete process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY;
+      expect(resolveSearchQueryConcurrency()).toBe(3);
+    });
+
+    it("respects the configured value within bounds", () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "4";
+      expect(resolveSearchQueryConcurrency()).toBe(4);
+    });
+
+    it("clamps low values to the minimum (1)", () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "0";
+      expect(resolveSearchQueryConcurrency()).toBe(1);
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "-5";
+      expect(resolveSearchQueryConcurrency()).toBe(1);
+    });
+
+    it("clamps high values to the maximum (5)", () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "10";
+      expect(resolveSearchQueryConcurrency()).toBe(5);
+    });
+
+    it("falls back to the minimum on non-numeric input", () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "abc";
+      expect(resolveSearchQueryConcurrency()).toBe(1);
+    });
+  });
+
+  describe("brave_search worker pool", () => {
+    const originalConcurrency = process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY;
+    afterEach(() => {
+      if (originalConcurrency === undefined) {
+        delete process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY;
+      } else {
+        process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = originalConcurrency;
+      }
+    });
+
+    function makePoolPrismaMock(pendingQueries: Array<{ id: string; query: string; country: string }>) {
+      const queue = [...pendingQueries];
+      const claimedSet = new Set<string>();
+      const completedSet = new Set<string>();
+      const prisma = createPrismaMock();
+
+      // findFirst returns the next un-claimed pending query.
+      prisma.searchQuery.findFirst = vi.fn().mockImplementation(async () => {
+        const next = queue.find((q) => !claimedSet.has(q.id));
+        if (!next) return null;
+        return {
+          id: next.id,
+          query: next.query,
+          country: next.country,
+          createdAt: new Date()
+        };
+      });
+
+      // updateMany simulates atomic claim. The first worker to call
+      // wins; subsequent calls for the same id return count=0.
+      prisma.searchQuery.updateMany = vi
+        .fn()
+        .mockImplementation(async ({ where, data }: any) => {
+          if (where?.id && where?.executionStatus === "pending") {
+            if (claimedSet.has(where.id)) return { count: 0 };
+            claimedSet.add(where.id);
+            return { count: 1 };
+          }
+          return { count: 1 };
+        });
+
+      // update tracks which queries reached "completed" status so
+      // findMany (used by aggregateSearchQueryStats) can return the
+      // right row count.
+      prisma.searchQuery.update = vi.fn().mockImplementation(async ({ where, data }: any) => {
+        if (where?.id && data?.executionStatus === "completed") {
+          completedSet.add(where.id);
+        }
+        return {};
+      });
+
+      // findMany returns one row per claimed (and finalized) query so
+      // aggregateSearchQueryStats reports the right totals.
+      prisma.searchQuery.findMany = vi.fn().mockImplementation(async () => {
+        return Array.from(completedSet).map(() => ({
+          executionStatus: "completed",
+          resultCount: 1
+        }));
+      });
+
+      return { prisma, queue, claimedSet, completedSet };
+    }
+
+    it("processes each pending query exactly once with 3 workers", async () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "3";
+      const queries = Array.from({ length: 8 }, (_, i) => ({
+        id: `q-${i + 1}`,
+        query: `keyword ${i + 1}`,
+        country: "UAE"
+      }));
+      const { prisma } = makePoolPrismaMock(queries);
+      const braveSearch = createBraveSearchMock();
+      const leadQualification = createLeadQualificationMock();
+      const service = new AgentWorkflowService(
+        prisma as any,
+        braveSearch as any,
+        leadQualification as any
+      );
+
+      const result = await service.executeBraveSearchForTask("user-1", "task-1");
+
+      // Each query processed exactly once: searchAndSaveResults is called
+      // once per query (race losers don't proceed).
+      expect(braveSearch.searchAndSaveResults).toHaveBeenCalledTimes(8);
+      expect(result.executedQueries).toBe(8);
+      expect(result.successfulQueries).toBe(8);
+      expect(result.failedQueries).toBe(0);
+    });
+
+    it("respects queryLimit across workers without going over budget", async () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "3";
+      const queries = Array.from({ length: 10 }, (_, i) => ({
+        id: `q-${i + 1}`,
+        query: `keyword ${i + 1}`,
+        country: "UAE"
+      }));
+      const { prisma } = makePoolPrismaMock(queries);
+      const braveSearch = createBraveSearchMock();
+      const leadQualification = createLeadQualificationMock();
+      const service = new AgentWorkflowService(
+        prisma as any,
+        braveSearch as any,
+        leadQualification as any
+      );
+
+      // Limit to 5 of the 10 pending. With 3 workers there must be no
+      // over-claim race producing 6 or 7 executed queries.
+      const result = await service.executeBraveSearchForTask("user-1", "task-1", {
+        limit: 5
+      });
+
+      expect(braveSearch.searchAndSaveResults.mock.calls.length).toBeLessThanOrEqual(5);
+      expect(result.executedQueries).toBeLessThanOrEqual(5);
+    });
+
+    it("does not double-process when 5 workers race on the same pending queue", async () => {
+      process.env.LEADHUNT_SEARCH_QUERY_CONCURRENCY = "5";
+      const queries = Array.from({ length: 12 }, (_, i) => ({
+        id: `q-${i + 1}`,
+        query: `keyword ${i + 1}`,
+        country: "UAE"
+      }));
+      const { prisma } = makePoolPrismaMock(queries);
+      const braveSearch = createBraveSearchMock();
+      const leadQualification = createLeadQualificationMock();
+      const service = new AgentWorkflowService(
+        prisma as any,
+        braveSearch as any,
+        leadQualification as any
+      );
+
+      await service.executeBraveSearchForTask("user-1", "task-1");
+
+      // searchAndSaveResults is called with each unique query id at
+      // most once. Build the set of query ids passed in:
+      const seenIds = new Set(
+        braveSearch.searchAndSaveResults.mock.calls.map((call: any[]) => call[0])
+      );
+      expect(seenIds.size).toBe(12); // exactly 12 unique queries
+      expect(braveSearch.searchAndSaveResults).toHaveBeenCalledTimes(12);
     });
   });
 });
