@@ -2323,6 +2323,119 @@ function looksLikeTier1MobileOperator(
   return false;
 }
 
+// 2026-05 V1-MVP+ P2: certification / inspection / testing /
+// compliance service detector. These companies (Applus, SGS, Bureau
+// Veritas, TÜV, Intertek, DNV, etc.) provide testing and
+// certification services to the telecom industry. They are NOT
+// equipment buyers. Their pages appear in telecom queries because
+// they mention "telecom" + "services" but in a testing/audit context.
+//
+// The detector is intentionally conservative:
+//   1. Strong domain match (known certification companies) → reject
+//   2. Strong text signals (certification + inspection + compliance
+//      vocabulary, 2+ hits) → reject UNLESS buyer-role signals present
+//   3. If buyer-role signals are present (distributor, stockist,
+//      system integrator, contractor, spare parts, equipment supply),
+//      do NOT reject — the company may do both.
+const CERTIFICATION_COMPANY_DOMAINS = new Set([
+  "applus.com",
+  "sgs.com",
+  "bureauveritas.com",
+  "tuv.com",
+  "tuvsud.com",
+  "tuvnord.com",
+  "tuvrheinland.com",
+  "intertek.com",
+  "dnv.com",
+  "dnvgl.com",
+  "ul.com",
+  "dekra.com",
+  "kiwa.com",
+  "nemko.com",
+  "csa-group.org",
+  "ptl.co.uk",
+  "element.com",
+  "eurofins.com",
+  "nqa.com",
+  "bsigroup.com"
+]);
+
+const CERTIFICATION_TEXT_SIGNALS = [
+  "certification",
+  "certified",
+  "inspection",
+  "testing service",
+  "testing laboratory",
+  "compliance",
+  "audit",
+  "auditing",
+  "calibration",
+  "assessment service",
+  "verification service",
+  "type approval",
+  "conformity assessment",
+  "accreditation",
+  "quality assurance service",
+  "iso certification",
+  "ce marking"
+];
+
+const BUYER_ROLE_SIGNALS = [
+  "distributor",
+  "stockist",
+  "reseller",
+  "system integrator",
+  "telecom contractor",
+  "maintenance company",
+  "maintenance contractor",
+  "spare parts",
+  "equipment supplier",
+  "equipment supply",
+  "rru",
+  "bbu",
+  "rectifier",
+  "base station equipment",
+  "tower maintenance",
+  "field service",
+  "network deployment",
+  "installation contractor"
+];
+
+function looksLikeCertificationOrInspectionService(
+  candidate: NormalizedLeadCandidate,
+  domain: string | null,
+  text: string
+): boolean {
+  // 1) Known certification company domain → always reject.
+  if (domain) {
+    for (const certDomain of CERTIFICATION_COMPANY_DOMAINS) {
+      if (domain === certDomain || domain.endsWith(`.${certDomain}`)) {
+        return true;
+      }
+    }
+  }
+
+  // 2) Text-based detection: need 2+ certification signals AND no
+  //    buyer-role signals to reject.
+  const lowerText = text.toLowerCase();
+  const certHits = CERTIFICATION_TEXT_SIGNALS.filter((signal) =>
+    lowerText.includes(signal)
+  );
+  if (certHits.length < 2) {
+    return false;
+  }
+
+  // Check for buyer-role signals that would override the rejection.
+  const hasBuyerRole = BUYER_ROLE_SIGNALS.some((signal) =>
+    lowerText.includes(signal)
+  );
+  if (hasBuyerRole) {
+    return false;
+  }
+
+  return true;
+}
+
 function looksLikeTrainingOrCourseSite(candidate: NormalizedLeadCandidate, text: string) {
   const path = pathFromUrl(candidate.sourceUrl).toLowerCase();
   const domain = (candidate.website
@@ -2475,6 +2588,21 @@ function shouldHardRejectCandidate(
   // civil-service prep pages). Hard reject if any of these signals
   // appear on the candidate page or its URL path.
   if (looksLikeTrainingOrCourseSite(candidate, text)) {
+    return true;
+  }
+
+  // 2026-05 V1-MVP+ P2: certification / inspection / testing /
+  // compliance service companies. These are NOT telecom equipment
+  // buyers — they provide testing, auditing, and certification
+  // services TO the industry. Their pages routinely appear in telecom
+  // queries (e.g. "Applus telecom certification", "SGS network
+  // testing") but are never valid buyer leads.
+  //
+  // Conservative: only reject when there are NO buyer-role signals
+  // (distributor, stockist, system integrator, contractor, etc.).
+  // This avoids false positives on companies that do both testing
+  // AND equipment supply.
+  if (looksLikeCertificationOrInspectionService(candidate, domain, text)) {
     return true;
   }
 

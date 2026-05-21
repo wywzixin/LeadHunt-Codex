@@ -2804,4 +2804,93 @@ describe("LeadQualificationService", () => {
     // hard-rejected — they are useful intelligence signals.
     expect(result.createdCount).toBe(1);
   });
+
+  // 2026-05 V1-MVP+ P2: certification / inspection / testing service
+  // companies should be rejected — they are NOT equipment buyers.
+  it("hard rejects certification/inspection service pages (Applus)", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Telecom services: project management and certification | Applus",
+          url: "https://www.applus.com/qa/en/what-we-do/market/telecommunications",
+          snippet:
+            "Applus provides certification, inspection, and testing services for the telecommunications industry.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Qatar"]
+      },
+      "Qatar"
+    );
+
+    expect(result.createdCount).toBe(0);
+    expect(result.skippedCount).toBe(1);
+  });
+
+  it("hard rejects SGS/Bureau Veritas testing pages", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "SGS Telecom Testing and Certification",
+          url: "https://www.sgs.com/en/our-services/connectivity-products/telecom-testing",
+          snippet:
+            "SGS provides testing, inspection, and certification services for telecom equipment compliance.",
+          source: "web"
+        },
+        {
+          title: "Bureau Veritas Telecom Compliance Assessment",
+          url: "https://www.bureauveritas.com/services/telecom-compliance",
+          snippet:
+            "Bureau Veritas offers compliance assessment, audit, and certification for telecom networks.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE"]
+      },
+      "UAE"
+    );
+
+    expect(result.createdCount).toBe(0);
+    expect(result.skippedCount).toBe(2);
+  });
+
+  it("does NOT reject a system integrator that mentions certification alongside buyer-role signals", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Gulf Telecom Solutions - System Integrator",
+          url: "https://gulftelecomsolutions.ae/services",
+          snippet:
+            "Gulf Telecom Solutions is a system integrator and distributor of telecom equipment. ISO certification. Compliance testing for base station equipment. RRU spare parts stockist.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE"]
+      },
+      "UAE"
+    );
+
+    // Has buyer-role signals (system integrator, distributor, stockist,
+    // RRU, spare parts) — should NOT be rejected despite mentioning
+    // certification and compliance.
+    expect(result.createdCount).toBe(1);
+  });
 });
