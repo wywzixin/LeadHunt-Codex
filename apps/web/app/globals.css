@@ -49,6 +49,14 @@ body {
     Arial,
     sans-serif;
   letter-spacing: 0;
+  /* 2026-05 LeadHunt 2.0: SaaS-feel font rendering. PingFang SC and
+     Microsoft YaHei look heavier without antialiasing on macOS / Windows;
+     these properties match the rendering of the SaaS competitors we
+     benchmarked (saas.upkuajing.com etc). */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern", "tnum";
 }
 
 button,
@@ -10894,6 +10902,12 @@ button.primary {
 
 .aiPoolTable {
   width: 100%;
+  /* 2026-05 LeadHunt 2.0: 13-column candidate table needs ~1080px to
+     read comfortably. Pair with .aiPoolTableScroll { overflow-x: auto }
+     so the table scrolls horizontally inside its wrapper while the
+     page header / KPIs / filter bar above remain fluid (per competitor
+     research — saas.upkuajing.com pattern). */
+  min-width: 1080px;
   border-collapse: collapse;
   font-size: 13px;
 }
