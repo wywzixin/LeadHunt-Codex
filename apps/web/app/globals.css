@@ -9677,3 +9677,1573 @@ button.primary {
   font-size: 13px;
   line-height: 1.7;
 }
+
+
+/* ===========================================================================
+ * 2026-05 LeadHunt 2.0 — AiWorkerWorkbench
+ * Layout: header → kpis → search → pools → split(todos+history) → footer
+ * Tokens used: --primary, --bg, --card, --border, --title, --body, --secondary,
+ *              --success, --success-light, --warning, --warning-light,
+ *              --shadow-card.
+ * =========================================================================== */
+
+.aiWorkbench {
+  --kpi-blue-bg: #eef4ff;
+  --kpi-blue-fg: #2f6bff;
+  --kpi-green-bg: #e8fff0;
+  --kpi-green-fg: #00b42a;
+  --kpi-purple-bg: #f3edff;
+  --kpi-purple-fg: #7c3aed;
+  --kpi-indigo-bg: #ecefff;
+  --kpi-indigo-fg: #4055d6;
+  --kpi-orange-bg: #fff7e8;
+  --kpi-orange-fg: #ff7d00;
+  --pool-blue-bg: linear-gradient(135deg, #eef4ff 0%, #ffffff 60%);
+  --pool-green-bg: linear-gradient(135deg, #e8fff0 0%, #ffffff 60%);
+  --pool-orange-bg: linear-gradient(135deg, #fff7e8 0%, #ffffff 60%);
+
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 32px 96px;
+  background: var(--bg);
+  /* 2026-05 LeadHunt 2.0: workbench is a long scrollable view inside
+     the AppShell's overflow:hidden aiWorkerMain. We own our own
+     scroll context here so the AppShell layout grid stays intact. */
+  height: 100%;
+  overflow-y: auto;
+}
+
+.aiWorkbenchSectionTitle {
+  margin: 0;
+  color: var(--title);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.aiWorkbenchSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.aiWorkbenchSectionLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--secondary);
+  font-size: 13px;
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.aiWorkbenchSectionLink:hover {
+  color: var(--primary);
+}
+
+/* ----- Greeting header ----- */
+.aiWorkbenchHead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 0;
+}
+
+.aiWorkbenchGreeting h1 {
+  margin: 0 0 4px;
+  color: var(--title);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+/* Force color emoji rendering for the greeting glyph (sun/moon).
+   On Windows, Inter does not contain emoji; fall through to Segoe UI Emoji
+   so the moon/sun renders in color instead of as a monochrome line glyph. */
+.aiWorkbenchGreeting h1 span[aria-hidden="true"] {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji",
+    "Segoe UI Symbol", "Twemoji Mozilla", sans-serif;
+}
+
+.aiWorkbenchGreeting p {
+  margin: 0;
+  color: var(--body);
+  font-size: 13px;
+}
+
+.aiWorkbenchTracker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px !important;
+  padding: 3px 10px;
+  background: var(--primary-light);
+  color: var(--primary);
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* ----- KPI cards ----- */
+.aiWorkbenchKpis {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.aiWorkbenchKpi {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.aiWorkbenchKpi:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-pop);
+}
+
+.aiWorkbenchKpiIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.aiWorkbenchKpi.tone-blue .aiWorkbenchKpiIcon {
+  background: var(--kpi-blue-bg);
+  color: var(--kpi-blue-fg);
+}
+
+.aiWorkbenchKpi.tone-green .aiWorkbenchKpiIcon {
+  background: var(--kpi-green-bg);
+  color: var(--kpi-green-fg);
+}
+
+.aiWorkbenchKpi.tone-purple .aiWorkbenchKpiIcon {
+  background: var(--kpi-purple-bg);
+  color: var(--kpi-purple-fg);
+}
+
+.aiWorkbenchKpi.tone-indigo .aiWorkbenchKpiIcon {
+  background: var(--kpi-indigo-bg);
+  color: var(--kpi-indigo-fg);
+}
+
+.aiWorkbenchKpi.tone-orange .aiWorkbenchKpiIcon {
+  background: var(--kpi-orange-bg);
+  color: var(--kpi-orange-fg);
+}
+
+.aiWorkbenchKpiBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.aiWorkbenchKpiLabel {
+  color: var(--secondary);
+  font-size: 13px;
+}
+
+.aiWorkbenchKpiValue {
+  color: var(--title);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.aiWorkbenchKpiDelta {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+/* ----- Search section ----- */
+.aiWorkbenchSearch {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+.aiWorkbenchSearchForm {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.aiWorkbenchSearchForm textarea {
+  flex: 1;
+  min-height: 44px;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--title);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.aiWorkbenchSearchForm textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+.aiWorkbenchSearchForm textarea::placeholder {
+  color: var(--secondary);
+}
+
+.aiWorkbenchSearchActions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 180px;
+  flex-shrink: 0;
+}
+
+.aiWorkbenchPrimaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 18px;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.aiWorkbenchPrimaryBtn:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.aiWorkbenchPrimaryBtn:active:not(:disabled) {
+  background: var(--primary-active);
+}
+
+.aiWorkbenchPrimaryBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.aiWorkbenchSecondaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 11px 18px;
+  background: var(--card);
+  color: var(--body);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.aiWorkbenchSecondaryBtn:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+.aiWorkbenchQuickRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.aiWorkbenchQuickChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 12px;
+  background: var(--bg);
+  color: var(--body);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.aiWorkbenchQuickChip:hover {
+  border-color: var(--primary-border);
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+/* ----- Pool cards ----- */
+.aiWorkbenchPools {
+  display: flex;
+  flex-direction: column;
+}
+
+.aiWorkbenchPoolGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.aiWorkbenchPoolCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.aiWorkbenchPoolCard:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-pop);
+}
+
+.aiWorkbenchPoolCard.tone-blue {
+  background: var(--pool-blue-bg);
+}
+
+.aiWorkbenchPoolCard.tone-green {
+  background: var(--pool-green-bg);
+}
+
+.aiWorkbenchPoolCard.tone-orange {
+  background: var(--pool-orange-bg);
+}
+
+.aiWorkbenchPoolHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.aiWorkbenchPoolIcon {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  color: #fff;
+  background: var(--primary);
+  flex-shrink: 0;
+}
+
+.aiWorkbenchPoolCard.tone-green .aiWorkbenchPoolIcon {
+  background: var(--success);
+}
+
+.aiWorkbenchPoolCard.tone-orange .aiWorkbenchPoolIcon {
+  background: var(--warning);
+}
+
+.aiWorkbenchPoolBadge {
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.aiWorkbenchPoolBadge.state-active {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.aiWorkbenchPoolBadge.state-completed {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.aiWorkbenchPoolBadge.state-pending {
+  background: var(--warning-light);
+  color: var(--warning);
+}
+
+.aiWorkbenchPoolTitle {
+  margin: 0;
+  color: var(--title);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.aiWorkbenchPoolDetail {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.aiWorkbenchPoolFoot {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.aiWorkbenchPoolPrimary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 14px;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.aiWorkbenchPoolPrimary:hover {
+  background: var(--primary-hover);
+}
+
+.aiWorkbenchPoolSecondary {
+  padding: 7px 14px;
+  background: transparent;
+  color: var(--body);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.aiWorkbenchPoolSecondary:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* ----- Split: todos + history ----- */
+.aiWorkbenchSplit {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: 20px;
+}
+
+.aiWorkbenchTodos,
+.aiWorkbenchHistory {
+  display: flex;
+  flex-direction: column;
+}
+
+.aiWorkbenchTodos > .aiWorkbenchSectionTitle,
+.aiWorkbenchHistory > .aiWorkbenchSectionHeader {
+  margin-bottom: 14px;
+}
+
+.aiWorkbenchTodoGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.aiWorkbenchTodo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-card);
+}
+
+.aiWorkbenchTodoIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.aiWorkbenchTodo.tone-blue .aiWorkbenchTodoIcon {
+  background: var(--kpi-blue-bg);
+  color: var(--kpi-blue-fg);
+}
+
+.aiWorkbenchTodo.tone-purple .aiWorkbenchTodoIcon {
+  background: var(--kpi-purple-bg);
+  color: var(--kpi-purple-fg);
+}
+
+.aiWorkbenchTodo.tone-orange .aiWorkbenchTodoIcon {
+  background: var(--kpi-orange-bg);
+  color: var(--kpi-orange-fg);
+}
+
+.aiWorkbenchTodoBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.aiWorkbenchTodoTitle {
+  margin: 0 0 4px;
+  color: var(--title);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.aiWorkbenchTodoMeta {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.aiWorkbenchTodoMeta strong {
+  color: var(--title);
+  font-size: 14px;
+  margin-right: 2px;
+}
+
+.aiWorkbenchTodoCta {
+  padding: 6px 12px;
+  background: var(--bg);
+  color: var(--primary);
+  border: 1px solid var(--primary-border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.aiWorkbenchTodoCta:hover {
+  background: var(--primary-light);
+}
+
+.aiWorkbenchHistoryList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.aiWorkbenchHistoryEmpty {
+  padding: 16px;
+  color: var(--secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.aiWorkbenchHistoryItem {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 60px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--divider);
+  color: var(--body);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.aiWorkbenchHistoryList li:last-child .aiWorkbenchHistoryItem {
+  border-bottom: none;
+}
+
+.aiWorkbenchHistoryItem:hover {
+  background: var(--bg);
+}
+
+.aiWorkbenchHistoryDate {
+  color: var(--secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.aiWorkbenchHistoryTitle {
+  color: var(--title);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aiWorkbenchHistoryStatus {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.aiWorkbenchHistoryStatus.state-active {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.aiWorkbenchHistoryStatus.state-completed {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.aiWorkbenchHistoryStatus.state-pending {
+  background: var(--warning-light);
+  color: var(--warning);
+}
+
+/* ----- Footer AI input bar ----- */
+.aiWorkbenchFooter {
+  /* 2026-05 LeadHunt 2.0: not sticky. The workbench is a scrollable
+     container; making this sticky causes the footer to overlap the
+     todos/history sections and crop their headings. The footer now
+     sits in normal flow at the bottom of the workbench so users
+     scroll all the way down to reach the AI input — same as the pool
+     detail page. */
+  margin: 12px -32px 0;
+  padding: 14px 32px 0;
+  background: var(--bg);
+  z-index: 5;
+}
+
+.aiWorkbenchFooterForm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+.aiWorkbenchFooterForm input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--title);
+  font-family: inherit;
+}
+
+.aiWorkbenchFooterForm input:focus {
+  outline: none;
+}
+
+.aiWorkbenchFooterForm input::placeholder {
+  color: var(--secondary);
+}
+
+.aiWorkbenchFooterSend {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.aiWorkbenchFooterSend:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.aiWorkbenchFooterSend:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ----- Responsive: at narrow widths, KPIs and pools stack into 2 rows ----- */
+@media (max-width: 1280px) {
+  .aiWorkbenchKpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .aiWorkbenchPoolGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .aiWorkbenchSplit {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .aiWorkbenchTodoGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+
+/* ===========================================================================
+ * 2026-05 LeadHunt 2.0 — AiWorkerPool
+ * Customer pool detail page. Layout:
+ *   header → kpis → filters → selected-chips → bulk-bar → table → health → footer
+ *
+ * Tokens used: --primary, --bg, --card, --border, --title, --body, --secondary,
+ *              --success, --success-light, --warning, --warning-light,
+ *              --danger, --shadow-card, --shadow-pop.
+ * =========================================================================== */
+
+.aiPool {
+  /* KPI accent palette mirrors workbench but adds teal/rose for the
+     6-card layout in the design spec. */
+  --pool-blue-bg: #eef4ff;
+  --pool-blue-fg: #2f6bff;
+  --pool-orange-bg: #fff7e8;
+  --pool-orange-fg: #ff7d00;
+  --pool-teal-bg: #e6f9f5;
+  --pool-teal-fg: #0891b2;
+  --pool-indigo-bg: #ecefff;
+  --pool-indigo-fg: #4055d6;
+  --pool-purple-bg: #f3edff;
+  --pool-purple-fg: #7c3aed;
+  --pool-rose-bg: #ffeef0;
+  --pool-rose-fg: #f04668;
+  --pool-green-bg: #e8fff0;
+  --pool-green-fg: #00b42a;
+
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 24px 32px 96px;
+  background: var(--bg);
+  height: 100%;
+  overflow-y: auto;
+}
+
+/* ----- Reusable colored icon chips ----- */
+.aiPoolIcon {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.aiPoolIconText {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+.aiPoolIconBlue {
+  background: var(--primary);
+}
+
+.aiPoolIconGreen {
+  background: var(--success);
+}
+
+.aiPoolIconOrange {
+  background: var(--warning);
+}
+
+.aiPoolIconPurple {
+  background: #7c3aed;
+}
+
+.aiPoolIconCyan {
+  background: #0891b2;
+}
+
+.aiPoolIconRose {
+  background: #f04668;
+}
+
+/* ----- Header ----- */
+.aiPoolHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.aiPoolHeaderTop {
+  display: flex;
+}
+
+.aiPoolBack {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px 6px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--body);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.aiPoolBack:hover {
+  background: var(--card);
+  border-color: var(--primary-border);
+  color: var(--primary);
+}
+
+.aiPoolHeaderRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.aiPoolHeaderLeft {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.aiPoolHeaderTitle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.aiPoolHeaderTitle h1 {
+  margin: 0;
+  color: var(--title);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.aiPoolBadge {
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.aiPoolBadge.state-active {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.aiPoolBadge.state-completed {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.aiPoolBadge.state-pending {
+  background: var(--warning-light);
+  color: var(--warning);
+}
+
+.aiPoolCountryChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.aiPoolCountryChip {
+  padding: 3px 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--body);
+  font-size: 12px;
+}
+
+.aiPoolMeta {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 13px;
+}
+
+.aiPoolHeaderActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.aiPoolPrimaryBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 14px;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.aiPoolPrimaryBtn:hover {
+  background: var(--primary-hover);
+}
+
+.aiPoolGhostBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 12px;
+  background: var(--card);
+  color: var(--body);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.aiPoolGhostBtn:hover {
+  border-color: var(--primary-border);
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+/* ----- KPI cards ----- */
+.aiPoolKpis {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.aiPoolKpi {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.aiPoolKpi:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-pop);
+}
+
+.aiPoolKpiIcon {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.aiPoolKpi.tone-blue .aiPoolKpiIcon {
+  background: var(--pool-blue-bg);
+  color: var(--pool-blue-fg);
+}
+
+.aiPoolKpi.tone-orange .aiPoolKpiIcon {
+  background: var(--pool-orange-bg);
+  color: var(--pool-orange-fg);
+}
+
+.aiPoolKpi.tone-teal .aiPoolKpiIcon {
+  background: var(--pool-teal-bg);
+  color: var(--pool-teal-fg);
+}
+
+.aiPoolKpi.tone-indigo .aiPoolKpiIcon {
+  background: var(--pool-indigo-bg);
+  color: var(--pool-indigo-fg);
+}
+
+.aiPoolKpi.tone-purple .aiPoolKpiIcon {
+  background: var(--pool-purple-bg);
+  color: var(--pool-purple-fg);
+}
+
+.aiPoolKpi.tone-rose .aiPoolKpiIcon {
+  background: var(--pool-rose-bg);
+  color: var(--pool-rose-fg);
+}
+
+.aiPoolKpi.tone-green .aiPoolKpiIcon {
+  background: var(--pool-green-bg);
+  color: var(--pool-green-fg);
+}
+
+.aiPoolKpiBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.aiPoolKpiLabel {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.aiPoolKpiValue {
+  color: var(--title);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.aiPoolKpiDelta {
+  color: var(--secondary);
+  font-size: 11px;
+}
+
+/* ----- Filter bar ----- */
+.aiPoolFilters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-card);
+}
+
+.aiPoolSearchInput {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 220px;
+  padding: 6px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--secondary);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.aiPoolSearchInput:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+.aiPoolSearchInput input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--title);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.aiPoolSearchInput input:focus {
+  outline: none;
+}
+
+.aiPoolFilterDropdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  background: var(--card);
+  color: var(--body);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.aiPoolFilterDropdown:hover {
+  border-color: var(--primary-border);
+  color: var(--primary);
+}
+
+.aiPoolFilterClear {
+  margin-left: auto;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: var(--secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.aiPoolFilterClear:hover {
+  color: var(--primary);
+}
+
+/* ----- Selected chips ----- */
+.aiPoolSelectedChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.aiPoolSelectedChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: var(--primary-light);
+  color: var(--primary);
+  border-radius: 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.aiPoolSelectedChip:hover {
+  background: var(--primary-border);
+}
+
+/* ----- Bulk action bar ----- */
+.aiPoolBulkBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--primary-light);
+  border: 1px solid var(--primary-border);
+  border-radius: 10px;
+}
+
+.aiPoolBulkSelectAll {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--body);
+  font-size: 13px;
+}
+
+.aiPoolBulkSelectAll input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--primary);
+}
+
+.aiPoolBulkSelectAll strong {
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.aiPoolBulkAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  background: var(--card);
+  color: var(--body);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.aiPoolBulkAction:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.aiPoolBulkAction.primary {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.aiPoolBulkAction.primary:hover {
+  background: var(--primary-hover);
+}
+
+/* ----- Table ----- */
+.aiPoolTableWrap {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.aiPoolTableScroll {
+  overflow-x: auto;
+}
+
+.aiPoolTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.aiPoolTable thead th {
+  padding: 10px 12px;
+  background: var(--bg);
+  color: var(--secondary);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.aiPoolTable tbody td {
+  padding: 12px;
+  color: var(--body);
+  border-bottom: 1px solid var(--divider);
+  vertical-align: middle;
+}
+
+.aiPoolTable tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.aiPoolTable tbody tr:hover {
+  background: var(--bg);
+}
+
+.aiPoolTable tbody tr.selected {
+  background: var(--primary-light);
+}
+
+.aiPoolTable .col-check {
+  width: 36px;
+  padding-left: 14px;
+}
+
+.aiPoolTable .col-check input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--primary);
+}
+
+.aiPoolTable .col-company {
+  color: var(--title);
+  font-weight: 600;
+}
+
+.aiPoolTable .col-score {
+  white-space: nowrap;
+}
+
+.aiPoolScoreStars {
+  display: inline-block;
+  color: var(--warning);
+  font-size: 13px;
+  letter-spacing: 1px;
+  margin-right: 6px;
+}
+
+.aiPoolScoreValue {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.aiPoolContactBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.aiPoolContactBadge.active {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.aiPoolContactBadge.muted {
+  background: var(--bg);
+  color: var(--secondary);
+}
+
+.aiPoolTable .col-website {
+  color: var(--primary);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+.aiPoolSourceBadge {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--bg);
+  color: var(--secondary);
+  border-radius: 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.aiPoolCrmBadge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.aiPoolCrmBadge.state-pending {
+  background: var(--warning-light);
+  color: var(--warning);
+}
+
+.aiPoolCrmBadge.state-synced {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.aiPoolCrmBadge.state-active {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.aiPoolMailStatus {
+  color: var(--body);
+  font-size: 12px;
+}
+
+.aiPoolTable .col-action-meta {
+  color: var(--secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.aiPoolTable .col-action {
+  width: 110px;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.aiPoolRowAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--primary);
+  border: 1px solid var(--primary-border);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.aiPoolRowAction:hover {
+  background: var(--primary-light);
+}
+
+.aiPoolRowAction.icon {
+  margin-left: 4px;
+  padding: 4px 6px;
+  border-color: var(--border);
+  color: var(--secondary);
+}
+
+.aiPoolRowAction.icon:hover {
+  border-color: var(--primary-border);
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+/* ----- Table footer ----- */
+.aiPoolTableFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--card);
+  border-top: 1px solid var(--divider);
+}
+
+.aiPoolTableFootHint {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.aiPoolTableFootSep {
+  margin: 0 6px;
+  color: var(--border);
+}
+
+.aiPoolPagination {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--body);
+  font-size: 12px;
+}
+
+.aiPoolPageSize {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aiPoolPageSize select {
+  padding: 4px 8px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--body);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.aiPoolPageBtn {
+  padding: 5px 12px;
+  background: var(--card);
+  color: var(--body);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.aiPoolPageBtn:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.aiPoolPageBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.aiPoolPageIndicator {
+  font-variant-numeric: tabular-nums;
+  color: var(--secondary);
+}
+
+/* ----- Health hint ----- */
+.aiPoolHealth {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--success-light);
+  border: 1px solid #b7eb8f;
+  border-radius: 10px;
+}
+
+.aiPoolHealthIcon {
+  display: inline-flex;
+  color: var(--success);
+}
+
+.aiPoolHealth p {
+  flex: 1;
+  margin: 0;
+  color: var(--body);
+  font-size: 13px;
+}
+
+.aiPoolHealth p strong {
+  color: var(--success);
+  font-weight: 700;
+}
+
+.aiPoolHealthLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--success);
+  font-size: 13px;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.aiPoolHealthLink:hover {
+  color: var(--primary);
+}
+
+/* ----- Footer AI input bar ----- */
+.aiPoolFooter {
+  position: sticky;
+  bottom: 0;
+  margin: 16px -32px -96px;
+  padding: 14px 32px 18px;
+  background: linear-gradient(180deg, transparent 0%, var(--bg) 30%);
+  z-index: 5;
+}
+
+.aiPoolFooterForm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+.aiPoolFooterForm input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--title);
+  font-family: inherit;
+}
+
+.aiPoolFooterForm input:focus {
+  outline: none;
+}
+
+.aiPoolFooterForm input::placeholder {
+  color: var(--secondary);
+}
+
+.aiPoolFooterSend {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.aiPoolFooterSend:hover {
+  background: var(--primary-hover);
+}
+
+/* ----- Narrow viewport ----- */
+@media (max-width: 1280px) {
+  .aiPoolKpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
