@@ -2102,6 +2102,196 @@ function shouldProbeContactPages(candidate: NormalizedLeadCandidate) {
   return !looksLikeArticlePath(path) || hasAny(text, buyerRoleTerms);
 }
 
+// 2026-05 V1-MVP+: tier-1 mobile network operators (MNOs) blacklist.
+// These companies buy equipment directly from OEMs (Huawei, Ericsson,
+// Nokia, ZTE) — they are NOT spare-parts distributors, system
+// integrators, or maintenance contractors. Their pages (news, press
+// releases, marketing) routinely appear in telecom Brave queries but
+// are never valid B2B buyer leads for a spare-parts seller.
+//
+// The list covers major MNOs in the target markets (Middle East,
+// Africa, South Asia) plus global operators whose regional pages
+// appear frequently. It is intentionally conservative — only
+// operators whose DOMAIN or EXACT company name matches are rejected.
+// A company named "Zain Telecom Services LLC" (a different entity)
+// would need to match the domain to be rejected.
+const TIER1_OPERATOR_DOMAINS = new Set([
+  // Middle East
+  "zain.com",
+  "sa.zain.com",
+  "jo.zain.com",
+  "iq.zain.com",
+  "bh.zain.com",
+  "kw.zain.com",
+  "sd.zain.com",
+  "vodafone.qa",
+  "vodafone.com.eg",
+  "vodafone.om",
+  "etisalat.ae",
+  "etisalat.com",
+  "e-and.com",
+  "ooredoo.com",
+  "ooredoo.qa",
+  "ooredoo.om",
+  "ooredoo.dz",
+  "ooredoo.tn",
+  "stc.com.sa",
+  "stc.com.bh",
+  "stc.com.kw",
+  "omantel.om",
+  "mobily.com.sa",
+  "du.ae",
+  "batelco.com",
+  // Africa
+  "mtn.com",
+  "mtn.co.za",
+  "safaricom.co.ke",
+  "airtel.in",
+  "airtel.africa",
+  "glo.com",
+  "9mobile.com.ng",
+  // Global (regional pages appear in ME/Africa queries)
+  "vodafone.com",
+  "t-mobile.com",
+  "orange.com",
+  "telefonica.com",
+  "telenor.com",
+  "axiata.com",
+  "singtel.com"
+]);
+
+// Company name patterns that indicate a tier-1 operator. These are
+// checked as word-boundary matches against the candidate company name
+// to avoid false positives on companies like "Zain Trading LLC".
+const TIER1_OPERATOR_NAME_PATTERNS = [
+  /\bzain\s+(ksa|saudi|jordan|iraq|bahrain|kuwait|sudan)\b/i,
+  /\bvodafone\s+(qatar|egypt|oman|ghana|turkey)\b/i,
+  /\betisalat\b/i,
+  /\be&\b/i,
+  /\booreedoo\b/i,
+  /\booreedoo\s/i,
+  /\booredoo\b/i,
+  /\bstc\s+(saudi|bahrain|kuwait)\b/i,
+  /\bomantel\b/i,
+  /\bmobily\b/i,
+  /\b(?:du|du\s+telecom)\b.*\buae\b/i,
+  /\bmtn\s+(group|south\s+africa|nigeria|ghana)\b/i,
+  /\bsafaricom\b/i,
+  /\bairtel\s+(africa|india|nigeria)\b/i
+];
+
+function looksLikeTier1MobileOperator(
+  candidate: NormalizedLeadCandidate,
+  domain: string | null
+): boolean {
+  // 1) Domain match: any candidate whose website or source URL is on
+  //    an operator domain is hard-rejected — UNLESS the page is a
+  //    vendor-registration / procurement page (those are useful
+  //    intelligence signals even though the operator itself isn't a
+  //    buyer lead).
+  if (domain) {
+    let isOperatorDomain = false;
+    for (const opDomain of TIER1_OPERATOR_DOMAINS) {
+      if (domain === opDomain || domain.endsWith(`.${opDomain}`)) {
+        isOperatorDomain = true;
+        break;
+      }
+    }
+    if (isOperatorDomain) {
+      // Check if this is a vendor/procurement page — if so, let it
+      // through to the intelligence classification path.
+      const path = pathFromUrl(candidate.sourceUrl).toLowerCase();
+      const text = [candidate.companyName, candidate.sourceUrl, candidate.summary]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      const isVendorPage =
+        /vendor|supplier|procurement|tender|rfp|rfq|registration/i.test(path) ||
+        /vendor\s*(?:registration|relations|portal)|supplier\s*registration|procurement\s*portal/i.test(text);
+      if (!isVendorPage) {
+        return true;
+      }
+      // Vendor page on operator domain — don't hard reject; let it
+      // flow to intelligence classification downstream.
+    }
+  }
+
+  // 2) Company name match: only specific patterns that unambiguously
+  //    identify the operator entity (not a reseller or subsidiary with
+  //    a similar name). These are rejected regardless of page type
+  //    because the company name itself IS the operator.
+  //    Exception: if the source URL is a vendor/procurement page, we
+  //    still let it through (handled above by domain check).
+  if (candidate.companyName && !domain) {
+    // Only apply name-based rejection when we couldn't check the
+    // domain (rare edge case — usually domain is available).
+    const name = candidate.companyName;
+    for (const pattern of TIER1_OPERATOR_NAME_PATTERNS) {
+      if (pattern.test(name)) {
+        return true;
+      }
+    }
+    const normalized = name.trim().toLowerCase();
+    if (
+      normalized === "zain ksa" ||
+      normalized === "vodafone qatar" ||
+      normalized === "vodafone qatar p.q.s.c." ||
+      normalized === "etisalat" ||
+      normalized === "ooredoo" ||
+      normalized === "omantel" ||
+      normalized === "mobily" ||
+      normalized === "du" ||
+      normalized === "stc" ||
+      normalized === "mtn"
+    ) {
+      return true;
+    }
+  }
+
+  // If domain IS an operator domain but it's a vendor page, we
+  // already returned false above (didn't enter the hard-reject).
+  // If domain is NOT an operator domain, also check name patterns
+  // but only when the domain check didn't already handle it.
+  if (candidate.companyName && domain) {
+    let isOperatorDomain = false;
+    for (const opDomain of TIER1_OPERATOR_DOMAINS) {
+      if (domain === opDomain || domain.endsWith(`.${opDomain}`)) {
+        isOperatorDomain = true;
+        break;
+      }
+    }
+    // If domain is NOT an operator domain but the name matches an
+    // operator pattern, it's likely a news article ABOUT the operator
+    // (e.g. arabnews.com article titled "Zain KSA integrates...").
+    // These should also be rejected.
+    if (!isOperatorDomain) {
+      const name = candidate.companyName;
+      for (const pattern of TIER1_OPERATOR_NAME_PATTERNS) {
+        if (pattern.test(name)) {
+          return true;
+        }
+      }
+      const normalized = name.trim().toLowerCase();
+      if (
+        normalized === "zain ksa" ||
+        normalized === "vodafone qatar" ||
+        normalized === "vodafone qatar p.q.s.c." ||
+        normalized === "etisalat" ||
+        normalized === "ooredoo" ||
+        normalized === "omantel" ||
+        normalized === "mobily" ||
+        normalized === "du" ||
+        normalized === "stc" ||
+        normalized === "mtn"
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function looksLikeTrainingOrCourseSite(candidate: NormalizedLeadCandidate, text: string) {
   const path = pathFromUrl(candidate.sourceUrl).toLowerCase();
   const domain = (candidate.website
@@ -2236,6 +2426,16 @@ function shouldHardRejectCandidate(
   }
 
   if (nonTargetChinaSupplier) {
+    return true;
+  }
+
+  // 2026-05 V1-MVP+: tier-1 mobile network operators (MNOs) are the
+  // END USERS of telecom equipment — they buy from Huawei/Ericsson/Nokia
+  // directly, not from spare-parts distributors. Their news pages,
+  // marketing pages, and press releases routinely appear in Brave
+  // results for telecom queries but are never valid B2B buyer leads.
+  // Hard reject by domain or company name.
+  if (looksLikeTier1MobileOperator(candidate, domain)) {
     return true;
   }
 

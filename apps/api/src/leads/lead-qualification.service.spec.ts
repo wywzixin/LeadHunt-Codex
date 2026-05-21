@@ -2664,4 +2664,86 @@ describe("LeadQualificationService", () => {
     // path proves it passed the reference check.)
     expect(result.skippedCount + result.createdCount).toBe(1);
   });
+
+  // 2026-05 V1-MVP+: tier-1 mobile operator blacklist. Operators like
+  // Zain, Vodafone, Ooredoo are end-users of telecom equipment — they
+  // buy from OEMs directly, not from spare-parts distributors. Their
+  // news/marketing pages must be hard-rejected.
+  it("hard rejects tier-1 mobile operator news pages (Zain KSA)", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Zain KSA and Huawei announce new network strategy",
+          url: "https://sa.zain.com/en/all-news/zain-ksa-and-huawei-announce-release-new-network-strategy",
+          snippet:
+            "Zain KSA integrates latest Huawei 5G technology into its network. Contact: media@zain.com",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia"]
+      },
+      "Saudi Arabia"
+    );
+
+    expect(result.createdCount).toBe(0);
+    expect(result.skippedCount).toBe(1);
+  });
+
+  it("hard rejects Vodafone Qatar marketing pages", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Vodafone Qatar - Fastest Network",
+          url: "https://www.vodafone.qa/fastestnetwork",
+          snippet: "Vodafone Qatar P.Q.S.C. fastest 5G network coverage.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Qatar"]
+      },
+      "Qatar"
+    );
+
+    expect(result.createdCount).toBe(0);
+    expect(result.skippedCount).toBe(1);
+  });
+
+  it("does NOT reject operator vendor-registration pages (keeps as intelligence)", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Ooredoo Qatar Vendor Registration",
+          url: "https://www.ooredoo.qa/portal/vendor-registration",
+          snippet:
+            "Ooredoo Qatar vendor registration portal for telecom equipment suppliers.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Qatar"]
+      },
+      "Qatar"
+    );
+
+    // Vendor-registration pages on operator domains should NOT be
+    // hard-rejected — they are useful intelligence signals.
+    expect(result.createdCount).toBe(1);
+  });
 });
