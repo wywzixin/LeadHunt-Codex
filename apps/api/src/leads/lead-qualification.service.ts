@@ -1050,6 +1050,9 @@ function cleanupCompanyName(value: string) {
   return value
     .replace(/\b(home|official site|website|about us|contact us|logo)\b/gi, "")
     .replace(/^\s*(?:welcome to|official)\s+/i, "")
+    // 2026-05 V1-MVP+: strip "by " prefix that leaks from attribution
+    // patterns in page titles (e.g. "by Qatar Multitech Trading...").
+    .replace(/^\s*by\s+/i, "")
     .replace(siteBuilderCreditPrefixPattern, "")
     .replace(/\s+\b(?:homepage|home page)\b$/i, "")
     .replace(/\s+/g, " ")
@@ -1083,9 +1086,30 @@ function isForbiddenCompanyName(value: string) {
   return (
     !normalized ||
     forbiddenCompanyNameTerms.has(normalized) ||
-    /^by\s+[a-z0-9 .'-]{2,60}$/i.test(value.trim()) ||
+    // 2026-05 V1-MVP+: "by <company>" prefix. The original regex
+    // only allowed [a-z0-9 .'-] which missed & and other punctuation
+    // common in company names (e.g. "by Qatar Multitech Trading &
+    // Contracting W.L.L."). Broadened to allow any printable chars.
+    /^by\s+.{2,80}$/i.test(value.trim()) ||
     looksLikeSiteBuilderCredit(value) ||
-    /\b(?:tagline|awesome image|blog category|article author|pdf)\b/i.test(value)
+    /\b(?:tagline|awesome image|blog category|article author|pdf)\b/i.test(value) ||
+    // 2026-05 V1-MVP+: article/listicle titles that got extracted as
+    // company names. These patterns are never real company names:
+    //   - "Which One is the Best 2026"
+    //   - "Top 10 Telecom Companies in Qatar"
+    //   - "How to Choose a Telecom Provider"
+    //   - "What is 5G Technology"
+    /\b(?:which\s+(?:one|is)|how\s+to|what\s+is|top\s+\d+|best\s+\d+|vs\.?\s|versus)\b/i.test(value) ||
+    // Long names with colons are almost always page titles, not
+    // company names (e.g. "Telecom services: project management and
+    // certification"). Real company names with colons are extremely
+    // rare and never > 40 chars.
+    (value.includes(":") && value.length > 40) ||
+    // Copyright / year patterns that leak from footer extraction
+    /\b(?:copyright|©)\s*\d{4}/i.test(value) ||
+    /^\d{4}\s/.test(value.trim()) ||
+    // Image alt text / placeholder patterns
+    /^(?:image|img|photo|banner|logo|icon)\s*\d*/i.test(value.trim())
   );
 }
 
@@ -1141,7 +1165,14 @@ function looksLikePseudoCompanyName(value: string) {
       lower
     ) ||
     /^(?:communication package|network deployment|exploring|das installation)\b/.test(lower) ||
-    /\b(?:company|service|services|solutions?|package)\s+(?:in|for)\s+[a-z]/.test(lower)
+    /\b(?:company|service|services|solutions?|package)\s+(?:in|for)\s+[a-z]/.test(lower) ||
+    // 2026-05 V1-MVP+: descriptive phrases that are page section
+    // headings or service descriptions, not company names:
+    //   - "Telecom services: project management and certification"
+    //   - "5G network solutions for enterprise"
+    //   - "Accelerate Success with TheCloudPartner: Trusted Cloud Solutions"
+    /^(?:telecom|5g|network|cloud|iot|it)\s+(?:services?|solutions?)\b/i.test(lower) ||
+    /\b(?:accelerate|discover|explore|unlock|transform|elevate)\s+/i.test(lower)
   );
 }
 

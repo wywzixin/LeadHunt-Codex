@@ -185,6 +185,64 @@ describe("LeadQualificationService", () => {
     ]);
   });
 
+  // 2026-05 V1-MVP+: company name cleaning — reject article titles,
+  // "by X" attributions, descriptive headings, and copyright lines
+  // that previously leaked through as company names.
+  it("rejects article titles and descriptive headings as company names", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const candidates = service.normalizeSearchResults(
+      [
+        {
+          title: "Qatar Mobile Operators: Which One is the Best 2026",
+          url: "https://esimqatar.com/operators/",
+          snippet: "Comparison of Qatar mobile operators.",
+          source: "web"
+        },
+        {
+          title: "Telecom services: project management and certification | Applus",
+          url: "https://www.applus.com/qa/en/what-we-do/market/telecommunications",
+          snippet: "Applus telecom certification services.",
+          source: "web"
+        },
+        {
+          title: "Huawei MA5800: The Multi-Service Access Platform Powering Future Networks",
+          url: "https://www.telecomate.com/huawei-ma5800-the-multi-service-access-platform-powering-future-networks/",
+          snippet: "Product review article about Huawei MA5800.",
+          source: "web"
+        },
+        {
+          title: "Accelerate Success with TheCloudPartner: Trusted Cloud Solutions",
+          url: "https://thecloudpartner.com/",
+          snippet: "Cloud solutions provider.",
+          source: "web"
+        },
+        {
+          title: "by Qatar Multitech Trading & Contracting W.L.L.",
+          url: "https://www.qatarmultitech.com/telecom-engineering",
+          snippet: "Qatar Multitech telecom engineering services.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1" }
+    );
+
+    // None of these should use the raw title as company name.
+    // They should fall back to domain-derived names.
+    const names = candidates.map((c) => c.companyName);
+    expect(names).not.toContain("Qatar Mobile Operators: Which One is the Best 2026");
+    expect(names).not.toContain("Telecom services: project management and certification");
+    expect(names).not.toContain("by Qatar Multitech Trading & Contracting W.L.L.");
+    expect(names).not.toContain("Accelerate Success with TheCloudPartner: Trusted Cloud Solutions");
+    // Domain fallbacks should produce reasonable names:
+    expect(names).toContain("Esimqatar");
+    expect(names).toContain("Applus");
+    // "by Qatar Multitech..." should clean to "Qatar Multitech Trading & Contracting W.L.L."
+    // or fall back to domain "Qatarmultitech"
+    const qmName = names.find((n) => n.toLowerCase().includes("multitech") || n.toLowerCase().includes("qatarmultitech"));
+    expect(qmName).toBeDefined();
+  });
+
   it("scores strong ICP matches and flags risky candidates", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(
