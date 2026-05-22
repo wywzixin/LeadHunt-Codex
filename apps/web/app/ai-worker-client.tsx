@@ -419,6 +419,13 @@ export function AiWorkerClient() {
           const refreshed = await refreshTask(currentTask.id);
           applyTaskProgress(refreshed);
           if (!isBackendTaskActive(refreshed)) {
+            // Backend has reached a terminal state (completed / failed
+            // / paused / cancelled, or has no running agentSteps left).
+            // Release the optimistic flags here — applyTaskProgress
+            // intentionally only lifts them — so the polling effect
+            // can exit instead of looping.
+            setSearching(false);
+            setCreating(false);
             void loadTaskHistory(taskSearch);
             return;
           }
@@ -552,29 +559,28 @@ export function AiWorkerClient() {
     setError("");
     setStatus("已发起新一批搜索，正在等待后端 LLM 规划与 Brave 调用...");
 
-    try {
-      // Fire-and-forget the workflow trigger. The endpoint blocks until
-      // the LangGraph batch finishes, so we pull a fresh snapshot in
-      // parallel via refreshTask. The polling effect (above) will keep
-      // updating the page once currentTask flips to running.
-      void apiRequest(`/api/lead-tasks/${taskId}/search`, {
-        method: "POST",
-        body: JSON.stringify({ limit: 30 })
-      }).catch((requestError) => {
-        // We don't fail the page on a search-trigger error — the polling
-        // loop will surface failed steps as they arrive. Log to status
-        // so the user sees the upstream cause.
-        setError(errorMessage(requestError));
-        setStatus("发起搜索失败，可在状态恢复后重试。");
-      });
-      // Optimistically refresh once so the UI flips to "running" without
-      // waiting for the next poll tick.
-      const refreshedTask = await refreshTask(taskId);
-      applyTaskProgress(refreshedTask);
-    } catch (requestError) {
+    // Fire-and-forget the workflow trigger. The endpoint blocks until
+    // the LangGraph batch finishes, so the polling effect will keep
+    // updating the page once currentTask flips to running.
+    void apiRequest(`/api/lead-tasks/${taskId}/search`, {
+      method: "POST",
+      body: JSON.stringify({ limit: 30 })
+    }).catch((requestError) => {
+      // We don't fail the page on a search-trigger error — the polling
+      // loop will surface failed steps as they arrive. Log to status
+      // so the user sees the upstream cause.
       setError(errorMessage(requestError));
-      setStatus("任务状态刷新失败；后端搜索仍可能继续，可稍后从任务历史打开查看。");
-    }
+      setStatus("发起搜索失败，可在状态恢复后重试。");
+    });
+
+    // Note: we deliberately do NOT call refreshTask + applyTaskProgress
+    // here. If we did, applyTaskProgress would race with the backend —
+    // the task row hasn't flipped to running yet, so isTaskSearching
+    // returns false and immediately resets our optimistic
+    // setSearching(true). That would cause the polling effect to bail
+    // out before the new batch ever shows up. Instead we rely on the
+    // searching=true flag to keep the polling loop alive until the
+    // next tick picks up the real status change.
   }
 
   async function refreshTask(taskId: string) {
@@ -590,8 +596,16 @@ export function AiWorkerClient() {
     );
     const failedMessage = firstFailedStepError(task);
 
-    setCreating(isTaskPlanning(task));
-    setSearching(isTaskSearching(task));
+    // 2026-05 LeadHunt 2.0: only LIFT the optimistic searching/creating
+    // flags; never drop them based on a single snapshot. The user just
+    // clicked "继续搜索 30 条" — the backend may not have flipped the
+    // task row to running yet, so `isTaskSearching` would otherwise
+    // immediately tear down the polling loop and the new batch would
+    // never show up. Once the backend lands a terminal state, the
+    // polling effect itself releases the flags via the dedicated reset
+    // below.
+    if (isTaskPlanning(task)) setCreating(true);
+    if (isTaskSearching(task)) setSearching(true);
     setSearchResult(hasSearchData ? result : null);
     if (failedMessage || task.status === "failed") {
       setError(failedMessage || "任务执行失败。");
@@ -713,10 +727,27 @@ export function AiWorkerClient() {
               onSelectHistoryTask={openPoolFromHistory}
               onRefreshHistory={() => void loadTaskHistory(taskSearch)}
               onContinueSearch={(taskId) => {
-                // Active pool card "继续搜索 30 条" — open the conversation
-                // view and re-trigger the search agent against the task.
+                // Active pool card "继续搜索 30 条" — load the task's
+                // full state (prompt, market terms, prior queries) into
+                // the conversation view, then re-trigger the search
+                // agent. Without the explicit load step, currentTask
+                // stays null and the search page shows the fallback
+                // chips ("UAE/Saudi Arabia/...") instead of the real
+                // task title and target markets.
                 setView("conversation");
-                void runTaskSearch(taskId);
+                void (async () => {
+                  try {
+                    const refreshed = await refreshTask(taskId);
+                    const payload = refreshed.inputPayload as { prompt?: string } | null;
+                    setTaskPrompt(
+                      typeof payload?.prompt === "string" ? payload.prompt : defaultTaskPrompt
+                    );
+                    applyTaskProgress(refreshed);
+                  } catch (requestError) {
+                    setError(errorMessage(requestError));
+                  }
+                  void runTaskSearch(taskId);
+                })();
               }}
             />
           ) : view === "pool" ? (
@@ -2179,13 +2210,32 @@ function AiWorkerConversation({
       ).length ?? 0,
     [currentTask]
   );
-  // The run is complete when there are queries, no pending/running ones,
-  // and the live state isn't actively creating/searching. Mixed
-  // success+failure should still report as "complete" but with the
-  // failure count surfaced so the page never reads "已完成"+"进行中"
-  // simultaneously.
-  const isRunComplete = queryCount > 0 && pendingQueryCount === 0 && !searching && !creating;
-  const isRunActive = searching || creating || pendingQueryCount > 0;
+  // 2026-05 LeadHunt 2.0: when the backend marks the task as
+  // failed/completed/cancelled/paused, the UI must converge to a
+  // terminal display even if a few searchQueries remain in
+  // pending/running (the worker bailed out without finalizing them).
+  // Without this, pendingQueryCount > 0 keeps isRunActive=true and the
+  // page reads "进行中 / ETA / pending" forever.
+  const isTerminalTask =
+    currentTask?.status === "failed" ||
+    currentTask?.status === "completed" ||
+    currentTask?.status === "cancelled" ||
+    currentTask?.status === "paused";
+  // The run is complete when the task is terminal, OR when we've drained
+  // every query and the local searching/creating flags are also off.
+  // Mixed success+failure surfaces the failure count on the run header
+  // so the page never reads "已完成" + "进行中" at the same time.
+  const isRunComplete =
+    isTerminalTask ||
+    (queryCount > 0 && pendingQueryCount === 0 && !searching && !creating);
+  // A run is "active" only when the task itself is still active. If the
+  // task is terminal but a few queries got stranded in pending/running,
+  // we must NOT treat it as active — that's the bug that pinned the
+  // page at "19/40 第 N 批进行中 ETA 6 分钟".
+  const isRunActive = !isTerminalTask && (searching || creating || pendingQueryCount > 0);
+  // Stranded query count for the failure subline. Only meaningful in
+  // terminal state — during active runs these are just queued work.
+  const strandedQueryCount = isTerminalTask ? pendingQueryCount : 0;
   // Rough ETA: each remaining query typically takes ~15s in the polling
   // backend. Floor at 1 minute so we don't say "0 minutes" while there
   // are still queries pending. When everything is done it's hidden.
@@ -2196,8 +2246,8 @@ function AiWorkerConversation({
     return Math.max(1, Math.ceil(seconds / 60));
   }, [isRunActive, pendingQueryCount]);
   const currentRunningQuery = useMemo(
-    () => currentTask?.searchQueries?.find((query) => query.executionStatus === "running") ?? null,
-    [currentTask]
+    () => (isRunActive ? currentTask?.searchQueries?.find((query) => query.executionStatus === "running") ?? null : null),
+    [currentTask, isRunActive]
   );
   // 5-step pills: 生成指令 / Brave 搜索 / 清洗候选 / ICP 评分 / 写入客户池.
   // State derived from agentSteps + searchQueries when available.
@@ -2243,20 +2293,27 @@ function AiWorkerConversation({
     const planningRaw = stateLabelOf(planning);
     const planningState: RunStep["state"] =
       planningRaw === "pending" && queryCount ? "completed" : planningRaw;
-    // Brave 搜索: if any query failed and the run is complete we report
-    // it as failed at the search step so the failure has a home.
+    // Brave 搜索: if any query failed OR stranded in pending/running at
+    // terminal time, surface that failure here. This is the step that
+    // "owns" the search batch, so it's the right home for the failure
+    // signal.
     const searchRaw = stepStateAfterRun(stateLabelOf(search));
     const searchState: RunStep["state"] =
-      isRunComplete && failedQueryCount > 0 ? "failed" : searchRaw;
+      isRunComplete && (failedQueryCount > 0 || strandedQueryCount > 0)
+        ? "failed"
+        : searchRaw;
     const normalizeState = stepStateAfterRun(stateLabelOf(normalize));
     const scoreState = stepStateAfterRun(stateLabelOf(score));
-    // 写入客户池: this is "completed" once the run is over (success or
-    // partial failure both mean we've written what we have). While
-    // active, it tracks the score step (the last node before the lead
-    // pool is updated) plus a small heuristic for when leads start
-    // landing live.
+    // 写入客户池: this is "completed" once the run is over with at
+    // least some leads landed. If the run ended with zero leads we
+    // mark it failed so the timeline reflects reality. While active,
+    // it tracks the score step (the last node before the lead pool is
+    // updated) plus a small heuristic for when leads start landing
+    // live.
     const writeState: RunStep["state"] = isRunComplete
-      ? "completed"
+      ? leads.length > 0
+        ? "completed"
+        : "failed"
       : leads.length > 0
         ? "running"
         : scoreState;
@@ -2292,7 +2349,7 @@ function AiWorkerConversation({
         icon: Database
       }
     ];
-  }, [currentTask, failedQueryCount, isRunComplete, leads.length, queryCount]);
+  }, [currentTask, failedQueryCount, isRunComplete, leads.length, queryCount, strandedQueryCount]);
 
   function formatLogTime(index: number, total: number) {
     // Synthetic ascending HH:mm timestamps so the realtime log reads
@@ -2396,9 +2453,14 @@ function AiWorkerConversation({
                   failedQueryCount ? `，失败 ${failedQueryCount} 条` : ""
                 }`}
               </p>
-            ) : isRunComplete && failedQueryCount > 0 ? (
+            ) : isRunComplete && (failedQueryCount > 0 || strandedQueryCount > 0) ? (
               <p>
-                {`本批已跑完：${executedCount} 条成功，${failedQueryCount} 条失败`}
+                {(() => {
+                  const parts: string[] = [`${executedCount} 条成功`];
+                  if (failedQueryCount > 0) parts.push(`${failedQueryCount} 条失败`);
+                  if (strandedQueryCount > 0) parts.push(`${strandedQueryCount} 条未完成`);
+                  return `本批已停止：${parts.join("，")}`;
+                })()}
               </p>
             ) : !isRunComplete ? (
               <p>{status}</p>
@@ -2440,7 +2502,9 @@ function AiWorkerConversation({
                 {isRunActive
                   ? `第 ${Math.max(1, Math.ceil(queryCount / 30))} 批正在搜索中...`
                   : isRunComplete
-                    ? "本批搜索已完成"
+                    ? failedQueryCount > 0 || strandedQueryCount > 0
+                      ? "本批已停止"
+                      : "本批搜索已完成"
                     : "等待启动"}
               </strong>
               {isRunActive ? (
@@ -2480,6 +2544,9 @@ function AiWorkerConversation({
               本批新增 <strong>{leads.length}</strong> 家客户
               {failedQueryCount > 0
                 ? `，${failedQueryCount} 条 query 失败已忽略`
+                : ""}
+              {strandedQueryCount > 0
+                ? `，${strandedQueryCount} 条 query 未完成`
                 : ""}
             </p>
 
@@ -2526,8 +2593,8 @@ function AiWorkerConversation({
                 {isRunActive
                   ? "实时更新中"
                   : isRunComplete
-                    ? failedQueryCount > 0
-                      ? "已完成（含失败）"
+                    ? failedQueryCount > 0 || strandedQueryCount > 0
+                      ? "已停止（含未完成）"
                       : "已完成"
                     : "未启动"}
               </span>
