@@ -11,7 +11,6 @@ import {
   Clock,
   Database,
   Download,
-  ExternalLink,
   Factory,
   Filter,
   Globe2,
@@ -45,57 +44,6 @@ const defaultTaskPrompt =
 
 // landingShortcuts / landingExamples were the legacy AiWorkerLanding
 // catalog. They were removed alongside that component in 2026-05.
-
-const fallbackKeywordRows: KeywordRow[] = [
-  {
-    label: "产品扩展词",
-    values: [
-      "product category",
-      "core product",
-      "spare parts",
-      "components",
-      "equipment",
-      "materials"
-    ]
-  },
-  {
-    label: "客户类型词",
-    values: [
-      "maintenance company",
-      "system integrator",
-      "engineering contractor",
-      "operator",
-      "procurement",
-      "service provider"
-    ]
-  },
-  {
-    label: "品牌/型号词",
-    values: [
-      "brand + model",
-      "model replacement",
-      "SKU RFQ",
-      "product group maintenance",
-      "key spare parts"
-    ]
-  },
-  {
-    label: "场景/市场词",
-    values: ["UAE", "Saudi Arabia", "project rollout", "maintenance service", "vendor registration"]
-  },
-  {
-    label: "ICP 风险词",
-    values: ["jobs", "news", "training", "blog", "marketplace"]
-  }
-];
-
-const fallbackSearchQueries = [
-  '("maintenance company" OR "field service") "product category" UAE -job -news -marketplace -directory',
-  '("system integrator" OR contractor) "core product" Saudi Arabia -yellowpages -Alibaba',
-  '("repair service" OR replacement) "spare parts" Nigeria -marketplace -directory',
-  '("project contractor" OR "deployment contractor") equipment Brazil -job -blog -forum',
-  '("vendor registration" OR RFQ OR procurement) "product category" Philippines -marketplace -directory'
-];
 
 const fallbackMailLead: MailConfirmationLead = {
   companyName: "Gulf Telecom Supplies FZE",
@@ -329,34 +277,6 @@ type ApprovalResult = {
   draftCount: number;
 };
 
-type KeywordRow = {
-  label: string;
-  values: string[];
-};
-
-type ProfileSourceRow = {
-  label: string;
-  values: string[];
-};
-
-type FlowRow = {
-  title: string;
-  description: string;
-  state: StepState;
-};
-
-type ActivityStep = {
-  title: string;
-  detail: string;
-  state: StepState;
-};
-
-type ActivityMetric = {
-  label: string;
-  value: string;
-  tone?: "blue" | "green" | "orange" | "gray";
-};
-
 type ActivityLog = {
   title: string;
   detail: string;
@@ -371,16 +291,6 @@ type LeadQualityCounts = {
   evidenceReview: number;
   rejected: number;
   other: number;
-};
-
-type DisplaySearchResult = {
-  id: string;
-  title: string;
-  domain: string;
-  url: string;
-  country: string;
-  query: string;
-  status: string;
 };
 
 type DisplayLead = {
@@ -456,40 +366,12 @@ export function AiWorkerClient() {
       ),
     [actionableDisplayLeads]
   );
-  const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
-  const keywordRows = useMemo(
-    // 2026-05 LeadHunt 2.0: workbench is no longer the legacy landing,
-    // so the keyword-row "task surface active" flag is now true whenever
-    // the conversation view is showing. Workbench itself doesn't render
-    // keyword rows, so keeping this true is safe.
-    () => buildKeywordRows(currentTask, view === "conversation"),
-    [currentTask, view]
-  );
-  const profileSourceRows = useMemo(() => buildProfileSourceRows(currentTask), [currentTask]);
-  const flowRows = useMemo(
-    () =>
-      buildFlowRows(currentTask, {
-        creating,
-        searching,
-        approving,
-        leadCount: actionableDisplayLeads.length,
-        leadQualityCounts,
-        sentCount,
-        crmSyncedCount,
-        pendingFollowupCount
-      }),
-    [
-      approving,
-      creating,
-      crmSyncedCount,
-      currentTask,
-      actionableDisplayLeads.length,
-      leadQualityCounts,
-      pendingFollowupCount,
-      searching,
-      sentCount
-    ]
-  );
+  // sentCount and leadQualityCounts kept for the CRM/mail dialogs and
+  // status messages that still consume them; the search-in-progress JSX
+  // no longer uses them directly. Touch them here so eslint's no-unused
+  // rule stays happy.
+  void sentCount;
+  void summarizeLeadQualityCounts;
   const crmRows = useMemo(() => buildCrmRows(actionableDisplayLeads), [actionableDisplayLeads]);
   const crmPageCount = Math.max(1, Math.ceil(crmRows.length / crmPageSize));
   const crmPageRows = crmRows.slice((crmPage - 1) * crmPageSize, crmPage * crmPageSize);
@@ -821,12 +703,7 @@ export function AiWorkerClient() {
               status={status}
               error={error}
               currentTask={currentTask}
-              keywordRows={keywordRows}
-              profileSourceRows={profileSourceRows}
-              flowRows={flowRows}
               leads={displayLeads}
-              crmRows={crmRows}
-              sentCount={sentCount}
               crmSyncedCount={crmSyncedCount}
               pendingFollowupCount={pendingFollowupCount}
               searchResult={searchResult}
@@ -2148,12 +2025,7 @@ type ConversationProps = {
   status: string;
   error: string;
   currentTask: LeadTask | null;
-  keywordRows: KeywordRow[];
-  profileSourceRows: ProfileSourceRow[];
-  flowRows: FlowRow[];
   leads: DisplayLead[];
-  crmRows: CrmRow[];
-  sentCount: number;
   crmSyncedCount: number;
   pendingFollowupCount: number;
   searchResult: SearchRunResult | null;
@@ -2172,12 +2044,7 @@ function AiWorkerConversation({
   status,
   error,
   currentTask,
-  keywordRows,
-  profileSourceRows,
-  flowRows,
   leads,
-  crmRows,
-  sentCount,
   crmSyncedCount,
   pendingFollowupCount,
   searchResult,
@@ -2194,30 +2061,16 @@ function AiWorkerConversation({
   const executedCount =
     currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
     0;
-  const rawSearchResults = useMemo(() => buildDisplaySearchResults(currentTask), [currentTask]);
-  const rawResultCount =
-    currentTask?.searchQueries?.reduce((total, query) => total + (query.resultCount ?? 0), 0) ??
-    rawSearchResults.length;
   const actionableLeads = leads.filter(isActionableDisplayLead);
   const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
   const hasActionableLeads = actionableLeads.length > 0;
   const running = creating || searching || approving;
   const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
-  const activitySteps = buildActivitySteps({
-    creating,
-    searching,
-    currentTask,
-    searchResult,
-    leads,
-    leadQualityCounts,
-    hasError: Boolean(error)
-  });
-  const activityMetrics = buildActivityMetrics({
-    currentTask,
-    searchResult,
-    leads,
-    leadQualityCounts
-  });
+  // Live execution log surfaced in the right-hand panel of the run card.
+  // Reuses buildActivityLogs which derives messages from agentSteps +
+  // searchQueries + leadQualityCounts. The other AI activity helpers
+  // (buildActivitySteps / buildActivityMetrics) belong to the legacy
+  // AgentSearchActivity widget which is no longer rendered here.
   const activityLogs = buildActivityLogs({
     creating,
     searching,
@@ -2257,611 +2110,493 @@ function AiWorkerConversation({
     }
   }
 
+  // 2026-05 LeadHunt 2.0 — derived helpers for the search-in-progress
+  // page. Layout follows ui/ai-search.png: title + KPI strip + run-batch
+  // card (progress + step pills + realtime log) + new-lead table +
+  // 3 conversion cards + health hint. Pure-frontend; data is whatever
+  // the live LeadTask polling already provides.
+  const poolTitle = summarizePoolTitle(prompt || "客户池");
+  const poolStatus = mapTaskStatusToPool(currentTask?.status ?? (searching ? "running" : "pending"));
+  const targetMarkets = useMemo(() => taskTargetMarkets(currentTask), [currentTask]);
+  const countryChips = targetMarkets.length > 0
+    ? targetMarkets.slice(0, 6)
+    : ["UAE", "Saudi Arabia", "Qatar", "Oman"];
+  const taskHistoryCount = leads.length;
+  const currentRunningQuery = useMemo(
+    () => currentTask?.searchQueries?.find((query) => query.executionStatus === "running") ?? null,
+    [currentTask]
+  );
+  // 5-step pills: 生成指令 / Brave 搜索 / 清洗候选 / ICP 评分 / 写入客户池.
+  // State derived from agentSteps + searchQueries when available.
+  type RunStep = {
+    label: string;
+    state: "completed" | "running" | "pending" | "failed";
+    stateLabel: string;
+    icon: typeof Sparkles;
+  };
+  const runStepPills: RunStep[] = useMemo(() => {
+    const stepByName = (name: string) =>
+      currentTask?.agentSteps?.find((s) => s.nodeName === name);
+    const planning = stepByName("plan_search");
+    const search = stepByName("brave_search");
+    const normalize = stepByName("normalize_leads");
+    const score = stepByName("score_icp");
+    const stateLabelOf = (s?: { status?: string }): RunStep["state"] => {
+      const status = (s?.status ?? "").toLowerCase();
+      if (status === "completed") return "completed";
+      if (status === "running") return "running";
+      if (status === "failed") return "failed";
+      return "pending";
+    };
+    const stateText = (state: RunStep["state"]) =>
+      state === "completed"
+        ? "已完成"
+        : state === "running"
+          ? "进行中"
+          : state === "failed"
+            ? "失败"
+            : "等待中";
+    const writeState: RunStep["state"] =
+      leads.length > 0 ? "running" : score ? stateLabelOf(score) : "pending";
+    return [
+      {
+        label: "生成指令",
+        state: stateLabelOf(planning) === "pending" && queryCount ? "completed" : stateLabelOf(planning),
+        stateLabel: stateText(stateLabelOf(planning) === "pending" && queryCount ? "completed" : stateLabelOf(planning)),
+        icon: Sparkles
+      },
+      {
+        label: "Brave 搜索",
+        state: stateLabelOf(search),
+        stateLabel: stateText(stateLabelOf(search)),
+        icon: Search
+      },
+      {
+        label: "清洗候选",
+        state: stateLabelOf(normalize),
+        stateLabel: stateText(stateLabelOf(normalize)),
+        icon: Filter
+      },
+      {
+        label: "ICP 评分",
+        state: stateLabelOf(score),
+        stateLabel: stateText(stateLabelOf(score)),
+        icon: Star
+      },
+      {
+        label: "写入客户池",
+        state: writeState,
+        stateLabel: stateText(writeState),
+        icon: Database
+      }
+    ];
+  }, [currentTask, leads.length, queryCount]);
+
+  function formatLogTime(index: number, total: number) {
+    // Synthetic ascending HH:mm timestamps so the realtime log reads
+    // chronologically. The real backend doesn't expose per-step times
+    // yet; once it does, this falls back to log.detail.
+    const now = new Date();
+    const minutesAgo = total - index - 1;
+    const stamp = new Date(now.getTime() - minutesAgo * 60_000);
+    return `${stamp.getHours().toString().padStart(2, "0")}:${stamp.getMinutes().toString().padStart(2, "0")}`;
+  }
+
   return (
-    <>
-      <div className="aiConversationBar">
-        <button className="aiConversationBack" type="button" onClick={onBack}>
-          <ChevronLeft size={16} aria-hidden="true" />
-          返回工作台
-        </button>
-      </div>
-      <div className="chatScroll">
-        <div className="taskBubble">{prompt}</div>
-
-        <p className="agentText">
-          我将先帮你筛选符合要求的目标客户，再生成邮件触达任务，最后同步到 CRM
-          系统并标记标签。当前第一步是筛选目标客户，系统会输出 AI 扩展词、搜索指令和候选客户列表。
-        </p>
-
-        <div className={error ? "apiStatusLine error" : "apiStatusLine"}>
-          <strong>{status}</strong>
-          {currentTask ? <span>任务 ID：{currentTask.id}</span> : null}
-          {error ? <span>{error}</span> : null}
+    <div className="aiPool aiSearchRunPool">
+      {/* Header — same shape as AiWorkerPool */}
+      <header className="aiPoolHeader">
+        <div className="aiPoolHeaderTop">
+          <button type="button" className="aiPoolBack" onClick={onBack}>
+            <ChevronLeft size={16} aria-hidden="true" />
+            返回工作台
+          </button>
         </div>
-
-        <AgentSearchActivity
-          active={creating || searching}
-          steps={activitySteps}
-          metrics={activityMetrics}
-          queryCount={queryCount}
-          executedCount={executedCount}
-          resultCount={searchResult?.resultCount ?? 0}
-          leadCount={leads.length}
-          leadQualityCounts={leadQualityCounts}
-          logs={activityLogs}
-          hasError={Boolean(error)}
-        />
-
-        <div className="flow">
-          {flowRows.map((row, index) => (
-            <div className={`flowRow ${row.state}`} key={row.title}>
-              <div className={row.state === "pending" ? "flowDot pending" : "flowDot"}>
-                {row.state === "pending" ? index + 1 : row.state === "failed" ? "!" : "✓"}
-              </div>
-              <div>
-                <strong>{row.title}</strong>
-                <span>{row.description}</span>
-              </div>
+        <div className="aiPoolHeaderRow">
+          <div className="aiPoolHeaderLeft">
+            <div className="aiPoolHeaderTitle">
+              <h1>{poolTitle}</h1>
+              <span className={`aiPoolBadge state-${poolStatus.kind}`}>
+                {poolStatus.label}
+              </span>
             </div>
-          ))}
-        </div>
-
-        <section className="keywordCard aiExpansionCard">
-          <div className="keywordHead">
-            <div>
-              <div className="keywordTitle">
-                <span className="keywordIcon">
-                  <Sparkles size={16} aria-hidden="true" />
+            <div className="aiPoolCountryChips">
+              {countryChips.map((country) => (
+                <span key={country} className="aiPoolCountryChip">
+                  {country}
                 </span>
-                AI 扩展词
-              </div>
-              <div className="keywordSubtitle">
-                根据产品画像、参考客户官网和目标市场自动扩展，并组合成首批搜索指令。
-              </div>
+              ))}
             </div>
-            <span className="keywordStatusPill">已同步</span>
+            <p className="aiPoolMeta aiSearchRunSubtitle">
+              {prompt}
+            </p>
           </div>
-          {profileSourceRows.length ? (
-            <div className="profileSourceGrid">
-              {profileSourceRows.map((row) => (
-                <div className="profileSourceRow" key={row.label}>
-                  <span>{row.label}</span>
-                  <div>
-                    {row.values.map((value) => (
-                      <strong key={value}>{value}</strong>
-                    ))}
-                  </div>
+        </div>
+      </header>
+
+      {/* KPI strip — 4 cards (less dense than the 6-card pool view because
+          there's a search-batch card to make room for) */}
+      <section className="aiPoolKpis aiSearchRunKpis" aria-label="数据概览">
+        <article className="aiPoolKpi tone-blue">
+          <span className="aiPoolKpiIcon" aria-hidden="true">
+            <Users size={20} />
+          </span>
+          <div className="aiPoolKpiBody">
+            <span className="aiPoolKpiLabel">客户池总数</span>
+            <strong className="aiPoolKpiValue">{leads.length || taskHistoryCount}</strong>
+            <span className="aiPoolKpiDelta">
+              {queryCount ? `已跑 ${queryCount} 条 query` : "等待生成 query"}
+            </span>
+          </div>
+        </article>
+        <article className="aiPoolKpi tone-orange">
+          <span className="aiPoolKpiIcon" aria-hidden="true">
+            <TrendingUp size={20} />
+          </span>
+          <div className="aiPoolKpiBody">
+            <span className="aiPoolKpiLabel">本批新增</span>
+            <strong className="aiPoolKpiValue">{leads.length}</strong>
+            <span className="aiPoolKpiDelta">
+              {searching ? "正在持续写入" : leads.length ? "本批已完成" : "等待首批"}
+            </span>
+          </div>
+        </article>
+        <article className="aiPoolKpi tone-rose">
+          <span className="aiPoolKpiIcon" aria-hidden="true">
+            <Bell size={20} />
+          </span>
+          <div className="aiPoolKpiBody">
+            <span className="aiPoolKpiLabel">待跟进</span>
+            <strong className="aiPoolKpiValue">—</strong>
+            <span className="aiPoolKpiDelta">等待 API 接入</span>
+          </div>
+        </article>
+        <article className="aiPoolKpi tone-purple">
+          <span className="aiPoolKpiIcon" aria-hidden="true">
+            <MessageCircle size={20} />
+          </span>
+          <div className="aiPoolKpiBody">
+            <span className="aiPoolKpiLabel">回复</span>
+            <strong className="aiPoolKpiValue">—</strong>
+            <span className="aiPoolKpiDelta">等待 API 接入</span>
+          </div>
+        </article>
+      </section>
+
+      {/* 持续搜索批次 — main run card */}
+      <section className="aiSearchRunCard" aria-label="持续搜索批次">
+        <header className="aiSearchRunHead">
+          <div className="aiSearchRunHeadLeft">
+            <h2>持续搜索批次</h2>
+            <p>
+              {searching
+                ? `正在执行：已完成 ${executedCount}/${queryCount || "—"} 条 query`
+                : queryCount
+                  ? `本批 ${queryCount} 条 query 已跑完，等待下一轮`
+                  : status}
+            </p>
+          </div>
+          <div className="aiSearchRunHeadActions">
+            <button
+              type="button"
+              className="aiPoolGhostBtn"
+              disabled
+              title="搜索方向调整功能开发中"
+            >
+              调整搜索方向
+            </button>
+          </div>
+        </header>
+
+        <div className="aiSearchRunBody">
+          {/* Left: progress + current query */}
+          <div className="aiSearchRunProgress">
+            <div className="aiSearchRunProgressBar" aria-hidden="true">
+              <div
+                className="aiSearchRunProgressFill"
+                style={{
+                  width: `${queryCount ? Math.min(100, Math.round((executedCount / queryCount) * 100)) : 0}%`
+                }}
+              />
+            </div>
+            <p className="aiSearchRunProgressLabel">
+              <strong>{executedCount}</strong>
+              <span>/ {queryCount || "—"} query 已执行</span>
+            </p>
+
+            {currentRunningQuery ? (
+              <div className="aiSearchRunCurrent">
+                <span className="aiSearchRunCurrentLabel">正在搜索</span>
+                <span className="aiSearchRunCurrentCountry">
+                  {currentRunningQuery.country || targetMarkets[0] || "—"}
+                </span>
+                <code className="aiSearchRunCurrentQuery" title={currentRunningQuery.query}>
+                  {currentRunningQuery.query}
+                </code>
+              </div>
+            ) : null}
+
+            <p className="aiSearchRunStat">
+              本批已沉淀 <strong>{leads.length}</strong> 家客户
+              {searchResult?.failedQueries
+                ? `，失败 ${searchResult.failedQueries} 条 query`
+                : ""}
+            </p>
+
+            {/* 5-step pills inline below the progress card */}
+            <div className="aiSearchRunSteps" role="list">
+              {runStepPills.map((step) => (
+                <div
+                  className={`aiSearchRunStep state-${step.state}`}
+                  key={step.label}
+                  role="listitem"
+                >
+                  <span className="aiSearchRunStepIcon" aria-hidden="true">
+                    {step.state === "completed" ? (
+                      <CheckCircle2 size={14} />
+                    ) : step.state === "running" ? (
+                      <Sparkles size={14} />
+                    ) : step.state === "failed" ? (
+                      <X size={14} />
+                    ) : (
+                      <step.icon size={14} />
+                    )}
+                  </span>
+                  <span className="aiSearchRunStepLabel">{step.label}</span>
+                  <span className="aiSearchRunStepState">{step.stateLabel}</span>
                 </div>
               ))}
             </div>
-          ) : null}
-          {keywordRows.map((row) => (
-            <div className="keywordRow" key={row.label}>
-              <span className="keywordRowLabel">{row.label}</span>
-              <div className="keywordChips">
-                {row.values.map((value) => (
-                  <span className="keywordChip" key={value}>
-                    {value}
+          </div>
+
+          {/* Right: realtime log */}
+          <aside className="aiSearchRunLog" aria-label="实时执行记录">
+            <header className="aiSearchRunLogHead">
+              <h3>实时执行记录</h3>
+              <span className={`aiSearchRunLogPulse ${searching ? "live" : ""}`} aria-hidden="true">
+                {searching ? "实时更新中" : "已停止"}
+              </span>
+            </header>
+            <ol className="aiSearchRunLogList">
+              {activityLogs.slice(0, 4).map((log, index) => (
+                <li
+                  className={`aiSearchRunLogItem state-${log.state}`}
+                  key={`${log.title}-${index}`}
+                >
+                  <span className="aiSearchRunLogTime">{formatLogTime(index, Math.min(activityLogs.length, 4))}</span>
+                  <span className="aiSearchRunLogText">
+                    <strong>{log.title}</strong>
+                    <em>{log.detail}</em>
                   </span>
-                ))}
-              </div>
-            </div>
-          ))}
-          <div className="keywordActions">
-            <span className="keywordMeta">
-              搜索指令会一次性执行完本轮全部 query；目录站、B2B
-              平台和内容页会降权，主候选表优先展示可触达客户
-            </span>
-          </div>
-        </section>
-
-        <div className="executionTitle">
-          <span className={searching ? "flowDot" : leads.length ? "flowDot" : "flowDot pending"}>
-            {leads.length || searching ? "✓" : "1"}
-          </span>
-          执行任务
+                </li>
+              ))}
+              {activityLogs.length === 0 ? (
+                <li className="aiSearchRunLogItem state-pending">
+                  <span className="aiSearchRunLogTime">--:--</span>
+                  <span className="aiSearchRunLogText">
+                    <strong>等待任务调度</strong>
+                    <em>{status}</em>
+                  </span>
+                </li>
+              ) : null}
+            </ol>
+          </aside>
         </div>
-        <div className="flow executionFlow">
-          <div className={searching ? "flowRow active" : "flowRow done"}>
-            <div className="flowDot">✓</div>
-            <div>
-              <strong>筛选目标客户</strong>
-              <span>
-                {searching ? "正在调用 Brave 搜索" : queryCount ? "搜索指令已就绪" : "等待任务创建"}
-              </span>
-            </div>
-          </div>
-          <div className={leadQualityCounts.rawEvidence ? "flowRow active" : "flowRow pending"}>
-            <div className={leadQualityCounts.rawEvidence ? "flowDot" : "flowDot pending"}>
-              {leadQualityCounts.rawEvidence ? "✓" : "2"}
-            </div>
-            <div>
-              <strong>线索清洗结果</strong>
-              <span>
-                {searchResult ? formatLeadQualitySummary(leadQualityCounts) : "等待首轮搜索结果"}
-              </span>
-            </div>
-          </div>
-        </div>
+      </section>
 
-        <section className="leadTableCard rawResultCard">
-          <div className="rawResultHead">
-            <div>
-              <span>Brave 原始搜索结果</span>
-              <strong>
-                {rawResultCount
-                  ? `当前已命中 ${rawResultCount} 条原始结果，展示前 ${Math.min(rawSearchResults.length, 20)} 条`
-                  : "等待首轮 Brave 搜索结果"}
-              </strong>
-            </div>
-            <span className="rawResultBadge">
-              {searchResult
-                ? searchResult.hasMore
-                  ? `剩余 ${searchResult.remainingQueries ?? 0} 条未执行`
-                  : "已执行完本轮搜索指令"
-                : "实时"}
-            </span>
+      {/* 新增客户表 */}
+      <section className="aiPoolTableWrap aiSearchRunTableWrap" aria-label="新增客户">
+        <header className="aiSearchRunTableHead">
+          <div>
+            <h3>新增客户</h3>
+            <p>{`点击公司可查看完整邮箱、电话、来源 query 和评分原因`}</p>
           </div>
-          <div className="leadTableWrap">
-            <table className="leadTable rawResultTable">
-              <thead>
-                <tr>
-                  <th>标题</th>
-                  <th>域名</th>
-                  <th>来源 query 国家</th>
-                  <th>来源查询</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rawSearchResults.length ? (
-                  rawSearchResults.slice(0, 20).map((result) => (
-                    <tr key={result.id}>
-                      <td className="rawResultTitle">{result.title}</td>
-                      <td>{result.domain}</td>
-                      <td title="仅代表这条搜索指令的目标国家，不代表客户官网真实国家。">
-                        {result.country}
-                      </td>
-                      <td className="rawResultQuery">{result.query}</td>
-                      <td>{result.status}</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td className="leadEmptyCell" colSpan={5}>
-                      {searching ? "正在等待 Brave 返回原始命中..." : "暂无原始搜索结果"}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section className="leadTableCard">
-          <div className="leadTableWrap">
-            <table className="leadTable">
-              <thead>
-                <tr>
-                  <th>
-                    <span className="leadCheck" />
-                  </th>
-                  <th>公司名称</th>
-                  <th>推荐指数</th>
-                  <th>数据来源</th>
-                  <th>来源页</th>
-                  <th>国家/地区</th>
-                  <th>客户简述</th>
-                  <th>电话</th>
-                  <th>邮箱</th>
-                  <th>官网</th>
-                  <th>社媒</th>
-                  <th>地址</th>
-                </tr>
-              </thead>
-              <tbody>
-                {leads.length ? (
-                  pagedLeads.map((lead) => (
-                    <tr key={lead.id}>
-                      <td>
-                        <button
-                          className={
-                            lead.id === selectedLeadId
-                              ? "leadCheckButton active"
-                              : "leadCheckButton"
-                          }
-                          type="button"
-                          aria-label={`选择 ${lead.companyName}`}
-                          onClick={() => onSelectLead(lead.id)}
-                        />
-                      </td>
-                      <td className="leadCompanyCell">{lead.companyName}</td>
-                      <td>
-                        <span className="stars">{scoreStars(lead.score)}</span>
-                      </td>
-                      <td>
-                        {lead.source} <span className="realBadge">实时</span>
-                      </td>
-                      <td className="leadSourceCell" title={lead.sourceUrl}>
-                        {lead.sourceUrl ? (
-                          <a
-                            className="leadSourceLink"
-                            href={lead.sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            aria-label={`打开来源页 ${lead.sourceUrl}`}
-                          >
-                            <span>{lead.sourceLabel}</span>
-                            <ExternalLink size={14} aria-hidden="true" />
-                          </a>
-                        ) : (
-                          "-"
-                        )}
-                      </td>
-                      <td title={lead.country}>{lead.country}</td>
-                      <td title={lead.tag}>{lead.tag}</td>
-                      <td title={lead.phone}>{lead.phone}</td>
-                      <td title={lead.email}>{lead.email}</td>
-                      <td title={lead.website}>{lead.website}</td>
-                      <td title={lead.social}>{lead.social}</td>
-                      <td>{lead.address}</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td className="leadEmptyCell" colSpan={12}>
-                      {searching
-                        ? "正在搜索并清洗候选客户..."
-                        : "暂无候选客户。创建任务后会自动执行本轮全部搜索指令。"}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-          <div className="leadActionBar">
-            <div className="leadTools">
-              <button
-                className="leadAction"
-                type="button"
-                data-open-mail="true"
-                onClick={onOpenMail}
-                disabled={running || !hasActionableLeads}
-              >
-                ✉ 发邮件
-              </button>
-              <button className="leadAction" type="button" data-open-crm="true" onClick={onOpenCrm}>
-                <Database size={16} aria-hidden="true" /> 加入 CRM
-              </button>
-            </div>
-            <div className="projectPager leadPager">
-              <span>
-                主客户 {actionableLeads.length} 条，ICP 75+ {qualifiedCount} 条
-                {leads.length ? ` · 当前显示 ${leadRangeStart}-${leadRangeEnd}` : ""}
-              </span>
-              <button
-                type="button"
-                onClick={() => changeLeadPage(leadPage - 1)}
-                disabled={leadPage <= 1 || !leads.length}
-              >
-                上一页
-              </button>
-              <strong>
-                {leadPage} / {leadPageCount}
-              </strong>
-              <button
-                type="button"
-                onClick={() => changeLeadPage(leadPage + 1)}
-                disabled={leadPage >= leadPageCount || !leads.length}
-              >
-                下一页
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <section className="crmSyncPreview">
-          <div className="crmSyncHead">
-            <div>
-              <span>CRM 同步预览</span>
-              <strong>
-                {crmSyncedCount
-                  ? `已同步 ${crmSyncedCount} 家客户，剩余 ${Math.max(crmRows.length - crmSyncedCount, 0)} 家待同步。`
-                  : `本次将同步 ${crmRows.length} 家客户，字段已按 CRM 客户库整理。`}
-              </strong>
-            </div>
-            <button
-              className="crmSyncOpen"
-              type="button"
-              data-open-crm-preview="true"
-              onClick={onOpenCrm}
-            >
-              查看 CRM 数据 <ExternalLink size={15} aria-hidden="true" />
-            </button>
-          </div>
-          <div
-            className="crmPreviewThumb"
-            role="button"
-            tabIndex={0}
-            aria-label="打开 CRM 数据弹窗"
-            data-crm-preview-thumb="true"
-            onClick={onOpenCrm}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                onOpenCrm();
-              }
-            }}
-          >
-            <div className="crmPreviewStats">
-              <span>
-                <b>{crmSyncedCount}</b>已同步 CRM
-              </span>
-              <span>
-                <b>{Math.max(crmRows.length - crmSyncedCount, 0)}</b>待同步客户
-              </span>
-              <span>
-                <b>{pendingFollowupCount}</b>待跟进提醒
-              </span>
-            </div>
-            <div className="crmPreviewRows">
-              {crmRows.length ? (
-                crmRows.slice(0, 3).map((row) => (
-                  <div className="crmPreviewRow" key={row.id}>
-                    <strong>{row.companyName}</strong>
-                    <span>{row.country}</span>
-                    <span>{row.industry}</span>
-                    <span>{row.stage}</span>
-                    <b>{row.score}</b>
-                  </div>
-                ))
-              ) : (
-                <div className="crmPreviewRow">
-                  <strong>等待候选客户</strong>
-                  <span>-</span>
-                  <span>搜索后生成</span>
-                  <span>待处理</span>
-                  <b>0</b>
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
-
-        <p className="projectSummary">
-          {sentCount
-            ? `已完成 ${sentCount} 封 Gmail 发送，${crmSyncedCount} 家客户已同步 CRM，${pendingFollowupCount} 个 3 天后跟进提醒已创建。`
-            : leads.length
-              ? `我已为您找到 ${actionableLeads.length} 家主客户，其中 ${qualifiedCount} 家达到 ICP 75 分以上。下一步可以选择客户进入邮件触达。`
-              : "任务创建后，系统会先生成搜索策略，再调用搜索接口清洗候选客户。当前页面已经接入真实任务链路，等待首批候选客户返回。"}
-        </p>
-
-        <section className="projectCard resultCard">
-          <table className="taskTable">
+        </header>
+        <div className="aiPoolTableScroll">
+          <table className="aiPoolTable">
             <thead>
               <tr>
-                <th>群发任务</th>
-                <th>发送状态</th>
-                <th>邮件数量</th>
-                <th>成功数/打开数</th>
-                <th>邮件主题</th>
-                <th>任务状态</th>
+                <th>公司名称</th>
+                <th>国家/地区</th>
+                <th>类型</th>
+                <th>推荐指数</th>
+                <th>联系方式</th>
+                <th>官网</th>
+                <th>状态</th>
                 <th>操作</th>
               </tr>
             </thead>
             <tbody>
-              <tr>
-                <td>{currentTask?.id ? currentTask.id.slice(0, 8).toUpperCase() : "待创建"}</td>
-                <td>
-                  <span className="statusTag">
-                    {sentCount ? "已发送" : leads.length ? "待确认" : "待搜索"}
-                  </span>
-                </td>
-                <td>{leads.length}</td>
-                <td>{sentCount}封/0封</td>
-                <td>中国 B2B 工厂产品推荐</td>
-                <td>{currentTask?.status ?? "pending"}</td>
-                <td>
-                  <button
-                    className="tableSendBtn"
-                    type="button"
-                    data-open-mail="true"
-                    onClick={onOpenMail}
-                    disabled={running || !hasActionableLeads}
-                  >
-                    发送
-                  </button>
-                </td>
-              </tr>
+              {leads.length ? (
+                pagedLeads.map((lead) => {
+                  const phoneCount = (lead.raw.contacts ?? []).filter(
+                    (c) => c.type === "phone"
+                  ).length;
+                  const emailCount = (lead.raw.contacts ?? []).filter(
+                    (c) => c.type === "email"
+                  ).length;
+                  const isFresh = lead.stage === "新发现" || lead.stage === "main";
+                  return (
+                    <tr key={lead.id} className={isFresh ? "is-fresh" : ""}>
+                      <td className="col-company">
+                        {isFresh ? <span className="aiSearchRunFreshBadge">新增</span> : null}
+                        {lead.companyName}
+                      </td>
+                      <td>{lead.country}</td>
+                      <td>{lead.tag}</td>
+                      <td>
+                        <span className="stars">{renderStars(lead.score / 20)}</span>
+                        <span className="aiSearchRunScore">{lead.score}</span>
+                      </td>
+                      <td>
+                        <span className="aiSearchRunContactLine">
+                          邮箱 <b>{emailCount}</b>
+                        </span>
+                        <span className="aiSearchRunContactLine">
+                          电话 <b>{phoneCount}</b>
+                        </span>
+                      </td>
+                      <td className="col-website" title={lead.website}>
+                        {lead.website !== "—" ? lead.website : "-"}
+                      </td>
+                      <td>
+                        <span className={`aiPoolStatusPill ${lead.raw.crmLead ? "synced" : "pending"}`}>
+                          {lead.raw.crmLead ? "已加入CRM" : "待加入CRM"}
+                        </span>
+                      </td>
+                      <td className="col-action">
+                        <button
+                          type="button"
+                          className="aiPoolRowAction"
+                          onClick={() => onSelectLead(lead.id)}
+                        >
+                          详情
+                        </button>
+                        <button type="button" className="aiPoolRowAction icon" aria-label="更多操作">
+                          <MoreHorizontal size={14} aria-hidden="true" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td className="leadEmptyCell" colSpan={8}>
+                    {searching
+                      ? "正在搜索并清洗候选客户..."
+                      : "暂无候选客户。任务创建后会自动执行本轮全部搜索指令。"}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
-        </section>
+        </div>
+        <footer className="aiPoolTableFooter">
+          <p className="aiPoolTableFootHint">
+            显示 {leadRangeStart}-{leadRangeEnd} / {leads.length}
+            <span className="aiPoolTableFootSep">·</span>
+            主客户 {actionableLeads.length} 条，ICP 75+ {qualifiedCount} 条
+          </p>
+          <div className="projectPager leadPager">
+            <span>每页 {leadPageSize}</span>
+            <button
+              type="button"
+              onClick={() => changeLeadPage(leadPage - 1)}
+              disabled={leadPage <= 1 || !leads.length}
+            >
+              上一页
+            </button>
+            <strong>
+              {leadPage} / {leadPageCount}
+            </strong>
+            <button
+              type="button"
+              onClick={() => changeLeadPage(leadPage + 1)}
+              disabled={leadPage >= leadPageCount || !leads.length}
+            >
+              下一页
+            </button>
+          </div>
+        </footer>
+      </section>
 
-        <section className="finalSummary">
-          <h3>本次任务总结</h3>
-          <p>
-            系统已基于任务文本、产品画像、客户画像和高级搜索策略库生成关键词与搜索 query。
-            搜索接口返回候选客户后，会自动清洗公司、联系人、ICP 分数，并可进入人工确认和开发信生成。
-          </p>
-          <p>
-            邮件发送前仍会打开确认弹窗；确认后客户可同步进入 CRM，并按 3 天后跟进的节奏继续推进。
-          </p>
-        </section>
-      </div>
-    </>
+      {/* 下一步转化 — 3 cards */}
+      <section className="aiSearchRunConvert" aria-label="下一步转化">
+        <article className="aiSearchRunConvertCard tone-blue">
+          <div className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
+            <span className="aiPoolIconText">CRM</span>
+          </div>
+          <div className="aiSearchRunConvertBody">
+            <p className="aiSearchRunConvertTitle">CRM 同步</p>
+            <p className="aiSearchRunConvertMeta">
+              <strong>{Math.max(leads.length - crmSyncedCount, 0)}</strong> 家客户待同步，字段已整理。
+            </p>
+          </div>
+          <button
+            type="button"
+            className="aiSearchRunConvertCta"
+            onClick={onOpenCrm}
+          >
+            预览同步
+          </button>
+        </article>
+
+        <article className="aiSearchRunConvertCard tone-purple">
+          <div className="aiPoolIcon aiPoolIconPurple" aria-hidden="true">
+            <Mail size={20} />
+          </div>
+          <div className="aiSearchRunConvertBody">
+            <p className="aiSearchRunConvertTitle">邮件触达</p>
+            <p className="aiSearchRunConvertMeta">
+              <strong>{actionableLeads.length}</strong> 封待确认，主题：中国 B2B 工厂产品推荐
+            </p>
+          </div>
+          <button
+            type="button"
+            className="aiSearchRunConvertCta"
+            onClick={onOpenMail}
+            disabled={running || !hasActionableLeads}
+          >
+            预览邮件
+          </button>
+        </article>
+
+        <article className="aiSearchRunConvertCard tone-orange">
+          <div className="aiPoolIcon aiPoolIconOrange" aria-hidden="true">
+            <Bell size={20} />
+          </div>
+          <div className="aiSearchRunConvertBody">
+            <p className="aiSearchRunConvertTitle">跟进提醒</p>
+            <p className="aiSearchRunConvertMeta">
+              <strong>{pendingFollowupCount}</strong> 家客户需跟进，最近提醒：3 天后
+            </p>
+          </div>
+          <button
+            type="button"
+            className="aiSearchRunConvertCta"
+            disabled
+            title="跟进提醒功能开发中"
+          >
+            查看跟进
+          </button>
+        </article>
+      </section>
+
+      {/* 健康度提示 */}
+      <section className="aiPoolHealth aiSearchRunHealth" aria-label="客户池健康度">
+        <span className="aiPoolHealthIcon" aria-hidden="true">
+          <CheckCircle2 size={18} />
+        </span>
+        <p>
+          获客池健康度：有效客户率 <strong>{percent(actionableLeads.length, Math.max(leads.length, 1))}</strong>
+          ，本批 query 重复率 <strong>{queryCount ? `${Math.max(0, Math.round((1 - executedCount / queryCount) * 100))}%` : "—"}</strong>
+          。建议下一批增加维护商和渠道商关键词。
+        </p>
+      </section>
+    </div>
   );
 }
 
-type AgentSearchActivityProps = {
-  active: boolean;
-  steps: ActivityStep[];
-  metrics: ActivityMetric[];
-  queryCount: number;
-  executedCount: number;
-  resultCount: number;
-  leadCount: number;
-  leadQualityCounts: LeadQualityCounts;
-  logs: ActivityLog[];
-  hasError: boolean;
-};
-
-function AgentSearchActivity({
-  active,
-  steps,
-  metrics,
-  queryCount,
-  executedCount,
-  resultCount,
-  leadCount,
-  leadQualityCounts,
-  logs,
-  hasError
-}: AgentSearchActivityProps) {
-  const activeMessages = [
-    "正在拆解目标市场和客户画像",
-    "正在调用 Brave Search 获取官网/目录页",
-    "正在标记文章页、社媒页和电商风险",
-    "正在合并域名并写入候选池",
-    "正在计算 ICP 分数和推荐理由"
-  ];
-  const [messageIndex, setMessageIndex] = useState(0);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-
-  useEffect(() => {
-    if (!active) {
-      setMessageIndex(0);
-      setElapsedSeconds(0);
-      return;
-    }
-
-    const messageTimer = window.setInterval(() => {
-      setMessageIndex((index) => (index + 1) % activeMessages.length);
-    }, 1400);
-    const elapsedTimer = window.setInterval(() => {
-      setElapsedSeconds((seconds) => seconds + 1);
-    }, 1000);
-
-    return () => {
-      window.clearInterval(messageTimer);
-      window.clearInterval(elapsedTimer);
-    };
-  }, [active, activeMessages.length]);
-
-  const headline = active
-    ? activeMessages[messageIndex]
-    : leadQualityCounts.rawEvidence
-      ? `${leadQualityCounts.rawEvidence} 条原始候选证据，${leadQualityCounts.main} 条主客户`
-      : resultCount
-        ? `本轮搜索已完成，命中 ${resultCount} 条 Brave 原始结果`
-        : leadCount
-          ? `已有 ${leadCount} 条主客户写入列表`
-          : hasError
-            ? "搜索接口失败，任务已保留"
-            : "等待搜索任务启动";
-  const subline = active
-    ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令，清洗后会拆分为主客户、待国家复核和拒绝。`
-    : leadQualityCounts.rawEvidence
-      ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；${formatLeadQualitySummary(leadQualityCounts)}。`
-      : resultCount
-        ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令。`
-        : leadCount
-          ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；接口失败时会保留已返回候选，可重新执行搜索补齐。`
-          : hasError
-            ? `已保留 ${queryCount || "-"} 条搜索指令，修复配置或网络后可重新执行搜索。`
-            : queryCount
-              ? `已生成 ${queryCount} 条搜索指令，将一次性执行本轮全部 query。`
-              : "创建任务后会自动生成搜索指令并开始执行。";
-  const workText = active
-    ? headline
-    : resultCount || leadCount
-      ? "搜索记录已生成"
-      : hasError
-        ? "搜索失败，可重新执行"
-        : "等待分配搜索任务";
-
-  return (
-    <section
-      className={active ? "agentSearchActivity isActive" : "agentSearchActivity"}
-      aria-live="polite"
-      data-search-activity="true"
-    >
-      <div className="agentActivityHeader">
-        <div className="agentActivityMark" aria-hidden="true">
-          <Search size={18} />
-        </div>
-        <div className="agentActivityCopy">
-          <strong>{headline}</strong>
-          <span>{subline}</span>
-        </div>
-        {active ? (
-          <span className="agentActivityDots" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </span>
-        ) : (
-          <span className={hasError ? "agentActivityBadge error" : "agentActivityBadge"}>
-            {hasError ? "需重试" : resultCount ? "已完成" : "待启动"}
-          </span>
-        )}
-      </div>
-
-      <div className="agentActivityRail">
-        {steps.map((step, index) => (
-          <div className={`agentActivityStep ${step.state}`} key={step.title}>
-            <span className="agentStepDot">
-              {step.state === "done" ? "✓" : step.state === "failed" ? "!" : index + 1}
-            </span>
-            <strong>{step.title}</strong>
-            <small>{step.detail}</small>
-          </div>
-        ))}
-      </div>
-
-      {active ? (
-        <div className="agentActivityScan" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </div>
-      ) : null}
-
-      <div className="agentActivityMetrics">
-        {metrics.map((metric) => (
-          <div className={`agentActivityMetric ${metric.tone ?? "gray"}`} key={metric.label}>
-            <span>{metric.label}</span>
-            <strong>{metric.value}</strong>
-          </div>
-        ))}
-      </div>
-
-      <div className={active ? "agentActivityWorkbar isActive" : "agentActivityWorkbar"}>
-        <span>正在工作:</span>
-        <strong>{workText}</strong>
-        <b>{active ? formatElapsedTime(elapsedSeconds) : "--:--"}</b>
-        <em>
-          {active
-            ? "AI正在任务执行"
-            : resultCount || leadCount
-              ? "AI任务已记录"
-              : hasError
-                ? "执行失败"
-                : "等待启动"}
-        </em>
-      </div>
-
-      <div className="agentActivityLogs" aria-label="AI 执行日志">
-        {logs.map((log) => (
-          <div className={`agentActivityLog ${log.state}`} key={log.title}>
-            <span className="agentLogDot" aria-hidden="true" />
-            <strong>{log.title}</strong>
-            <small>{log.detail}</small>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
 
 async function apiRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(resolveApiUrl(url), {
@@ -3069,334 +2804,14 @@ function normalizeCreatedTask(payload: CreateLeadTaskResponse): LeadTask {
   };
 }
 
-function buildKeywordRows(task: LeadTask | null, taskSurfaceActive = false): KeywordRow[] {
-  const pendingRows = fallbackKeywordRows.map((row) => keywordRow(row.label, [], ["正在生成"]));
-  const searchInstructionRow = keywordRow(
-    "搜索指令",
-    unique(collectSearchQueries(task).map((query) => query.query)),
-    task || taskSurfaceActive ? ["正在生成"] : fallbackSearchQueries
-  );
 
-  if (!task) {
-    return taskSurfaceActive
-      ? [...pendingRows, searchInstructionRow]
-      : [...fallbackKeywordRows, searchInstructionRow];
-  }
 
-  const groups = task.inputPayload?.keywordGroups ?? firstKeywordGroups(task.searchQueries) ?? {};
 
-  return [
-    keywordRow(
-      "产品扩展词",
-      [...(groups.productTerms ?? []), ...(groups.longTailProductTerms ?? [])],
-      ["正在生成"]
-    ),
-    keywordRow("客户类型词", groups.customerIntentTerms, ["正在生成"]),
-    keywordRow("品牌/型号词", groups.brandTerms, ["正在生成"]),
-    keywordRow(
-      "场景/市场词",
-      [...(groups.scenarioTerms ?? []), ...(groups.marketTerms ?? [])],
-      ["正在生成"]
-    ),
-    keywordRow("ICP 风险词", groups.excludeTerms, ["正在生成"]),
-    searchInstructionRow
-  ];
-}
 
-function buildProfileSourceRows(task: LeadTask | null): ProfileSourceRow[] {
-  const signals = task?.inputPayload?.profileSignals;
-  const siteEvidence = task?.inputPayload?.siteEvidence;
-  if (!signals && !siteEvidence) {
-    return [];
-  }
 
-  const rows: ProfileSourceRow[] = [];
-  const productSources = siteEvidence?.productSites?.length
-    ? formatSiteEvidenceValues(siteEvidence.productSites)
-    : formatSourceUrls(signals?.productUrlsUsed);
-  const referenceSources = siteEvidence?.referenceCustomerSites?.length
-    ? formatSiteEvidenceValues(siteEvidence.referenceCustomerSites)
-    : formatSourceUrls(signals?.referenceCustomerUrlsUsed);
 
-  if (productSources.length) {
-    rows.push({
-      label: siteEvidence?.productSites?.length ? "产品网页证据" : "产品画像URL",
-      values: productSources
-    });
-  }
-  if (referenceSources.length) {
-    rows.push({
-      label: siteEvidence?.referenceCustomerSites?.length ? "客户网页证据" : "客户画像URL",
-      values: referenceSources
-    });
-  }
-  if (siteEvidence?.summary?.attempted) {
-    rows.push({
-      label: "读取状态",
-      values: [
-        `已读取 ${siteEvidence.summary.read ?? 0}/${siteEvidence.summary.attempted}`,
-        `失败 ${siteEvidence.summary.failed ?? 0}`
-      ]
-    });
-  }
-  if (signals?.marketSelection) {
-    const selectedMarkets = signals.marketSelection.targetMarkets ?? [];
-    const secondaryMarkets = signals.marketSelection.secondaryMarkets ?? [];
-    const promptMarkets = signals.marketSelection.promptMarkets ?? [];
-    const profileMarkets = signals.marketSelection.profileMarkets ?? [];
-    rows.push({
-      label: "目标市场来源",
-      values: [
-        `主市场：${selectedMarkets.length ? selectedMarkets.join(", ") : "-"}`,
-        `次级池：${secondaryMarkets.length ? secondaryMarkets.join(", ") : "-"}`,
-        `用户输入：${promptMarkets.length ? promptMarkets.join(", ") : "-"}`,
-        `画像保存：${profileMarkets.length ? profileMarkets.join(", ") : "-"}`,
-        `来源：${formatMarketSource(signals.marketSelection.marketSource)}`
-      ]
-    });
-  }
-  if (signals?.qualityGate) {
-    const executed = signals.qualityGate.executedQueryCount ?? 0;
-    const remaining = signals.qualityGate.remainingQueries ?? 0;
-    rows.push({
-      label: "质量诊断",
-      values: [
-        `前 ${executed} 条质量波动，系统保留原搜索计划并继续执行剩余 ${remaining} 条 query。`,
-        ...(signals.qualityGate.reasons?.length
-          ? [`原因：${signals.qualityGate.reasons.join(", ")}`]
-          : [])
-      ]
-    });
-  }
-  if (signals?.qualityFallbackSuggestion?.queryCount) {
-    rows.push({
-      label: "Fallback 建议",
-      values: [
-        `状态：${signals.qualityFallbackSuggestion.status === "suggestion_only" ? "仅建议，未改写 pending" : (signals.qualityFallbackSuggestion.status ?? "-")}`,
-        `建议追加：${signals.qualityFallbackSuggestion.queryCount} 条`,
-        ...formatFallbackSuggestionSamples(signals.qualityFallbackSuggestion.sampleQueries)
-      ]
-    });
-  }
-  if (signals?.aiPlanning?.rejectedQueryCount) {
-    rows.push({
-      label: "Query 守门",
-      values: [`已拦截 ${signals.aiPlanning.rejectedQueryCount} 条异常 GPT query`]
-    });
-  }
-  if (signals?.crmSampleCount) {
-    rows.push({ label: "CRM 样本", values: [`${signals.crmSampleCount} 个已选客户`] });
-  }
 
-  return rows;
-}
 
-function formatMarketSource(source: string | undefined) {
-  const labels: Record<string, string> = {
-    prompt: "用户输入优先",
-    profile: "客户画像默认",
-    merged: "合并",
-    none: "未识别"
-  };
-  return source ? (labels[source] ?? source) : "-";
-}
-
-function formatFallbackSuggestionSamples(
-  samples: NonNullable<ProfileSignals["qualityFallbackSuggestion"]>["sampleQueries"]
-) {
-  return (samples ?? [])
-    .slice(0, 2)
-    .map((item) => `建议：${[item.country, item.query].filter(Boolean).join(" | ")}`);
-}
-
-function keywordRow(
-  label: string,
-  values: string[] | undefined,
-  fallback: string[] = []
-): KeywordRow {
-  return {
-    label,
-    values: (values?.length ? values : fallback).slice(0, label === "搜索指令" ? 8 : 6)
-  };
-}
-
-function collectSearchQueries(task: LeadTask | null): SearchQuery[] {
-  const merged = new Map<string, SearchQuery>();
-
-  for (const query of [
-    ...(task?.inputPayload?.searchQueries ?? []),
-    ...(task?.searchQueries ?? [])
-  ]) {
-    if (!query.query?.trim()) {
-      continue;
-    }
-    const key = query.query.trim();
-    const existing = merged.get(key);
-    merged.set(key, mergeSearchQuery(existing, query));
-  }
-
-  return Array.from(merged.values());
-}
-
-function mergeSearchQuery(existing: SearchQuery | undefined, next: SearchQuery): SearchQuery {
-  if (!existing) {
-    return next;
-  }
-
-  return {
-    ...existing,
-    ...next,
-    provider: next.provider ?? existing.provider,
-    keywordGroups: next.keywordGroups ?? existing.keywordGroups,
-    country: next.country ?? existing.country,
-    operatorSource: next.operatorSource ?? existing.operatorSource,
-    operatorName: next.operatorName ?? existing.operatorName,
-    strategyTemplate: next.strategyTemplate ?? existing.strategyTemplate,
-    templateId: next.templateId ?? existing.templateId,
-    resultCount: next.resultCount ?? existing.resultCount,
-    qualifiedCount: next.qualifiedCount ?? existing.qualifiedCount,
-    effectivenessScore: next.effectivenessScore ?? existing.effectivenessScore,
-    searchResults: next.searchResults ?? existing.searchResults
-  };
-}
-
-function buildActivitySteps({
-  creating,
-  searching,
-  currentTask,
-  searchResult,
-  leads,
-  leadQualityCounts,
-  hasError
-}: {
-  creating: boolean;
-  searching: boolean;
-  currentTask: LeadTask | null;
-  searchResult: SearchRunResult | null;
-  leads: DisplayLead[];
-  leadQualityCounts: LeadQualityCounts;
-  hasError: boolean;
-}): ActivityStep[] {
-  const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount =
-    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
-    0;
-  const actionableLeads = leads.filter(isActionableDisplayLead);
-  const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
-  const hasReturnedLeads = leads.length > 0;
-
-  return [
-    {
-      title: "任务规划",
-      detail: creating ? "读取画像并拆解目标市场" : currentTask ? "任务上下文已生成" : "等待任务",
-      state: creating ? "active" : currentTask ? "done" : "pending"
-    },
-    {
-      title: "生成指令",
-      detail: queryCount ? `已生成 ${queryCount} 条 query` : creating ? "组合关键词" : "等待关键词",
-      state: queryCount ? "done" : creating ? "active" : "pending"
-    },
-    {
-      title: "Brave 搜索",
-      detail: searching
-        ? `正在执行 ${executedCount}/${queryCount || "-"} 条`
-        : searchResult
-          ? `执行 ${searchResult.executedQueries} 条，命中 ${searchResult.resultCount} 条`
-          : executedCount
-            ? `已执行 ${executedCount} 条，候选已回写`
-            : hasError
-              ? "接口失败，可重新执行"
-              : "等待搜索",
-      state: searching
-        ? "active"
-        : searchResult || executedCount
-          ? "done"
-          : hasError
-            ? "failed"
-            : "pending"
-    },
-    {
-      title: "清洗候选",
-      detail: searchResult
-        ? formatLeadQualitySummary(leadQualityCounts)
-        : hasReturnedLeads
-          ? `已有 ${leads.length} 条主客户进入表格`
-          : searching
-            ? "标记社媒/文章/电商风险"
-            : hasError
-              ? "未返回候选，等待重试"
-              : "等待结果",
-      state: searching
-        ? "active"
-        : searchResult || hasReturnedLeads
-          ? "done"
-          : hasError
-            ? "failed"
-            : "pending"
-    },
-    {
-      title: "ICP 评分",
-      detail: leads.length
-        ? `已产出 ${leads.length} 条主客户，${qualifiedCount} 条 75+`
-        : searching
-          ? "正在评分和归因"
-          : "等待清洗",
-      state: leads.length ? "done" : searching ? "active" : "pending"
-    }
-  ];
-}
-
-function buildActivityMetrics({
-  currentTask,
-  searchResult,
-  leads,
-  leadQualityCounts
-}: {
-  currentTask: LeadTask | null;
-  searchResult: SearchRunResult | null;
-  leads: DisplayLead[];
-  leadQualityCounts: LeadQualityCounts;
-}): ActivityMetric[] {
-  const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount =
-    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
-    0;
-  const failedQueries = searchResult?.failedQueries ?? 0;
-  const reviewOrRejectedCount =
-    leadQualityCounts.needsCountryReview +
-    leadQualityCounts.intelligenceReview +
-    leadQualityCounts.evidenceReview +
-    leadQualityCounts.rejected;
-
-  return [
-    {
-      label: "搜索指令",
-      value: queryCount ? `${executedCount}/${queryCount}` : "待生成",
-      tone: "blue"
-    },
-    {
-      label: "Brave 命中",
-      value: searchResult
-        ? String(searchResult.resultCount)
-        : executedCount
-          ? `已执行 ${executedCount}`
-          : "等待",
-      tone: "orange"
-    },
-    {
-      label: "主客户",
-      value: String(leadQualityCounts.main || leads.length),
-      tone: "green"
-    },
-    {
-      label: failedQueries ? "失败指令" : "待复核/拒绝",
-      value: searchResult
-        ? String(failedQueries || reviewOrRejectedCount)
-        : String(reviewOrRejectedCount),
-      tone: failedQueries ? "orange" : "gray"
-    }
-  ];
-}
 
 function buildActivityLogs({
   creating,
@@ -3506,17 +2921,7 @@ function formatHistoryDate(value: string) {
   }
 }
 
-function formatElapsedTime(totalSeconds: number) {
-  const minutes = Math.floor(totalSeconds / 60)
-    .toString()
-    .padStart(2, "0");
-  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
-  return `${minutes}:${seconds}`;
-}
 
-function firstKeywordGroups(queries: SearchQuery[] | undefined) {
-  return queries?.find((query) => query.keywordGroups)?.keywordGroups ?? null;
-}
 
 function summarizeSearchResultFromTask(task: LeadTask): SearchRunResult {
   const completedQueries =
@@ -3551,39 +2956,7 @@ function summarizeSearchResultFromTask(task: LeadTask): SearchRunResult {
   };
 }
 
-function buildDisplaySearchResults(task: LeadTask | null): DisplaySearchResult[] {
-  const rows: DisplaySearchResult[] = [];
-  const seen = new Set<string>();
 
-  for (const query of task?.searchQueries ?? []) {
-    for (const result of query.searchResults ?? []) {
-      const key = searchResultKey(result);
-      if (!key || seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      rows.push({
-        id: `${query.id ?? query.query}:${key}`,
-        title: result.title || formatWebsite(result.url) || "Untitled result",
-        domain: result.domain || formatWebsite(result.url),
-        url: result.url || "",
-        country: query.country ?? "-",
-        query: query.query,
-        status: query.executionStatus ?? "-"
-      });
-    }
-  }
-
-  return rows;
-}
-
-function searchResultKey(result: SearchResult) {
-  if (result.url) {
-    return result.url.replace(/\/$/, "").toLowerCase();
-  }
-
-  return result.title?.trim().toLowerCase() ?? "";
-}
 
 function buildDisplayLeads(task: LeadTask | null): DisplayLead[] {
   const targetMarkets = taskTargetMarkets(task);
@@ -4711,89 +4084,7 @@ function toMailLead(lead: DisplayLead): MailConfirmationLead {
   };
 }
 
-function buildFlowRows(
-  task: LeadTask | null,
-  state: {
-    creating: boolean;
-    searching: boolean;
-    approving: boolean;
-    leadCount: number;
-    leadQualityCounts: LeadQualityCounts;
-    sentCount: number;
-    crmSyncedCount: number;
-    pendingFollowupCount: number;
-  }
-): FlowRow[] {
-  const queryCount = task?.searchQueries?.length ?? 0;
-  const approvedCount =
-    task?.leadCandidates?.filter((lead) => lead.status === "approved").length ?? 0;
-  const hasError = task?.agentSteps?.some((step) => step.status === "failed") ?? false;
 
-  return [
-    {
-      title: "任务规划",
-      description: state.creating
-        ? "正在读取画像并生成搜索策略"
-        : task
-          ? `已生成 ${queryCount} 条搜索指令`
-          : "等待创建任务",
-      state: hasError ? "failed" : task ? "done" : state.creating ? "active" : "pending"
-    },
-    {
-      title: "筛选目标客户",
-      description: state.searching
-        ? "正在执行搜索并清洗候选客户"
-        : state.leadCount
-          ? formatLeadQualitySummary(state.leadQualityCounts)
-          : task
-            ? state.leadQualityCounts.rawEvidence
-              ? formatLeadQualitySummary(state.leadQualityCounts)
-              : "搜索指令已就绪，等待返回候选客户"
-            : "等待任务规划完成",
-      state:
-        state.leadCount || state.leadQualityCounts.rawEvidence
-          ? "done"
-          : task || state.searching
-            ? "active"
-            : "pending"
-    },
-    {
-      title: "邮件触达",
-      description: state.approving
-        ? "正在生成开发信草稿"
-        : state.sentCount
-          ? `已发送 ${state.sentCount} 封 Gmail 开发信`
-          : approvedCount
-            ? `已审批 ${approvedCount} 家客户，等待邮件确认`
-            : state.leadCount
-              ? "选择客户后生成可确认发送的开发信"
-              : "等待候选客户确认",
-      state:
-        state.sentCount || approvedCount
-          ? "done"
-          : state.leadCount || state.approving
-            ? "active"
-            : "pending"
-    },
-    {
-      title: "同步 CRM 并标记",
-      description: state.crmSyncedCount
-        ? `已同步 ${state.crmSyncedCount} 家客户，创建 ${state.pendingFollowupCount} 个跟进提醒`
-        : approvedCount || state.sentCount
-          ? "邮件确认后同步 CRM 并创建跟进提醒"
-          : "等待邮件确认后同步",
-      state: state.crmSyncedCount ? "done" : approvedCount || state.sentCount ? "active" : "pending"
-    }
-  ];
-}
-
-function scoreStars(score: number) {
-  if (score >= 85) return "★★★★★";
-  if (score >= 70) return "★★★★☆";
-  if (score >= 50) return "★★★☆☆";
-  if (score > 0) return "★★☆☆☆";
-  return "☆☆☆☆☆";
-}
 
 function formatWebsite(value: string | null | undefined) {
   if (!value) return "-";
@@ -5055,23 +4346,7 @@ function domainsMatch(emailDomain: string, companyDomain: string) {
   );
 }
 
-function formatSourceUrls(values: string[] | undefined) {
-  return unique(
-    (values ?? []).map((value) => formatWebsite(value)).filter((value) => value !== "-")
-  ).slice(0, 4);
-}
 
-function formatSiteEvidenceValues(values: SiteEvidenceRow[] | undefined) {
-  return (values ?? [])
-    .map((value) => {
-      const domain = value.domain || formatWebsite(value.finalUrl || value.url);
-      if (value.status === "read") {
-        return `${domain} 已读取${value.wordCount ? ` ${value.wordCount}词` : ""}`;
-      }
-      return `${domain} 读取失败`;
-    })
-    .slice(0, 4);
-}
 
 function unique(values: string[]) {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));

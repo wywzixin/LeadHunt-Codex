@@ -10975,6 +10975,549 @@ button.primary {
   color: var(--primary);
 }
 
+/* ===========================================================================
+ * 2026-05 LeadHunt 2.0 — AiSearchRun (search-in-progress overlay on
+ * the pool detail page). Layout:
+ *   Header (reuses .aiPoolHeader)
+ *   KPI strip (4 cards, .aiPoolKpis with .aiSearchRunKpis tweak)
+ *   Run-batch card (progress bar + current query + 5-step pills + log)
+ *   New-lead table (reuses .aiPoolTable* but hides some columns)
+ *   3 conversion cards (.aiSearchRunConvert)
+ *   Health hint (reuses .aiPoolHealth)
+ *
+ * Tokens: same as AiWorkerPool. Page-level overflow is handled by the
+ * `.aiPool` host (already overflow:hidden + flex column).
+ * =========================================================================== */
+
+/* Tighter gap and padding for the search-in-progress page so 6 stacked
+   sections (header / kpi / run / table / convert / health) fit a single
+   1440x900 viewport. */
+.aiPool.aiSearchRunPool {
+  gap: 10px;
+  padding: 16px 28px 18px;
+}
+
+/* Compact header for the search-in-progress view: the back button row
+   sits inline with the title row to save vertical space. */
+.aiSearchRunPool .aiPoolHeader {
+  gap: 4px;
+}
+
+.aiSearchRunPool .aiPoolHeaderTitle h1 {
+  font-size: 19px;
+}
+
+.aiSearchRunPool .aiPoolMeta {
+  font-size: 12px;
+  margin-top: 0;
+}
+
+/* Hide the prompt subtitle on the run page — it's a duplicate of the
+   pool title in shorter form, and the run card right below repeats
+   the same context (status + ETA). Keeps the header to ~85px. */
+.aiSearchRunPool .aiSearchRunSubtitle {
+  display: none;
+}
+
+/* Compact KPIs */
+.aiSearchRunPool .aiPoolKpi {
+  padding: 8px 12px;
+  gap: 8px;
+}
+
+.aiSearchRunPool .aiPoolKpiValue {
+  font-size: 20px;
+}
+
+.aiSearchRunPool .aiPoolKpiLabel {
+  font-size: 12px;
+}
+
+.aiSearchRunPool .aiPoolKpiDelta {
+  font-size: 11px;
+}
+
+/* 4-col KPI override (default pool KPIs are 6-col). */
+.aiSearchRunKpis {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+/* Subtitle pulls the original prompt under the pool title. */
+.aiSearchRunSubtitle {
+  /* prevent very long prompts from pushing the header into 2+ rows */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-width: 880px;
+}
+
+/* ----- Run batch card ----- */
+.aiSearchRunCard {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 6px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+.aiSearchRunHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.aiSearchRunHeadLeft h2 {
+  margin: 0 0 2px;
+  color: var(--title);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.aiSearchRunHeadLeft p {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.aiSearchRunHeadActions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.aiSearchRunBody {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.9fr);
+  gap: 14px;
+  align-items: stretch;
+  min-height: 0;
+}
+
+.aiSearchRunProgress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.aiSearchRunProgressBar {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--primary-light);
+  overflow: hidden;
+}
+
+.aiSearchRunProgressFill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, var(--primary) 0%, #5a8bff 100%);
+  transition: width 0.3s ease;
+}
+
+.aiSearchRunProgressLabel {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  color: var(--secondary);
+  font-size: 13px;
+}
+
+.aiSearchRunProgressLabel strong {
+  color: var(--title);
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.aiSearchRunCurrent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.aiSearchRunCurrentLabel {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.aiSearchRunCurrentCountry {
+  padding: 2px 8px;
+  background: var(--primary-light);
+  color: var(--primary);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.aiSearchRunCurrentQuery {
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-top: 4px;
+  padding: 4px 8px;
+  background: #fff;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--body);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aiSearchRunStat {
+  margin: 0;
+  color: var(--body);
+  font-size: 13px;
+}
+
+.aiSearchRunStat strong {
+  color: var(--title);
+  font-weight: 700;
+}
+
+/* 5-step pills — horizontal flow row */
+.aiSearchRunSteps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: auto;
+}
+
+.aiSearchRunStep {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  text-align: center;
+}
+
+.aiSearchRunStep.state-completed {
+  border-color: var(--success);
+  background: var(--success-light);
+}
+
+.aiSearchRunStep.state-running {
+  border-color: var(--primary);
+  background: var(--primary-light);
+}
+
+.aiSearchRunStep.state-failed {
+  border-color: var(--danger);
+  background: #ffeaea;
+}
+
+.aiSearchRunStepIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--card);
+  color: var(--secondary);
+}
+
+.aiSearchRunStep.state-completed .aiSearchRunStepIcon {
+  background: var(--success);
+  color: #fff;
+}
+
+.aiSearchRunStep.state-running .aiSearchRunStepIcon {
+  background: var(--primary);
+  color: #fff;
+}
+
+.aiSearchRunStep.state-failed .aiSearchRunStepIcon {
+  background: var(--danger);
+  color: #fff;
+}
+
+.aiSearchRunStepLabel {
+  color: var(--title);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.aiSearchRunStepState {
+  color: var(--secondary);
+  font-size: 11px;
+}
+
+.aiSearchRunStep.state-completed .aiSearchRunStepState {
+  color: var(--success);
+}
+
+.aiSearchRunStep.state-running .aiSearchRunStepState {
+  color: var(--primary);
+}
+
+/* Right log panel */
+.aiSearchRunLog {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.aiSearchRunLogHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.aiSearchRunLogHead h3 {
+  margin: 0;
+  color: var(--title);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.aiSearchRunLogPulse {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--secondary);
+  font-size: 11px;
+}
+
+.aiSearchRunLogPulse.live::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 0 rgba(0, 180, 42, 0.6);
+  animation: aiSearchRunPulse 1.4s ease-in-out infinite;
+}
+
+.aiSearchRunLogPulse.live {
+  color: var(--success);
+}
+
+@keyframes aiSearchRunPulse {
+  0% { box-shadow: 0 0 0 0 rgba(0, 180, 42, 0.6); }
+  70% { box-shadow: 0 0 0 6px rgba(0, 180, 42, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 180, 42, 0); }
+}
+
+.aiSearchRunLogList {
+  flex: 1;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.aiSearchRunLogItem {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 12px;
+  color: var(--body);
+}
+
+.aiSearchRunLogTime {
+  color: var(--secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.aiSearchRunLogText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.aiSearchRunLogText strong {
+  color: var(--title);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.aiSearchRunLogText em {
+  color: var(--secondary);
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aiSearchRunLogItem.state-completed .aiSearchRunLogTime { color: var(--success); }
+.aiSearchRunLogItem.state-running .aiSearchRunLogTime { color: var(--primary); }
+.aiSearchRunLogItem.state-failed .aiSearchRunLogTime { color: var(--danger); }
+
+/* ----- Lead table tweaks for the search-in-progress version ----- */
+.aiSearchRunTableWrap {
+  /* Inherits .aiPoolTableWrap layout (flex column with min-height: 0).
+     We give it a fixed comfortable size — the conversion cards and
+     health hint below need to stay visible without a page scrollbar. */
+  flex: 0 0 200px;
+  min-height: 200px;
+}
+
+.aiSearchRunTableHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.aiSearchRunTableHead h3 {
+  margin: 0;
+  color: var(--title);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.aiSearchRunTableHead p {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.aiSearchRunFreshBadge {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 6px;
+  background: var(--success);
+  color: #fff;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: 1px;
+}
+
+.aiSearchRunScore {
+  margin-left: 6px;
+  color: var(--title);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.aiSearchRunContactLine {
+  display: block;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.aiSearchRunContactLine b {
+  color: var(--title);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ----- Conversion cards ----- */
+.aiSearchRunConvert {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.aiSearchRunConvertCard {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+.aiSearchRunConvertBody {
+  min-width: 0;
+}
+
+.aiSearchRunConvertTitle {
+  margin: 0 0 2px;
+  color: var(--title);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.aiSearchRunConvertMeta {
+  margin: 0;
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.aiSearchRunConvertMeta strong {
+  color: var(--title);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.aiSearchRunConvertCta {
+  padding: 7px 14px;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.aiSearchRunConvertCta:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.aiSearchRunConvertCta:disabled {
+  background: var(--secondary);
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.aiSearchRunHealth {
+  /* slightly smaller padding for the conversation-page health hint */
+  padding: 10px 14px;
+}
+
+/* aiPool status pill helper for the table */
+.aiPoolStatusPill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.aiPoolStatusPill.synced {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.aiPoolStatusPill.pending {
+  background: var(--warning-light);
+  color: var(--warning);
+}
+
 /* 2026-05 LeadHunt 2.0: no narrow-viewport breakpoint for the pool
    detail page. Below 1280px the leadApp shell already enforces a
    1232px min-width and turns on horizontal scroll, so the 6-col KPI
