@@ -2267,7 +2267,10 @@ function AiWorkerConversation({
         </div>
         <div className="aiPoolHeaderRow">
           <div className="aiPoolHeaderLeft">
-            <div className="aiPoolHeaderTitle">
+            {/* Single inline row: icon + title + status pill + country
+                chips, matching the design. The legacy two-row variant
+                (chips below title) is the AiWorkerPool detail page. */}
+            <div className="aiPoolHeaderTitle aiSearchRunHeaderTitle">
               <span className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
                 <RadioTower size={22} />
               </span>
@@ -2275,17 +2278,14 @@ function AiWorkerConversation({
               <span className={`aiPoolBadge state-${poolStatus.kind}`}>
                 {poolStatus.label}
               </span>
+              <div className="aiPoolCountryChips aiSearchRunCountryChips">
+                {countryChips.map((country) => (
+                  <span key={country} className="aiPoolCountryChip">
+                    {country}
+                  </span>
+                ))}
+              </div>
             </div>
-            <div className="aiPoolCountryChips">
-              {countryChips.map((country) => (
-                <span key={country} className="aiPoolCountryChip">
-                  {country}
-                </span>
-              ))}
-            </div>
-            <p className="aiPoolMeta aiSearchRunSubtitle">
-              {prompt}
-            </p>
           </div>
         </div>
       </header>
@@ -2412,7 +2412,9 @@ function AiWorkerConversation({
                 : ""}
             </p>
 
-            {/* 5-step pills inline below the progress card */}
+            {/* 5-step horizontal timeline below the progress card.
+                Each step is icon + label/state pair, dashed lines
+                between them — matches the design's flat row. */}
             <div className="aiSearchRunSteps" role="list">
               {runStepPills.map((step) => (
                 <div
@@ -2431,8 +2433,10 @@ function AiWorkerConversation({
                       <step.icon size={14} />
                     )}
                   </span>
-                  <span className="aiSearchRunStepLabel">{step.label}</span>
-                  <span className="aiSearchRunStepState">{step.stateLabel}</span>
+                  <span className="aiSearchRunStepText">
+                    <span className="aiSearchRunStepLabel">{step.label}</span>
+                    <span className="aiSearchRunStepState">{step.stateLabel}</span>
+                  </span>
                 </div>
               ))}
             </div>
@@ -2487,10 +2491,8 @@ function AiWorkerConversation({
       {/* 新增客户表 */}
       <section className="aiPoolTableWrap aiSearchRunTableWrap" aria-label="新增客户">
         <header className="aiSearchRunTableHead">
-          <div>
-            <h3>新增客户</h3>
-            <p>{`点击公司可查看完整邮箱、电话、来源 query 和评分原因`}</p>
-          </div>
+          <h3>新增客户</h3>
+          <p>点击公司可查看完整邮箱、电话、来源 query 和评分原因</p>
         </header>
         <div className="aiPoolTableScroll">
           <table className="aiPoolTable">

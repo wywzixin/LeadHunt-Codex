@@ -11280,9 +11280,26 @@ button.primary {
   gap: 4px;
 }
 
+/* Single inline title row: icon + title + status pill + country chips
+   (matches the design). The legacy two-row variant in AiWorkerPool is
+   the detail page where chips wrap below. */
+.aiSearchRunPool .aiSearchRunHeaderTitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.aiSearchRunPool .aiSearchRunCountryChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+}
+
 /* The pool icon is large (44x44) on the regular pool detail page;
    shrink it on the search-in-progress page to keep the header at
-   ~85px and leave room for the run card below. */
+   ~64px (single inline row) and leave room for the run card below. */
 .aiSearchRunPool .aiPoolHeaderTitle .aiPoolIcon {
   width: 32px;
   height: 32px;
@@ -11301,13 +11318,6 @@ button.primary {
 .aiSearchRunPool .aiPoolMeta {
   font-size: 12px;
   margin-top: 0;
-}
-
-/* Hide the prompt subtitle on the run page — it's a duplicate of the
-   pool title in shorter form, and the run card right below repeats
-   the same context (status + ETA). Keeps the header to ~85px. */
-.aiSearchRunPool .aiSearchRunSubtitle {
-  display: none;
 }
 
 /* Compact KPIs */
@@ -11331,16 +11341,6 @@ button.primary {
 /* 4-col KPI override (default pool KPIs are 6-col). */
 .aiSearchRunKpis {
   grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-/* Subtitle pulls the original prompt under the pool title. */
-.aiSearchRunSubtitle {
-  /* prevent very long prompts from pushing the header into 2+ rows */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  max-width: 880px;
 }
 
 /* ----- Run batch card ----- */
@@ -11481,76 +11481,97 @@ button.primary {
   font-weight: 700;
 }
 
-/* 5-step pills — horizontal flow row */
+/* 5-step horizontal timeline — matches the design's flat row of
+   colored circles + label/state, with dashed connectors in between.
+   No card backgrounds, no borders; each step is just icon + text. */
 .aiSearchRunSteps {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
+  display: flex;
+  align-items: center;
+  gap: 0;
   margin-top: auto;
+  padding: 4px 0;
 }
 
 .aiSearchRunStep {
-  display: flex;
-  flex-direction: column;
+  flex: 1 1 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
   align-items: center;
-  gap: 4px;
-  padding: 8px 6px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-  text-align: center;
+  gap: 8px;
+  padding: 0 6px;
+  background: transparent;
+  border: 0;
+  text-align: left;
 }
 
-.aiSearchRunStep.state-completed {
-  border-color: var(--success);
-  background: var(--success-light);
+/* Dashed connector between steps. Pure CSS, lives on the inner content
+   row so the icons stay vertically centered. */
+.aiSearchRunStep + .aiSearchRunStep {
+  position: relative;
 }
 
-.aiSearchRunStep.state-running {
-  border-color: var(--primary);
-  background: var(--primary-light);
-}
-
-.aiSearchRunStep.state-failed {
-  border-color: var(--danger);
-  background: #ffeaea;
+.aiSearchRunStep + .aiSearchRunStep::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 14px;
+  height: 1px;
+  border-top: 1px dashed var(--border);
+  transform: translate(-100%, -50%);
 }
 
 .aiSearchRunStepIcon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
-  background: var(--card);
+  background: var(--bg);
   color: var(--secondary);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.aiSearchRunStepText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .aiSearchRunStep.state-completed .aiSearchRunStepIcon {
   background: var(--success);
   color: #fff;
+  border-color: var(--success);
 }
 
 .aiSearchRunStep.state-running .aiSearchRunStepIcon {
   background: var(--primary);
   color: #fff;
+  border-color: var(--primary);
 }
 
 .aiSearchRunStep.state-failed .aiSearchRunStepIcon {
   background: var(--danger);
   color: #fff;
+  border-color: var(--danger);
 }
 
 .aiSearchRunStepLabel {
+  display: block;
   color: var(--title);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
+  line-height: 1.25;
 }
 
 .aiSearchRunStepState {
+  display: block;
   color: var(--secondary);
   font-size: 11px;
+  line-height: 1.25;
+  margin-top: 1px;
 }
 
 .aiSearchRunStep.state-completed .aiSearchRunStepState {
@@ -11559,6 +11580,10 @@ button.primary {
 
 .aiSearchRunStep.state-running .aiSearchRunStepState {
   color: var(--primary);
+}
+
+.aiSearchRunStep.state-failed .aiSearchRunStepState {
+  color: var(--danger);
 }
 
 /* Right log panel */
