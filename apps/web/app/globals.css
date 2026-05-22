@@ -21,6 +21,17 @@
   --danger: #f53f3f;
   --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.04);
   --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.08);
+  /* 2026-05 LeadHunt 2.0 (style audit): radius tokens. Existing styles
+     mix 4 / 5 / 6 / 7 / 8 / 10 / 12 / 14 px for similar surfaces; new
+     surfaces should pick from these tokens and legacy values can be
+     migrated incrementally. `--radius-pill` collapses 999px usage. */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 14px;
+  --radius-pill: 999px;
 }
 
 * {
@@ -125,7 +136,17 @@ body:has(.aiProjectApp) {
   /* 2026-05 LeadHunt 2.0: width:100% (not 100vw) so the shell respects
      its own min-width and grows with the document instead of clipping
      content when the viewport is narrower than the desktop floor. The
-     html element above owns horizontal scroll when needed. */
+     html element above owns horizontal scroll when needed.
+
+     2026-05 LeadHunt 2.0 (style audit): the 1232px floor was originally
+     introduced so the AI workbench (.aiProjectApp) could keep its
+     desktop layout intact under a horizontal scrollbar. Secondary pages
+     (dashboard / customers / mailbox / templates / campaigns /
+     brochures / customer-profile / product-profile) inherit this shell
+     but live under `body { overflow-x: hidden }`, which clips their
+     content below 1232px instead of scrolling. The media queries below
+     relax that floor for narrow viewports while keeping the desktop
+     baseline unchanged. */
   width: 100%;
   min-width: 1232px;
   height: calc(100vh - 2px);
@@ -136,6 +157,64 @@ body:has(.aiProjectApp) {
 
 .leadApp.sidebarCollapsed {
   grid-template-columns: 86px minmax(0, 1fr);
+}
+
+/* Narrow viewports: let secondary pages reflow instead of clipping.
+   AI workbench keeps its own desktop floor via the `html:has(.aiProjectApp)`
+   horizontal-scroll rule above, so it's unaffected. */
+@media (max-width: 1231px) {
+  .leadApp {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 1023px) {
+  .leadApp:not(.sidebarCollapsed) {
+    grid-template-columns: 86px minmax(0, 1fr);
+  }
+
+  .leadApp:not(.sidebarCollapsed) .appTopbar {
+    grid-template-columns: 86px minmax(0, 1fr);
+  }
+
+  .leadApp:not(.sidebarCollapsed) .appBrand {
+    justify-content: center;
+    padding-left: 0;
+  }
+
+  .leadApp:not(.sidebarCollapsed) .appBrand > div:last-child {
+    display: none;
+  }
+
+  .leadApp:not(.sidebarCollapsed) .appSidebar {
+    padding: 18px 12px 16px;
+  }
+
+  .leadApp:not(.sidebarCollapsed) .navSection {
+    border-bottom: 0;
+    margin-bottom: 8px;
+    padding-bottom: 0;
+  }
+
+  .leadApp:not(.sidebarCollapsed) .navLabel,
+  .leadApp:not(.sidebarCollapsed) .navText,
+  .leadApp:not(.sidebarCollapsed) .badgeNew,
+  .leadApp:not(.sidebarCollapsed) .sidebarCollapse span {
+    display: none;
+  }
+
+  .leadApp:not(.sidebarCollapsed) .navItem {
+    justify-content: center;
+    gap: 0;
+    min-height: 42px;
+    padding: 0;
+  }
+
+  .leadApp:not(.sidebarCollapsed) .sidebarCollapse {
+    width: 42px;
+    margin: 0 auto;
+    padding: 0;
+  }
 }
 
 .appTopbar {
@@ -3077,7 +3156,7 @@ button.primary {
 .productProfileShell {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 12px;
+  gap: 14px;
   height: 100%;
   min-height: 0;
 }
@@ -3088,27 +3167,32 @@ button.primary {
   font-size: 28px;
   line-height: 36px;
   font-weight: 800;
+  letter-spacing: -0.01em;
 }
 
 .productProfileHeader p {
   max-width: 1050px;
   margin: 6px 0 0;
-  color: #667085;
+  color: var(--body);
   font-size: 14px;
   line-height: 22px;
 }
 
+/* 2026-05 LeadHunt 2.0 (style audit, profile polish): the three cards
+   share the same elevated surface treatment — soft blue-tinted border,
+   layered shadow, and a quiet hover lift to feel like a SaaS card. */
 .productGuide,
 .productFormCard,
 .productUnderstanding {
-  border: 1px solid var(--primary-border);
-  border-radius: 8px;
+  position: relative;
+  border: 1px solid #e6ecf6;
+  border-radius: var(--radius-xl);
   background: #fff;
-  box-shadow: var(--shadow-card);
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.02), 0 6px 18px rgba(47, 107, 255, 0.05);
 }
 
 .productGuide {
-  padding: 16px 24px 14px;
+  padding: 18px 24px 16px;
 }
 
 .productGuide h2,
@@ -3118,36 +3202,59 @@ button.primary {
   font-size: 15px;
   line-height: 22px;
   font-weight: 800;
+  letter-spacing: -0.005em;
 }
 
 .productGuideGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .productGuideGrid article {
+  position: relative;
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 14px;
   min-width: 0;
-  min-height: 58px;
+  min-height: 64px;
   align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: #fff;
-  padding: 10px 12px;
+  border: 1px solid #e6ecf6;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);
+  padding: 12px 14px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.productGuideGrid article:hover {
+  border-color: rgba(47, 107, 255, 0.32);
+  box-shadow: 0 10px 24px rgba(47, 107, 255, 0.08);
+  transform: translateY(-1px);
 }
 
 .productGuideGrid article > span {
+  position: relative;
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   place-items: center;
-  border-radius: 8px;
-  background: var(--primary-light);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, #eaf1ff 0%, #f3f7ff 100%);
   color: var(--primary);
+  box-shadow: inset 0 0 0 1px rgba(47, 107, 255, 0.08);
+}
+
+.productGuideGrid article:nth-child(2) > span {
+  background: linear-gradient(135deg, #ecf8f1 0%, #f4fbf7 100%);
+  color: #13a874;
+  box-shadow: inset 0 0 0 1px rgba(19, 168, 116, 0.1);
+}
+
+.productGuideGrid article:nth-child(3) > span {
+  background: linear-gradient(135deg, #fff1e8 0%, #fff7f0 100%);
+  color: #ff6b2c;
+  box-shadow: inset 0 0 0 1px rgba(255, 107, 44, 0.12);
 }
 
 .productGuideGrid strong {
@@ -3155,23 +3262,30 @@ button.primary {
   color: var(--title);
   font-size: 14px;
   line-height: 20px;
-  font-weight: 800;
+  font-weight: 700;
+  letter-spacing: -0.005em;
 }
 
 .productGuideGrid p,
 .productGuideHint {
   margin: 0;
-  color: #667085;
+  color: var(--body);
   font-size: 12px;
   line-height: 18px;
+}
+
+.productGuideGrid p {
+  margin-top: 2px;
+  color: var(--secondary);
 }
 
 .productGuideHint {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 14px;
   color: var(--primary);
+  font-weight: 600;
 }
 
 .productFormCard {
@@ -3179,24 +3293,26 @@ button.primary {
   grid-template-columns: 240px minmax(0, 1fr);
   min-height: 0;
   overflow: visible;
-  padding: 18px 24px;
+  padding: 20px 24px;
 }
 
 .productSteps {
   position: relative;
   display: grid;
   align-content: start;
-  gap: 28px;
-  padding: 10px 22px 10px 0;
+  gap: 24px;
+  padding: 10px 24px 10px 0;
+  border-right: 1px dashed #d9e2f4;
 }
 
 .productSteps::before {
   position: absolute;
-  top: 34px;
-  bottom: 64px;
+  top: 38px;
+  bottom: 56px;
   left: 19px;
-  width: 1px;
-  background: #9ec1ff;
+  width: 2px;
+  background: linear-gradient(180deg, rgba(47, 107, 255, 0.45) 0%, rgba(47, 107, 255, 0.12) 100%);
+  border-radius: 1px;
   content: "";
 }
 
@@ -3209,16 +3325,32 @@ button.primary {
 }
 
 .productStep > span {
+  position: relative;
   z-index: 1;
   display: grid;
   width: 34px;
   height: 34px;
   place-items: center;
   border-radius: 50%;
-  background: var(--primary);
+  background: linear-gradient(135deg, var(--primary) 0%, #4a82ff 100%);
   color: #fff;
   font-size: 15px;
   font-weight: 800;
+  box-shadow: 0 6px 14px rgba(47, 107, 255, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.productStep > span::after {
+  position: absolute;
+  inset: -4px;
+  border: 1px solid rgba(47, 107, 255, 0.2);
+  border-radius: 50%;
+  content: "";
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.productStep:hover > span::after {
+  opacity: 1;
 }
 
 .productStep strong {
@@ -3226,12 +3358,13 @@ button.primary {
   color: var(--title);
   font-size: 15px;
   line-height: 22px;
-  font-weight: 800;
+  font-weight: 700;
+  letter-spacing: -0.005em;
 }
 
 .productStep p {
   margin: 4px 0 0;
-  color: #667085;
+  color: var(--secondary);
   font-size: 12px;
   line-height: 18px;
 }
@@ -3240,9 +3373,10 @@ button.primary {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(300px, 0.85fr);
   grid-template-rows: 110px 92px 88px;
-  gap: 12px 14px;
+  gap: 14px 16px;
   min-width: 0;
   min-height: 0;
+  padding-left: 22px;
 }
 
 .productField,
@@ -3258,7 +3392,8 @@ button.primary {
   color: var(--title);
   font-size: 13px;
   line-height: 20px;
-  font-weight: 800;
+  font-weight: 700;
+  letter-spacing: -0.005em;
 }
 
 .productField b {
@@ -3271,12 +3406,18 @@ button.primary {
   height: 78px;
   resize: none;
   border: 1px solid #d7deea;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
+  background: #fff;
   color: var(--title);
   font-size: 13px;
   line-height: 20px;
   outline: none;
   padding: 10px 12px;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.productField textarea:hover {
+  border-color: #b9c5dd;
 }
 
 .productLinksField textarea {
@@ -3285,12 +3426,13 @@ button.primary {
 
 .productField textarea:focus {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.1);
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(47, 107, 255, 0.12);
 }
 
 .productField small {
   margin-top: 6px;
-  color: #667085;
+  color: var(--secondary);
   font-size: 11px;
   line-height: 16px;
 }
@@ -3298,15 +3440,24 @@ button.primary {
 .productUploadBox,
 .productImportBox {
   align-content: start;
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  border: 1px dashed #cdd6e5;
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, #fafcff 0%, #ffffff 100%);
   padding: 12px 14px;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.productUploadBox:hover,
+.productImportBox:hover {
+  border-color: var(--primary);
+  background: linear-gradient(180deg, #f3f7ff 0%, #fafcff 100%);
+  box-shadow: 0 4px 14px rgba(47, 107, 255, 0.08);
 }
 
 .productUploadBox p,
 .productImportBox p {
   margin: 2px 0 10px;
-  color: #667085;
+  color: var(--secondary);
   font-size: 12px;
   line-height: 18px;
 }
@@ -3318,10 +3469,17 @@ button.primary {
   gap: 8px;
   height: 34px;
   border: 1px dashed #cfd8e7;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
+  background: #fff;
   color: var(--primary);
   font-size: 12px;
   font-weight: 700;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.productUploadBox label:hover {
+  border-color: var(--primary);
+  background: var(--primary-light);
 }
 
 .productUploadBox input {
@@ -3336,12 +3494,18 @@ button.primary {
   justify-self: start;
   height: 34px;
   border: 1px solid var(--primary);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: #fff;
   color: var(--primary);
   font-size: 13px;
   font-weight: 800;
   padding: 0 18px;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.productImportBox button:hover {
+  background: var(--primary);
+  color: #fff;
 }
 
 .productNotesField {
@@ -3357,10 +3521,14 @@ button.primary {
   margin-top: 0;
 }
 
+/* 2026-05 LeadHunt 2.0 (style audit, profile polish): the AI summary
+   panel is now the "result" surface — slightly different background to
+   read as a takeaway, with per-row categorical accents and chip pop. */
 .productUnderstanding {
   min-height: 112px;
   overflow: hidden;
-  padding: 12px 24px 14px;
+  padding: 14px 24px 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #fafcff 100%);
 }
 
 .productUnderstandingHead {
@@ -3368,7 +3536,7 @@ button.primary {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 
 .productUnderstandingHead h2,
@@ -3385,6 +3553,10 @@ button.primary {
   gap: 8px;
 }
 
+.productUnderstandingHead h2 svg {
+  color: var(--primary);
+}
+
 .productUnderstandingHead button {
   gap: 6px;
   border: 0;
@@ -3392,23 +3564,36 @@ button.primary {
   color: var(--primary);
   font-size: 12px;
   font-weight: 700;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  transition: background 0.16s ease;
+}
+
+.productUnderstandingHead button:hover {
+  background: var(--primary-light);
 }
 
 .understandingRows {
   display: grid;
   overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  border: 1px solid #e6ecf6;
+  border-radius: var(--radius-lg);
   background: #fff;
 }
 
 .understandingRow {
   display: grid;
-  grid-template-columns: 30px 180px minmax(0, 1fr);
+  grid-template-columns: 32px 160px minmax(0, 1fr);
   align-items: center;
-  min-height: 34px;
+  gap: 12px;
+  min-height: 44px;
   border-bottom: 1px solid var(--divider);
-  padding: 0 16px;
+  padding: 8px 16px;
+  transition: background 0.16s ease;
+}
+
+.understandingRow:hover {
+  background: #fafbff;
 }
 
 .understandingRow:last-child {
@@ -3416,19 +3601,40 @@ button.primary {
 }
 
 .understandingRow > span {
-  color: var(--title);
-  font-size: 16px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--primary-light);
+  color: var(--primary);
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 800;
+}
+
+.understandingRow:nth-child(2) > span {
+  background: #e6f8ef;
+  color: #13a874;
+}
+
+.understandingRow:nth-child(3) > span {
+  background: #fff1e8;
+  color: #ff6b2c;
 }
 
 .understandingRow strong {
   color: var(--title);
   font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
 }
 
 .understandingRow div {
   display: flex;
+  flex-wrap: wrap;
   min-width: 0;
-  gap: 8px;
+  gap: 6px;
   overflow: hidden;
 }
 
@@ -3436,13 +3642,32 @@ button.primary {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  height: 22px;
-  border-radius: 5px;
+  height: 24px;
+  border: 1px solid rgba(47, 107, 255, 0.18);
+  border-radius: 999px;
   background: var(--primary-light);
   color: var(--primary);
   font-size: 12px;
   font-weight: 700;
   padding: 0 10px;
+  transition: transform 0.14s ease, box-shadow 0.14s ease;
+}
+
+.understandingRow b:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(47, 107, 255, 0.16);
+}
+
+.understandingRow:nth-child(2) b {
+  border-color: rgba(19, 168, 116, 0.22);
+  background: #ecf8f1;
+  color: #0d8e60;
+}
+
+.understandingRow:nth-child(3) b {
+  border-color: rgba(255, 107, 44, 0.22);
+  background: #fff1e8;
+  color: #c44a16;
 }
 
 .productActions {
@@ -3454,13 +3679,28 @@ button.primary {
   justify-content: center;
   gap: 8px;
   height: 42px;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   font-size: 14px;
   font-weight: 800;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.productActions button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(47, 107, 255, 0.22);
 }
 
 .productPrimaryAction {
   min-width: 184px;
+  background: linear-gradient(135deg, var(--primary) 0%, #4a82ff 100%);
+  color: #fff;
+  border: 0;
+  box-shadow: 0 8px 20px rgba(47, 107, 255, 0.26);
+}
+
+.productPrimaryAction:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 26px rgba(47, 107, 255, 0.32);
 }
 
 .productSecondaryAction {
@@ -3478,7 +3718,7 @@ button.primary {
   flex-wrap: wrap;
   gap: 8px;
   border: 1px solid var(--primary-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--primary-light);
   color: #486184;
   font-size: 12px;
@@ -3503,7 +3743,7 @@ button.primary {
   gap: 8px;
   min-width: 0;
   margin: 0 0 0 18px;
-  color: #667085;
+  color: var(--secondary);
   font-size: 12px;
 }
 
@@ -7938,6 +8178,33 @@ button.primary {
   white-space: nowrap;
 }
 
+@media (max-width: 1279px) {
+  .dashboardLeft {
+    /* 2026-05 LeadHunt 2.0 (style audit): the overview card switches to
+       a 2-column grid below this breakpoint (see `.overviewMetrics`
+       media query), which needs ~280px instead of 150px to render the
+       second row without clipping. */
+    grid-template-rows: 280px 190px minmax(210px, 1fr) 48px;
+  }
+
+  .overviewMetrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .overviewMetric:nth-child(2) {
+    border-right: 0;
+  }
+
+  .overviewMetric:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--divider);
+    padding-bottom: 14px;
+  }
+
+  .overviewMetric:nth-child(n + 3) {
+    padding-top: 14px;
+  }
+}
+
 .reachMeters {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -11152,18 +11419,20 @@ button.primary {
 
 .aiSearchRunCurrent {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
+  min-width: 0;
 }
 
 .aiSearchRunCurrentLabel {
   color: var(--secondary);
   font-size: 12px;
+  flex-shrink: 0;
 }
 
 .aiSearchRunCurrentCountry {
@@ -11173,13 +11442,13 @@ button.primary {
   border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
+  flex-shrink: 0;
 }
 
 .aiSearchRunCurrentQuery {
-  flex: 1 1 100%;
+  flex: 1;
   min-width: 0;
-  margin-top: 4px;
-  padding: 4px 8px;
+  padding: 2px 8px;
   background: #fff;
   border: 1px dashed var(--border);
   border-radius: 6px;
@@ -11327,6 +11596,28 @@ button.primary {
 
 .aiSearchRunLogPulse.live {
   color: var(--success);
+}
+
+/* Run finished cleanly: subtle steady gray dot + success-tone label. */
+.aiSearchRunLogPulse.done::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.aiSearchRunLogPulse.done {
+  color: var(--success);
+}
+
+/* Run never started or was paused — neutral. */
+.aiSearchRunLogPulse.idle::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--secondary);
 }
 
 @keyframes aiSearchRunPulse {
@@ -11536,6 +11827,58 @@ button.primary {
 .aiPoolStatusPill.pending {
   background: var(--warning-light);
   color: var(--warning);
+}
+
+/* ----- Short-viewport rescue for the search-in-progress page -----
+   The default layout is tuned to 1440×900 which gives ~826px of
+   internal height. On laptops at 1366×768 / 1280×720 the inner area
+   shrinks to ~600px and the bottom 转化卡 + 健康度 get clipped by
+   .aiPool's overflow:hidden. Two responses, in order of preference:
+
+   1. <= 760px tall: drop the conversion strip and health hint to the
+      legacy layout still works and the table is the focus.
+   2. <= 700px tall: also collapse the realtime log into a compact
+      single-line strip below the progress bar to claw back space.
+
+   The page never gains a vertical scrollbar — that's the explicit
+   product requirement. We hide low-priority blocks instead. */
+@media (max-height: 820px) {
+  .aiSearchRunPool {
+    /* Allow the small overflow that comes from rounding to scroll out
+       of view without showing a bar. The real fix is the section
+       hides below — this is just a safety net. */
+    overflow-y: auto;
+  }
+  .aiSearchRunPool .aiSearchRunConvert,
+  .aiSearchRunPool .aiSearchRunHealth {
+    display: none;
+  }
+  /* Drop the realtime log into a one-line strip and slim the run card
+     so the candidate table stays visible without page-level scroll. */
+  .aiSearchRunPool .aiSearchRunBody {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .aiSearchRunPool .aiSearchRunLog {
+    display: none;
+  }
+}
+
+@media (max-height: 700px) {
+  /* Even smaller laptops: collapse step pills' state subtitle so the
+     5 pills become a thin status strip. */
+  .aiSearchRunPool .aiSearchRunSteps {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .aiSearchRunPool .aiSearchRunStep {
+    padding: 6px 4px;
+  }
+  .aiSearchRunPool .aiSearchRunStepLabel {
+    font-size: 11px;
+  }
+  .aiSearchRunPool .aiSearchRunStepState {
+    display: none;
+  }
 }
 
 /* 2026-05 LeadHunt 2.0: no narrow-viewport breakpoint for the pool

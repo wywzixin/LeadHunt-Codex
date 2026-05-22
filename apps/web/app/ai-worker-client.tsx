@@ -2127,6 +2127,25 @@ function AiWorkerConversation({
     ? targetMarkets.slice(0, 6)
     : ["UAE", "Saudi Arabia", "Qatar", "Oman"];
   const taskHistoryCount = leads.length;
+  const failedQueryCount = useMemo(
+    () =>
+      currentTask?.searchQueries?.filter((query) => query.executionStatus === "failed").length ?? 0,
+    [currentTask]
+  );
+  const pendingQueryCount = useMemo(
+    () =>
+      currentTask?.searchQueries?.filter(
+        (query) => query.executionStatus === "pending" || query.executionStatus === "running"
+      ).length ?? 0,
+    [currentTask]
+  );
+  // The run is complete when there are queries, no pending/running ones,
+  // and the live state isn't actively creating/searching. Mixed
+  // success+failure should still report as "complete" but with the
+  // failure count surfaced so the page never reads "已完成"+"进行中"
+  // simultaneously.
+  const isRunComplete = queryCount > 0 && pendingQueryCount === 0 && !searching && !creating;
+  const isRunActive = searching || creating || pendingQueryCount > 0;
   const currentRunningQuery = useMemo(
     () => currentTask?.searchQueries?.find((query) => query.executionStatus === "running") ?? null,
     [currentTask]
@@ -2161,31 +2180,60 @@ function AiWorkerConversation({
           : state === "failed"
             ? "失败"
             : "等待中";
-    const writeState: RunStep["state"] =
-      leads.length > 0 ? "running" : score ? stateLabelOf(score) : "pending";
+    // 2026-05 LeadHunt 2.0: when the whole run is complete (no pending,
+    // no running, not actively searching) we collapse pending downstream
+    // steps into "completed" — otherwise the page reads as e.g.
+    // "26/28 query, 写入客户池 进行中" which contradicts the run-level
+    // "本批已跑完" status. A run that ends with failed queries surfaces
+    // them on the affected step (Brave 搜索) and lets everything after
+    // settle as "已完成".
+    const stepStateAfterRun = (raw: RunStep["state"]): RunStep["state"] =>
+      isRunComplete && (raw === "running" || raw === "pending") ? "completed" : raw;
+    // 生成指令: planning step, but if any query exists we know it's done
+    // (legacy tasks never expose a "plan_search" agent step).
+    const planningRaw = stateLabelOf(planning);
+    const planningState: RunStep["state"] =
+      planningRaw === "pending" && queryCount ? "completed" : planningRaw;
+    // Brave 搜索: if any query failed and the run is complete we report
+    // it as failed at the search step so the failure has a home.
+    const searchRaw = stepStateAfterRun(stateLabelOf(search));
+    const searchState: RunStep["state"] =
+      isRunComplete && failedQueryCount > 0 ? "failed" : searchRaw;
+    const normalizeState = stepStateAfterRun(stateLabelOf(normalize));
+    const scoreState = stepStateAfterRun(stateLabelOf(score));
+    // 写入客户池: this is "completed" once the run is over (success or
+    // partial failure both mean we've written what we have). While
+    // active, it tracks the score step (the last node before the lead
+    // pool is updated) plus a small heuristic for when leads start
+    // landing live.
+    const writeState: RunStep["state"] = isRunComplete
+      ? "completed"
+      : leads.length > 0
+        ? "running"
+        : scoreState;
     return [
       {
         label: "生成指令",
-        state: stateLabelOf(planning) === "pending" && queryCount ? "completed" : stateLabelOf(planning),
-        stateLabel: stateText(stateLabelOf(planning) === "pending" && queryCount ? "completed" : stateLabelOf(planning)),
+        state: planningState,
+        stateLabel: stateText(planningState),
         icon: Sparkles
       },
       {
         label: "Brave 搜索",
-        state: stateLabelOf(search),
-        stateLabel: stateText(stateLabelOf(search)),
+        state: searchState,
+        stateLabel: stateText(searchState),
         icon: Search
       },
       {
         label: "清洗候选",
-        state: stateLabelOf(normalize),
-        stateLabel: stateText(stateLabelOf(normalize)),
+        state: normalizeState,
+        stateLabel: stateText(normalizeState),
         icon: Filter
       },
       {
         label: "ICP 评分",
-        state: stateLabelOf(score),
-        stateLabel: stateText(stateLabelOf(score)),
+        state: scoreState,
+        stateLabel: stateText(scoreState),
         icon: Star
       },
       {
@@ -2195,7 +2243,7 @@ function AiWorkerConversation({
         icon: Database
       }
     ];
-  }, [currentTask, leads.length, queryCount]);
+  }, [currentTask, failedQueryCount, isRunComplete, leads.length, queryCount]);
 
   function formatLogTime(index: number, total: number) {
     // Synthetic ascending HH:mm timestamps so the realtime log reads
@@ -2297,10 +2345,14 @@ function AiWorkerConversation({
           <div className="aiSearchRunHeadLeft">
             <h2>持续搜索批次</h2>
             <p>
-              {searching
-                ? `正在执行：已完成 ${executedCount}/${queryCount || "—"} 条 query`
-                : queryCount
-                  ? `本批 ${queryCount} 条 query 已跑完，等待下一轮`
+              {isRunActive
+                ? `正在执行：已完成 ${executedCount}/${queryCount || "—"} 条 query${
+                    failedQueryCount ? `，失败 ${failedQueryCount} 条` : ""
+                  }`
+                : isRunComplete
+                  ? failedQueryCount > 0
+                    ? `本批已跑完：${executedCount} 条成功，${failedQueryCount} 条失败`
+                    : `本批 ${queryCount} 条 query 已跑完，等待下一轮`
                   : status}
             </p>
           </div>
@@ -2355,8 +2407,8 @@ function AiWorkerConversation({
 
             <p className="aiSearchRunStat">
               本批已沉淀 <strong>{leads.length}</strong> 家客户
-              {searchResult?.failedQueries
-                ? `，失败 ${searchResult.failedQueries} 条 query`
+              {failedQueryCount > 0
+                ? `，${failedQueryCount} 条 query 失败已忽略`
                 : ""}
             </p>
 
@@ -2390,8 +2442,19 @@ function AiWorkerConversation({
           <aside className="aiSearchRunLog" aria-label="实时执行记录">
             <header className="aiSearchRunLogHead">
               <h3>实时执行记录</h3>
-              <span className={`aiSearchRunLogPulse ${searching ? "live" : ""}`} aria-hidden="true">
-                {searching ? "实时更新中" : "已停止"}
+              <span
+                className={`aiSearchRunLogPulse ${
+                  isRunActive ? "live" : isRunComplete ? "done" : "idle"
+                }`}
+                aria-hidden="true"
+              >
+                {isRunActive
+                  ? "实时更新中"
+                  : isRunComplete
+                    ? failedQueryCount > 0
+                      ? "已完成（含失败）"
+                      : "已完成"
+                    : "未启动"}
               </span>
             </header>
             <ol className="aiSearchRunLogList">
