@@ -433,6 +433,13 @@ export function AiWorkerClient() {
           if (!cancelled) {
             setError(errorMessage(requestError));
             setStatus("任务状态刷新失败，后端任务可能仍在执行。");
+            // Release the optimistic flags on transient failures too —
+            // otherwise a single 401/network blip leaves the page
+            // disabled forever ("继续搜索 30 条" stays grayed out).
+            // The next user action (or a manual refresh) will re-run
+            // the polling loop.
+            setSearching(false);
+            setCreating(false);
           }
           return;
         }
@@ -744,7 +751,13 @@ export function AiWorkerClient() {
                     );
                     applyTaskProgress(refreshed);
                   } catch (requestError) {
+                    // If we can't even load the task, don't fire a
+                    // search against it — the polling loop wouldn't
+                    // know which task to follow and the user would
+                    // see a half-loaded conversation view.
                     setError(errorMessage(requestError));
+                    setStatus("加载任务失败，未触发新一轮搜索。");
+                    return;
                   }
                   void runTaskSearch(taskId);
                 })();
@@ -2417,7 +2430,7 @@ function AiWorkerConversation({
           <div className="aiPoolKpiBody">
             <span className="aiPoolKpiLabel">本批新增</span>
             <strong className="aiPoolKpiValue">{leads.length}</strong>
-            <span className="aiPoolKpiDelta">较上周 +{leads.length}</span>
+            <span className="aiPoolKpiDelta">{`较上周 +${leads.length}`}</span>
           </div>
         </article>
         <article className="aiPoolKpi tone-orange">
@@ -2905,6 +2918,19 @@ const planningStepNames = [
 const searchStepNames = ["brave_search", "normalize_leads", "extract_contacts", "score_icp"];
 
 function isBackendTaskActive(task: LeadTask) {
+  // 2026-05 LeadHunt 2.0: terminal task.status wins over stale agent
+  // step rows. A failed/completed/cancelled/paused task must never be
+  // treated as active even if a worker forgot to flip its leftover
+  // step rows from "running" to a final state — that's exactly what
+  // pinned the search page in the P0 bug.
+  if (
+    task.status === "failed" ||
+    task.status === "completed" ||
+    task.status === "cancelled" ||
+    task.status === "paused"
+  ) {
+    return false;
+  }
   if (task.status === "running" || task.status === "pending") {
     return true;
   }
