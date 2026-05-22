@@ -64,6 +64,8 @@ type LeadTaskListRow = {
   prompt: string | null;
   lead_count: number | bigint | null;
   query_count: number | bigint | null;
+  pending_crm_count: number | bigint | null;
+  pending_email_count: number | bigint | null;
 };
 
 type PlannedSearchQuery = {
@@ -1111,7 +1113,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         lead_tasks.updated_at,
         lead_tasks.input_payload->>'prompt' AS prompt,
         COALESCE(lead_counts.lead_count, 0)::int AS lead_count,
-        COALESCE(query_counts.query_count, 0)::int AS query_count
+        COALESCE(query_counts.query_count, 0)::int AS query_count,
+        COALESCE(pending_crm_counts.pending_crm_count, 0)::int AS pending_crm_count,
+        COALESCE(pending_email_counts.pending_email_count, 0)::int AS pending_email_count
       FROM lead_tasks
       LEFT JOIN LATERAL (
         SELECT count(*)::int AS lead_count
@@ -1126,6 +1130,38 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         FROM search_queries
         WHERE search_queries.task_id = lead_tasks.id
       ) query_counts ON true
+      -- 2026-05 Stage 3 workbench KPI aggregation. Stays SQL-side so the
+      -- workbench doesn't need to fan out 30 detail fetches just to
+      -- build the top-level counters.
+      LEFT JOIN LATERAL (
+        -- "待同步 CRM" = leads in the main pool (review / qualified)
+        -- that haven't been approved into a CRM row yet. Approve flips
+        -- status to approved/contacted/email_sent and creates the CRM
+        -- row, so this counter naturally drains as the user works
+        -- through the pool.
+        SELECT count(*)::int AS pending_crm_count
+        FROM lead_candidates
+        WHERE lead_candidates.task_id = lead_tasks.id
+          AND lead_candidates.status IN ('review', 'qualified')
+      ) pending_crm_counts ON true
+      LEFT JOIN LATERAL (
+        -- "邮件待确认" = leads that have at least one outreach draft
+        -- in 'draft' status with no successful send_log yet. Once the
+        -- user confirms and sends, the draft flips out of 'draft' and
+        -- a send_log row lands, so this counter drops.
+        SELECT count(DISTINCT lead_candidates.id)::int AS pending_email_count
+        FROM lead_candidates
+        JOIN outreach_drafts
+          ON outreach_drafts.lead_id = lead_candidates.id
+         AND outreach_drafts.status = 'draft'
+        WHERE lead_candidates.task_id = lead_tasks.id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM send_logs
+            WHERE send_logs.draft_id = outreach_drafts.id
+              AND send_logs.status = 'sent'
+          )
+      ) pending_email_counts ON true
       WHERE lead_tasks.user_id = ${userId}
       ${searchClause}
       ORDER BY lead_tasks.created_at DESC
@@ -1143,7 +1179,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           prompt,
           title: prompt ? prompt.slice(0, 36) : "未命名任务",
           leadCount: toNumberCount(task.lead_count),
-          queryCount: toNumberCount(task.query_count)
+          queryCount: toNumberCount(task.query_count),
+          pendingCrmCount: toNumberCount(task.pending_crm_count),
+          pendingEmailCount: toNumberCount(task.pending_email_count)
         };
       })
     };

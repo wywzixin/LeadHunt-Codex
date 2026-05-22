@@ -11,7 +11,9 @@ function createPrismaMock() {
         updated_at: new Date("2026-05-03T08:01:00.000Z"),
         prompt: "Find UAE telecom distributors and stockists",
         lead_count: 12,
-        query_count: 15
+        query_count: 15,
+        pending_crm_count: 7,
+        pending_email_count: 3
       }
     ]),
     productProfile: {
@@ -446,7 +448,9 @@ describe("AgentWorkflowService", () => {
           prompt: "Find UAE telecom distributors and stockists",
           title: "Find UAE telecom distributors and st",
           leadCount: 12,
-          queryCount: 15
+          queryCount: 15,
+          pendingCrmCount: 7,
+          pendingEmailCount: 3
         }
       ]
     });
