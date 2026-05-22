@@ -2521,12 +2521,12 @@ function AiWorkerConversation({
                   const isFresh = lead.stage === "新发现" || lead.stage === "main";
                   return (
                     <tr key={lead.id} className={isFresh ? "is-fresh" : ""}>
-                      <td className="col-company">
+                      <td className="col-company" title={lead.companyName}>
                         {isFresh ? <span className="aiSearchRunFreshBadge">新增</span> : null}
                         {lead.companyName}
                       </td>
-                      <td className="col-country">{lead.country}</td>
-                      <td className="col-type">{lead.tag}</td>
+                      <td className="col-country" title={lead.country}>{lead.country}</td>
+                      <td className="col-type" title={lead.tag}>{lead.tag}</td>
                       <td className="col-score">
                         <span className="stars">{renderStars(lead.score / 20)}</span>
                         <span className="aiSearchRunScore">{lead.score}</span>

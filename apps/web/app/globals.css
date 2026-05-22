@@ -11801,7 +11801,23 @@ button.primary {
 .aiSearchRunPool .aiPoolTable tbody td {
   padding: 8px 10px;
   font-size: 13px;
+  /* 2026-05 LeadHunt 2.0: text-bearing cells truncate with ellipsis
+     and surface the full value via the native title tooltip. Cells
+     that hold pills / buttons (score/email/phone/status/action) opt
+     out via `overflow: visible` overrides below. */
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0;
+}
+
+/* Pill / button cells must not clip their children. */
+.aiSearchRunPool .aiPoolTable tbody td.col-score,
+.aiSearchRunPool .aiPoolTable tbody td.col-email,
+.aiSearchRunPool .aiPoolTable tbody td.col-phone,
+.aiSearchRunPool .aiPoolTable tbody td.col-status,
+.aiSearchRunPool .aiPoolTable tbody td.col-action {
+  overflow: visible;
 }
 
 .aiSearchRunPool .aiPoolTable tbody tr {
