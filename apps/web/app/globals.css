@@ -11256,11 +11256,21 @@ button.primary {
  * `.aiPool` host (already overflow:hidden + flex column).
  * =========================================================================== */
 
-/* Tighter gap and padding for the search-in-progress page so 6 stacked
-   sections (header / kpi / run / table / convert / health) fit a single
-   1440x900 viewport. */
+/* 2026-05 LeadHunt 2.0: search-in-progress page uses a strict grid
+   skeleton so the candidate table absorbs remaining vertical space
+   while the bottom action bar stays anchored at the page bottom.
+   Layout: header / KPI / run-batch / table-1fr / bottom-bar. */
 .aiPool.aiSearchRunPool {
-  gap: 10px;
+  display: grid;
+  grid-template-rows:
+    auto    /* header */
+    auto    /* KPI strip */
+    auto    /* run-batch card */
+    minmax(0, 1fr) /* candidate table — fills remaining space; min:0
+                      so very short laptops can shrink it without
+                      pushing the bottom bar off-screen. */
+    auto;   /* bottom action bar (CRM / mail / followup / health) */
+  gap: 12px;
   padding: 16px 28px 18px;
 }
 
@@ -11677,11 +11687,18 @@ button.primary {
 
 /* ----- Lead table tweaks for the search-in-progress version ----- */
 .aiSearchRunTableWrap {
-  /* Inherits .aiPoolTableWrap layout (flex column with min-height: 0).
-     We give it a fixed comfortable size — the conversion cards and
-     health hint below need to stay visible without a page scrollbar. */
-  flex: 0 0 200px;
-  min-height: 200px;
+  /* Inside the page-level grid, this row claims 1fr and only the
+     internal table body scrolls. min-height: 0 + overflow: hidden
+     are required so the wrapper doesn't push the bottom bar off
+     the screen. The .aiPoolTableScroll inside owns the scroll. */
+  min-height: 0;
+  overflow: hidden;
+  flex: initial;
+}
+
+.aiSearchRunTableWrap .aiPoolTableScroll {
+  height: 100%;
+  overflow: auto;
 }
 
 .aiSearchRunTableHead {
@@ -11735,79 +11752,130 @@ button.primary {
   font-variant-numeric: tabular-nums;
 }
 
-/* ----- Conversion cards ----- */
-.aiSearchRunConvert {
+/* ----- Bottom action bar ----- */
+/* 2026-05 LeadHunt 2.0: replaces the legacy 3-card 转化 strip + the
+   stand-alone 健康度 row. A single horizontal bar grid'd with three
+   compact action cards plus a flexible health summary on the right.
+   Anchored to the bottom of .aiSearchRunPool's grid so it never gets
+   pushed by table content above. */
+.aiSearchRunBottomBar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 1.4fr);
+  gap: 10px;
+  align-items: stretch;
 }
 
-.aiSearchRunConvertCard {
+.aiSearchRunBottomCard {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow-card);
-}
-
-.aiSearchRunConvertCard .aiPoolIcon {
-  width: 38px;
-  height: 38px;
   border-radius: 10px;
+  box-shadow: var(--shadow-card);
+  min-height: 60px;
 }
 
-.aiSearchRunConvertBody {
+.aiSearchRunBottomCard .aiPoolIcon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+}
+
+.aiSearchRunBottomBody {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.aiSearchRunConvertTitle {
-  margin: 0 0 2px;
+.aiSearchRunBottomTitle {
+  margin: 0;
   color: var(--title);
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
 }
 
-.aiSearchRunConvertMeta {
+.aiSearchRunBottomMeta {
   margin: 0;
   color: var(--secondary);
   font-size: 12px;
 }
 
-.aiSearchRunConvertMeta strong {
+.aiSearchRunBottomMeta strong {
   color: var(--title);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  margin-right: 2px;
 }
 
-.aiSearchRunConvertCta {
-  padding: 7px 14px;
+.aiSearchRunBottomCta {
+  padding: 6px 12px;
   background: var(--primary);
   color: #fff;
   border: none;
-  border-radius: 8px;
-  font-size: 13px;
+  border-radius: 6px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   transition: background 0.15s;
 }
 
-.aiSearchRunConvertCta:hover:not(:disabled) {
+.aiSearchRunBottomCta:hover:not(:disabled) {
   background: var(--primary-hover);
 }
 
-.aiSearchRunConvertCta:disabled {
+.aiSearchRunBottomCta:disabled {
   background: var(--secondary);
-  opacity: 0.6;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
-.aiSearchRunHealth {
-  /* slightly smaller padding for the conversation-page health hint */
+.aiSearchRunBottomHealth {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 10px 14px;
+  background: var(--success-light);
+  border: 1px solid #b8eccb;
+  border-radius: 10px;
+  min-height: 60px;
+}
+
+.aiSearchRunBottomHealthIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--success);
+  color: #fff;
+}
+
+.aiSearchRunBottomHealth p {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--body);
+  font-size: 12px;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.aiSearchRunBottomHealthLabel {
+  color: var(--title);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.aiSearchRunBottomHealth strong {
+  color: var(--success);
+  font-weight: 700;
 }
 
 /* aiPool status pill helper for the table */
@@ -11831,30 +11899,11 @@ button.primary {
 
 /* ----- Short-viewport rescue for the search-in-progress page -----
    The default layout is tuned to 1440×900 which gives ~826px of
-   internal height. On laptops at 1366×768 / 1280×720 the inner area
-   shrinks to ~600px and the bottom 转化卡 + 健康度 get clipped by
-   .aiPool's overflow:hidden. Two responses, in order of preference:
-
-   1. <= 760px tall: drop the conversion strip and health hint to the
-      legacy layout still works and the table is the focus.
-   2. <= 700px tall: also collapse the realtime log into a compact
-      single-line strip below the progress bar to claw back space.
-
-   The page never gains a vertical scrollbar — that's the explicit
-   product requirement. We hide low-priority blocks instead. */
+   internal height. On laptops at ≤768/720 we collapse the right-hand
+   realtime log into the progress card so the candidate table stays
+   visible. The bottom action bar is now compact (~60px) and always
+   visible — no need to hide it. */
 @media (max-height: 820px) {
-  .aiSearchRunPool {
-    /* Allow the small overflow that comes from rounding to scroll out
-       of view without showing a bar. The real fix is the section
-       hides below — this is just a safety net. */
-    overflow-y: auto;
-  }
-  .aiSearchRunPool .aiSearchRunConvert,
-  .aiSearchRunPool .aiSearchRunHealth {
-    display: none;
-  }
-  /* Drop the realtime log into a one-line strip and slim the run card
-     so the candidate table stays visible without page-level scroll. */
   .aiSearchRunPool .aiSearchRunBody {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -11864,7 +11913,7 @@ button.primary {
 }
 
 @media (max-height: 700px) {
-  /* Even smaller laptops: collapse step pills' state subtitle so the
+  /* Smallest laptops: collapse step pills' state subtitle so the
      5 pills become a thin status strip. */
   .aiSearchRunPool .aiSearchRunSteps {
     grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -11877,6 +11926,14 @@ button.primary {
     font-size: 11px;
   }
   .aiSearchRunPool .aiSearchRunStepState {
+    display: none;
+  }
+  /* Drop the health summary on the right of the bottom bar so the
+     three action cards have more room. */
+  .aiSearchRunPool .aiSearchRunBottomBar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .aiSearchRunPool .aiSearchRunBottomHealth {
     display: none;
   }
 }

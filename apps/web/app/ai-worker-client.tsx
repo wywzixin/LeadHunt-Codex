@@ -2600,78 +2600,79 @@ function AiWorkerConversation({
         </footer>
       </section>
 
-      {/* 下一步转化 — 3 cards */}
-      <section className="aiSearchRunConvert" aria-label="下一步转化">
-        <article className="aiSearchRunConvertCard tone-blue">
+      {/* 底部紧凑操作栏 — 把转化三联卡和健康度合并成一行，让客户表
+          稳定占据 1fr，少数据时不显得空、多数据时不会被挤压。 */}
+      <section className="aiSearchRunBottomBar" aria-label="下一步操作 / 客户池健康度">
+        <article className="aiSearchRunBottomCard tone-blue">
           <div className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
             <span className="aiPoolIconText">CRM</span>
           </div>
-          <div className="aiSearchRunConvertBody">
-            <p className="aiSearchRunConvertTitle">CRM 同步</p>
-            <p className="aiSearchRunConvertMeta">
-              <strong>{Math.max(leads.length - crmSyncedCount, 0)}</strong> 家客户待同步，字段已整理。
+          <div className="aiSearchRunBottomBody">
+            <p className="aiSearchRunBottomTitle">CRM 同步</p>
+            <p className="aiSearchRunBottomMeta">
+              <strong>{Math.max(leads.length - crmSyncedCount, 0)}</strong> 家待同步
             </p>
           </div>
-          <button
-            type="button"
-            className="aiSearchRunConvertCta"
-            onClick={onOpenCrm}
-          >
-            预览同步
+          <button type="button" className="aiSearchRunBottomCta" onClick={onOpenCrm}>
+            预览
           </button>
         </article>
 
-        <article className="aiSearchRunConvertCard tone-purple">
+        <article className="aiSearchRunBottomCard tone-purple">
           <div className="aiPoolIcon aiPoolIconPurple" aria-hidden="true">
-            <Mail size={20} />
+            <Mail size={18} />
           </div>
-          <div className="aiSearchRunConvertBody">
-            <p className="aiSearchRunConvertTitle">邮件触达</p>
-            <p className="aiSearchRunConvertMeta">
-              <strong>{actionableLeads.length}</strong> 封待确认，主题：中国 B2B 工厂产品推荐
+          <div className="aiSearchRunBottomBody">
+            <p className="aiSearchRunBottomTitle">邮件触达</p>
+            <p className="aiSearchRunBottomMeta">
+              <strong>{actionableLeads.length}</strong> 封待确认
             </p>
           </div>
           <button
             type="button"
-            className="aiSearchRunConvertCta"
+            className="aiSearchRunBottomCta"
             onClick={onOpenMail}
             disabled={running || !hasActionableLeads}
           >
-            预览邮件
+            预览
           </button>
         </article>
 
-        <article className="aiSearchRunConvertCard tone-orange">
+        <article className="aiSearchRunBottomCard tone-orange">
           <div className="aiPoolIcon aiPoolIconOrange" aria-hidden="true">
-            <Bell size={20} />
+            <Bell size={18} />
           </div>
-          <div className="aiSearchRunConvertBody">
-            <p className="aiSearchRunConvertTitle">跟进提醒</p>
-            <p className="aiSearchRunConvertMeta">
-              <strong>{pendingFollowupCount}</strong> 家客户需跟进，最近提醒：3 天后
+          <div className="aiSearchRunBottomBody">
+            <p className="aiSearchRunBottomTitle">跟进提醒</p>
+            <p className="aiSearchRunBottomMeta">
+              <strong>{pendingFollowupCount}</strong> 家需跟进
             </p>
           </div>
           <button
             type="button"
-            className="aiSearchRunConvertCta"
+            className="aiSearchRunBottomCta"
             disabled
             title="跟进提醒功能开发中"
           >
-            查看跟进
+            查看
           </button>
         </article>
-      </section>
 
-      {/* 健康度提示 */}
-      <section className="aiPoolHealth aiSearchRunHealth" aria-label="客户池健康度">
-        <span className="aiPoolHealthIcon" aria-hidden="true">
-          <CheckCircle2 size={18} />
-        </span>
-        <p>
-          获客池健康度：有效客户率 <strong>{percent(actionableLeads.length, Math.max(leads.length, 1))}</strong>
-          ，本批 query 重复率 <strong>{queryCount ? `${Math.max(0, Math.round((1 - executedCount / queryCount) * 100))}%` : "—"}</strong>
-          。建议下一批增加维护商和渠道商关键词。
-        </p>
+        <div className="aiSearchRunBottomHealth" aria-label="客户池健康度">
+          <span className="aiSearchRunBottomHealthIcon" aria-hidden="true">
+            <CheckCircle2 size={16} />
+          </span>
+          <p>
+            <span className="aiSearchRunBottomHealthLabel">获客池健康度</span>
+            <span>
+              有效客户率 <strong>{percent(actionableLeads.length, Math.max(leads.length, 1))}</strong>
+              {" · "}
+              本批 query 重复率 <strong>
+                {queryCount ? `${Math.max(0, Math.round((1 - executedCount / queryCount) * 100))}%` : "—"}
+              </strong>
+            </span>
+          </p>
+        </div>
       </section>
     </div>
   );
