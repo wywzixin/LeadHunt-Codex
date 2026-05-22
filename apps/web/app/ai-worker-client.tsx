@@ -260,6 +260,18 @@ type LeadTaskListItem = {
 
 type LeadTaskListResponse = {
   tasks: LeadTaskListItem[];
+  // 2026-05 Stage 3 follow-up: workbench KPI summary computed over the
+  // user's full task history, independent of the list `limit`. The
+  // workbench top strip uses this so a new task can't push an old one
+  // out of the listed window and make the counters drop.
+  summary?: LeadTaskSummary;
+};
+
+type LeadTaskSummary = {
+  taskCount: number;
+  todayLeadCount: number;
+  pendingCrmCount: number;
+  pendingEmailCount: number;
 };
 
 type SearchRunResult = {
@@ -341,6 +353,10 @@ export function AiWorkerClient() {
   const taskSearch = "";
   const [taskPrompt, setTaskPrompt] = useState(defaultTaskPrompt);
   const [taskHistory, setTaskHistory] = useState<LeadTaskListItem[]>([]);
+  // 2026-05 Stage 3 follow-up: workbench KPI summary covers the full
+  // user history so new tasks pushing old ones out of the limit=30
+  // listing window can't make the counters appear to drop.
+  const [taskSummary, setTaskSummary] = useState<LeadTaskSummary | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [currentTask, setCurrentTask] = useState<LeadTask | null>(null);
   const [searchResult, setSearchResult] = useState<SearchRunResult | null>(null);
@@ -490,8 +506,10 @@ export function AiWorkerClient() {
       const url = `/api/lead-tasks?${params.toString()}`;
       const payload = await apiRequest<LeadTaskListResponse>(url);
       setTaskHistory(payload.tasks);
+      setTaskSummary(payload.summary ?? null);
     } catch {
       setTaskHistory([]);
+      setTaskSummary(null);
     } finally {
       setHistoryLoading(false);
     }
@@ -777,6 +795,7 @@ export function AiWorkerClient() {
               onSubmit={submitLanding}
               submitting={creating || searching}
               taskHistory={taskHistory}
+              taskSummary={taskSummary}
               historyLoading={historyLoading}
               onSelectHistoryTask={openPoolFromHistory}
               onRefreshHistory={() => void loadTaskHistory(taskSearch)}
@@ -1017,6 +1036,7 @@ type WorkbenchProps = {
   onSubmit: () => void;
   submitting: boolean;
   taskHistory: LeadTaskListItem[];
+  taskSummary: LeadTaskSummary | null;
   historyLoading: boolean;
   onSelectHistoryTask: (taskId: string) => void;
   onRefreshHistory: () => void;
@@ -1056,22 +1076,30 @@ function AiWorkerWorkbench({
   onSubmit,
   submitting,
   taskHistory,
+  taskSummary,
   historyLoading,
   onSelectHistoryTask,
   onRefreshHistory,
   onContinueSearch
 }: WorkbenchProps) {
   const greeting = useMemo(() => buildGreeting(), []);
-  const trackingPoolCount = taskHistory.length;
+  // 2026-05 Stage 3 follow-up: 跟踪客户池总数显示后端 summary 的全量
+  // task_count，而不是 limit=30 列表的长度。一个新任务挤掉旧任务时
+  // 列表数会保持 30，而真实总数应该 +1。
+  const trackingPoolCount = taskSummary?.taskCount ?? taskHistory.length;
 
   // 2026-05 Stage 3 workbench KPI aggregation. All counters read ONLY
-  // from real taskHistory fields; nothing is estimated, and any field
-  // we don't actually have falls through to 0 with no fake delta.
+  // from the backend list summary (computed over the user's full task
+  // history, not just the limit=30 listing window). Falls through to
+  // taskHistory aggregation when summary is unavailable so the page
+  // still renders during the first render before the response lands.
   //
-  // 今日新增: sum of leadCount for tasks created today. Uses createdAt
-  // (not updatedAt) so a task that re-runs tomorrow still counts under
-  // its original creation day instead of jumping back into "今日".
+  // 今日新增: sum of main-pool leadCount for tasks created today. The
+  // summary builds it server-side from lead_candidates + the same
+  // country-confidence gate the per-task lead_count uses, so the
+  // strip stays consistent with the per-task counters.
   const todayLeadCount = useMemo(() => {
+    if (taskSummary) return taskSummary.todayLeadCount;
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     return taskHistory
@@ -1080,23 +1108,19 @@ function AiWorkerWorkbench({
         return Number.isFinite(created) && created >= startOfDay.getTime();
       })
       .reduce((sum, task) => sum + (task.leadCount ?? 0), 0);
-  }, [taskHistory]);
+  }, [taskHistory, taskSummary]);
 
-  // 待同步 CRM: sum of pendingCrmCount across every tracked task — any
-  // candidate in main pool (review/qualified) that hasn't been
-  // approved into a CRM row yet. Backend list endpoint computes this
-  // SQL-side; we just add up the per-task counter.
-  const pendingCrmAcrossPools = useMemo(
-    () => taskHistory.reduce((sum, task) => sum + (task.pendingCrmCount ?? 0), 0),
-    [taskHistory]
-  );
+  // 待同步 CRM: full-history pendingCrmCount from summary. Used to
+  // fall back to summing the limit=30 list rows; that under-counts
+  // whenever a user has more than 30 historical tasks.
+  const pendingCrmAcrossPools =
+    taskSummary?.pendingCrmCount ??
+    taskHistory.reduce((sum, task) => sum + (task.pendingCrmCount ?? 0), 0);
 
-  // 邮件待确认: sum of pendingEmailCount — leads with at least one
-  // outreach draft in 'draft' status and no successful send_log yet.
-  const pendingEmailAcrossPools = useMemo(
-    () => taskHistory.reduce((sum, task) => sum + (task.pendingEmailCount ?? 0), 0),
-    [taskHistory]
-  );
+  // 邮件待确认: full-history pendingEmailCount from summary.
+  const pendingEmailAcrossPools =
+    taskSummary?.pendingEmailCount ??
+    taskHistory.reduce((sum, task) => sum + (task.pendingEmailCount ?? 0), 0);
 
   // Reset scroll on mount so the greeting is always visible when the
   // workbench appears (e.g. returning from the pool detail page).
@@ -1111,7 +1135,7 @@ function AiWorkerWorkbench({
   const kpis: WorkbenchKpi[] = [
     {
       label: "客户池总数",
-      value: taskHistory.length,
+      value: taskSummary?.taskCount ?? taskHistory.length,
       delta: "较上周 +0",
       icon: Users,
       tone: "blue"
