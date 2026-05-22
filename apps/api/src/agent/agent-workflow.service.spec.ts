@@ -434,6 +434,28 @@ describe("AgentWorkflowService", () => {
 
   it("lists task history with candidate and query counts", async () => {
     const prisma = createPrismaMock();
+    prisma.$queryRaw
+      .mockResolvedValueOnce([
+        {
+          id: "task-1",
+          status: "running",
+          created_at: new Date("2026-05-03T08:00:00.000Z"),
+          updated_at: new Date("2026-05-03T08:01:00.000Z"),
+          prompt: "Find UAE telecom distributors and stockists",
+          lead_count: 12,
+          query_count: 15,
+          pending_crm_count: 7,
+          pending_email_count: 3
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          task_count: 41,
+          today_lead_count: 12,
+          pending_crm_count: 120,
+          pending_email_count: 8
+        }
+      ]);
     const service = new AgentWorkflowService(prisma as any);
 
     const result = await service.listTasksForUser("user-1", { limit: 30 });
@@ -452,9 +474,15 @@ describe("AgentWorkflowService", () => {
           pendingCrmCount: 7,
           pendingEmailCount: 3
         }
-      ]
+      ],
+      summary: {
+        taskCount: 41,
+        todayLeadCount: 12,
+        pendingCrmCount: 120,
+        pendingEmailCount: 8
+      }
     });
-    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
     expect(prisma.leadTask.findMany).not.toHaveBeenCalled();
   });
 

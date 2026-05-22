@@ -68,6 +68,17 @@ type LeadTaskListRow = {
   pending_email_count: number | bigint | null;
 };
 
+// 2026-05 Stage 3 follow-up: workbench KPIs need to aggregate over the
+// user's full task history, not the `limit=30` window the list view
+// shows. This row is the single-row result of a small SQL that scans
+// every task owned by the user and folds the same per-task counters.
+type LeadTaskSummaryRow = {
+  task_count: number | bigint | null;
+  today_lead_count: number | bigint | null;
+  pending_crm_count: number | bigint | null;
+  pending_email_count: number | bigint | null;
+};
+
 type PlannedSearchQuery = {
   provider: string;
   operatorSource?: string | null;
@@ -1168,6 +1179,57 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       LIMIT ${limit}
     `);
 
+    // 2026-05 Stage 3 follow-up: compute the workbench KPI summary over
+    // the user's FULL task history, independent of the list `limit`.
+    // The previous workbench KPIs aggregated only the latest 30 list
+    // rows, so a new task could push an old one out of the window and
+    // make the counters drop — which read like the user lost data.
+    // The list response now ships a separate `summary` block computed
+    // here in one extra round-trip; per-task `pendingCrmCount` /
+    // `pendingEmailCount` stay on the list rows for the pool cards.
+    const [summaryRow] = await this.prisma.$queryRaw<LeadTaskSummaryRow[]>(Prisma.sql`
+      SELECT
+        (SELECT count(*)::int FROM lead_tasks WHERE lead_tasks.user_id = ${userId}) AS task_count,
+        COALESCE((
+          SELECT sum(lead_count)::int FROM (
+            SELECT count(*)::int AS lead_count
+            FROM lead_candidates
+            INNER JOIN lead_tasks
+              ON lead_tasks.id = lead_candidates.task_id
+            WHERE lead_tasks.user_id = ${userId}
+              AND lead_tasks.created_at >= date_trunc('day', now())
+              AND lead_candidates.status IN ('review', 'qualified', 'approved', 'contacted', 'email_sent')
+              AND lead_candidates.country_confidence IN ('high', 'medium')
+              AND lead_candidates.country_conflict = false
+            GROUP BY lead_tasks.id
+          ) per_task_today
+        ), 0) AS today_lead_count,
+        COALESCE((
+          SELECT count(*)::int
+          FROM lead_candidates
+          INNER JOIN lead_tasks
+            ON lead_tasks.id = lead_candidates.task_id
+          WHERE lead_tasks.user_id = ${userId}
+            AND lead_candidates.status IN ('review', 'qualified')
+        ), 0) AS pending_crm_count,
+        COALESCE((
+          SELECT count(DISTINCT lead_candidates.id)::int
+          FROM lead_candidates
+          INNER JOIN lead_tasks
+            ON lead_tasks.id = lead_candidates.task_id
+          INNER JOIN outreach_drafts
+            ON outreach_drafts.lead_id = lead_candidates.id
+           AND outreach_drafts.status = 'draft'
+          WHERE lead_tasks.user_id = ${userId}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM send_logs
+              WHERE send_logs.draft_id = outreach_drafts.id
+                AND send_logs.status = 'sent'
+            )
+        ), 0) AS pending_email_count
+    `);
+
     return {
       tasks: tasks.map((task) => {
         const prompt = task.prompt ?? "";
@@ -1183,7 +1245,13 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           pendingCrmCount: toNumberCount(task.pending_crm_count),
           pendingEmailCount: toNumberCount(task.pending_email_count)
         };
-      })
+      }),
+      summary: {
+        taskCount: toNumberCount(summaryRow?.task_count ?? null),
+        todayLeadCount: toNumberCount(summaryRow?.today_lead_count ?? null),
+        pendingCrmCount: toNumberCount(summaryRow?.pending_crm_count ?? null),
+        pendingEmailCount: toNumberCount(summaryRow?.pending_email_count ?? null)
+      }
     };
   }
 
