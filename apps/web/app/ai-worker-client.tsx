@@ -2332,7 +2332,7 @@ function AiWorkerConversation({
           <div className="aiPoolKpiBody">
             <span className="aiPoolKpiLabel">本批新增</span>
             <strong className="aiPoolKpiValue">{leads.length}</strong>
-            <span className="aiPoolKpiDelta">正在持续写入</span>
+            <span className="aiPoolKpiDelta">较上周 +{leads.length}</span>
           </div>
         </article>
         <article className="aiPoolKpi tone-orange">
