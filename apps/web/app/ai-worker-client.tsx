@@ -673,6 +673,11 @@ export function AiWorkerClient() {
       setSelectedLeadId(approvedLead.id);
       setMailLead(toMailLead(modalCandidate));
       setMailOpen(true);
+      // 2026-05 Stage 3 follow-up: refresh task history so the
+      // workbench KPI strip (待同步 CRM, 邮件待确认) reflects the
+      // approve immediately, even when a single-lead approval
+      // happens via the conversation/mail flow.
+      void loadTaskHistory(taskSearch);
       setStatus(
         `已审批 ${result.approvedCount} 家客户，并生成 ${result.draftCount} 封开发信草稿。`
       );
@@ -706,6 +711,11 @@ export function AiWorkerClient() {
         body: JSON.stringify({ leadIds })
       });
       await refreshTask(taskId).catch(() => undefined);
+      // 2026-05 Stage 3 follow-up: refresh task history so the
+      // workbench KPI strip (待同步 CRM, 邮件待确认) reflects the
+      // approve immediately. Without this, returning to the workbench
+      // shows the cached pre-approve counters until the next mount.
+      void loadTaskHistory(taskSearch);
       setStatus(
         `已加入 CRM ${result.approvedCount} 家客户，并生成 ${result.draftCount} 封开发信草稿。`
       );
