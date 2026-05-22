@@ -10041,24 +10041,31 @@ button.primary {
 /* ----- Pool cards ----- */
 .aiWorkbenchPools {
   /* 2026-05 LeadHunt 2.0: lives in the 1fr row of the workbench grid.
-     min-height: 0 lets it shrink past content height; flex column with
-     a 1fr child stretches the card grid to fill remaining space. */
+     The section container takes the remaining vertical space, but
+     content stays top-aligned so the cards keep a natural height
+     instead of being stretched to ~280px. */
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
 .aiWorkbenchPoolGrid {
-  flex: 1;
-  min-height: 0;
+  /* No flex:1 / no height:100% — the card grid sizes to content and
+     parks at the top of .aiWorkbenchPools. align-content: start keeps
+     a single row of cards from spreading vertically. */
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+  align-content: start;
 }
 
 .aiWorkbenchPoolCard {
-  height: 100%;
-  min-height: 220px;
+  /* Natural height, with a comfortable min/max so the cards read like
+     the design spec (≈210–240px) regardless of how much breathing
+     room the 1fr row above leaves. */
+  height: auto;
+  min-height: 210px;
+  max-height: 240px;
   display: flex;
   flex-direction: column;
   gap: 10px;
