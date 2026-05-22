@@ -3109,4 +3109,213 @@ describe("LeadQualificationService", () => {
     // certification and compliance.
     expect(result.createdCount).toBe(1);
   });
+
+  // 2026-05 Stage 2 follow-up: off-industry hard reject. The next
+  // five tests pin the verified-off-industry policy: medical/SaaS/etc.
+  // candidates with no target product/customer signal must land in
+  // "rejected" instead of being rescued by the buyer-role floor;
+  // self-guards must keep targeted-bucket queries (SaaS targets
+  // looking for SaaS) and edge-case overlaps (medical-distributor
+  // pages that mention RRU spare parts) intact.
+
+  it("hard-rejects medical/aesthetic candidates when target is telecom (Aesthetix scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Aesthetix Beauty Clinic",
+        website: "https://aesthetix.example.com",
+        sourceUrl: "https://aesthetix.example.com/services",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@aesthetix.example.com",
+            sourceUrl: "https://aesthetix.example.com/contact"
+          }
+        ],
+        // Two off-industry medical bucket terms (aesthetic +
+        // skincare), zero target product/customer signal.
+        summary:
+          "Aesthetix is an aesthetic medical clinic offering cosmetic skincare treatments and dental services for retail customers.",
+        title: "Aesthetix Aesthetic Clinic"
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU", "telecom power"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("hard-rejects SaaS/database candidates when target is PLC equipment (MongoDB scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "MongoDB",
+        website: "https://mongodb.com",
+        sourceUrl: "https://mongodb.com/cloud",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "low",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@mongodb.com",
+            sourceUrl: "https://mongodb.com/contact"
+          }
+        ],
+        // Two software_saas bucket hits (database, cloud platform);
+        // zero PLC/automation/integrator signal.
+        summary:
+          "MongoDB Atlas is a developer database and cloud platform used by enterprises around the world.",
+        title: "MongoDB Atlas — The Developer Database"
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["PLC programmer", "PLC programming device"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("does NOT off-industry-reject candidates that match a specific target product term", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        // A medical-device distributor that ALSO supplies RRU spare
+        // parts to telecom hospitals. The off-industry hits are
+        // present (medical, hospital), but the candidate text also
+        // contains a specific telecom product term, which must
+        // override the bucket reject.
+        companyName: "Medico Telecom Distributor",
+        website: "https://medicotelecom.example.com",
+        sourceUrl: "https://medicotelecom.example.com/contact",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@medicotelecom.example.com",
+            sourceUrl: "https://medicotelecom.example.com/contact"
+          }
+        ],
+        summary:
+          "Medico distributes RRU spare parts and BBU equipment to medical hospitals and clinical telecom rooms across Germany.",
+        title: "Medico Telecom Distributor"
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU", "telecom power"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    // Specific product signal (RRU/BBU) overrides the medical bucket
+    // hits; status should not be "rejected" purely from off-industry.
+    expect(score.status).not.toBe("rejected");
+  });
+
+  it("does NOT off-industry-reject SaaS candidates when the user is targeting SaaS", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "MongoDB",
+        website: "https://mongodb.com",
+        sourceUrl: "https://mongodb.com/cloud",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "low",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@mongodb.com",
+            sourceUrl: "https://mongodb.com/contact"
+          }
+        ],
+        summary:
+          "MongoDB Atlas is a developer database and cloud platform used by enterprises around the world.",
+        title: "MongoDB Atlas — The Developer Database"
+      },
+      {
+        ...criteria,
+        targetRegions: ["United States"],
+        // User actually IS hunting in the SaaS space — productKeywords
+        // overlap the software_saas bucket. Self-guard must disable
+        // that bucket for this scoring pass.
+        productKeywords: ["database", "cloud platform", "saas"],
+        customerTypeKeywords: ["enterprise developer", "distributor"]
+      }
+    );
+
+    // Self-guard kept the SaaS bucket disabled, so MongoDB should
+    // NOT be rejected by off-industry rules (it may still land at
+    // review depending on score, but never status === "rejected"
+    // on the basis of off-industry alone).
+    expect(score.status).not.toBe("rejected");
+  });
+
+  it("threads productProfileAnalysis.negativeKeywords + customerProfileAnalysis.disqualifiers into the disqualifying-terms penalty", async () => {
+    // 2026-05 Stage 2 follow-up first cut (item A): disqualifiers
+    // pulled from the persisted profile analyses. We assert via
+    // saveCandidates that a candidate snippet containing one of
+    // those terms gets the existing -20 penalty + risk note.
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Berlin Telecom Service",
+          url: "https://berlintelecom.de/services",
+          snippet:
+            "Berlin Telecom Service distributes RRU and BBU equipment. We do not sell consumer mobile phones; full B2B telecom contractor scope.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        // Mimics buildIcpCriteria threading negativeKeywords into
+        // criteria.disqualifiers — our profile said "consumer mobile
+        // phones" is a no-go.
+        disqualifiers: ["consumer mobile phones", "training center"]
+      },
+      "Germany"
+    );
+
+    expect(result.createdCount).toBe(1);
+    const created = prisma.leadCandidate.create.mock.calls[0]?.[0]?.data;
+    expect(created?.icpScore?.create?.reasons?.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Contains disqualifying terms")
+      ])
+    );
+  });
 });

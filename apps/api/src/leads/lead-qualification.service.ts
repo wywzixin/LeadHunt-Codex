@@ -213,6 +213,16 @@ export class LeadQualificationService {
     // (contactScore, buyer-role floor) so the row can't be rescued
     // back into review/qualified.
     let verifiedOffTargetCountryReject = false;
+    // 2026-05 Stage 2 follow-up: same hard-reject mechanism for
+    // off-industry candidates. detectOffIndustryBucket scans for
+    // medical / SaaS / finance / consumer-retail / etc. signals and
+    // returns the bucket name when (a) the candidate trips ≥2 hits
+    // in one bucket, (b) target product/customer keywords are NOT
+    // members of that bucket (so a SaaS-target user looking for
+    // MongoDB stays in the running), and (c) the candidate has no
+    // specific product term and no target customer-type term to
+    // override the off-industry signal.
+    let offIndustryBucketReject: string | null = null;
     const pageType = classifyCandidatePage(candidate, criteria);
     const pageQuality = assessPageQuality(candidate, criteria, pageType);
     const evidenceClassification = classifyEvidenceLead(candidate, criteria, pageType);
@@ -257,6 +267,26 @@ export class LeadQualificationService {
     if (hasIndustryContextSignal) {
       score += 20;
       reasons.push("Matches relevant product, industry, or buyer context");
+    }
+
+    // 2026-05 Stage 2 follow-up: off-industry hard reject. If the
+    // candidate's text trips ≥2 hits inside an off-industry bucket
+    // (medical/SaaS/etc.), AND the target's own product/customer
+    // keywords aren't members of that bucket (self-guard for
+    // SaaS-target users actually looking for MongoDB), AND there is
+    // no specific product term + no target customer-type term in
+    // the candidate text to override, force-reject below.
+    offIndustryBucketReject = detectOffIndustryBucket(text, {
+      productKeywords: criteria.productKeywords,
+      customerTypeKeywords: criteria.customerTypeKeywords,
+      hasSpecificProductSignal,
+      hasTargetCustomerType
+    });
+    if (offIndustryBucketReject) {
+      forcedStatus = "rejected";
+      risks.push(
+        `Off-industry signal: candidate looks like ${offIndustryBucketReject} content unrelated to the target product/customer`
+      );
     }
 
     if (hasSpecificProductSignal) {
@@ -582,6 +612,13 @@ export class LeadQualificationService {
     // contactScore + buyer-role floor have run. Cap right before
     // finalScore so it survives every later additive bump.
     if (verifiedOffTargetCountryReject) {
+      score = Math.min(score, 39);
+    }
+    // 2026-05 Stage 2 follow-up: same final cap for off-industry
+    // hard reject. forcedStatus blocks buyer-role floor; the cap
+    // here defends against contactScore + any later positive bumps
+    // that ran before this point.
+    if (offIndustryBucketReject) {
       score = Math.min(score, 39);
     }
 
@@ -4773,6 +4810,172 @@ const defaultRiskTerms = [
   "yellow pages",
   "b2b marketplace"
 ];
+
+// 2026-05 Stage 2 follow-up: off-industry buckets used by
+// detectOffIndustryBucket. Each bucket is the set of words that, when
+// present in a candidate's title/snippet/summary alongside no target
+// product or customer signal, indicates the candidate is from an
+// industry the user did not ask about. Buckets are evaluated
+// independently; a candidate can only trip ONE bucket per scoring
+// pass.
+//
+// Self-guard: when the user's own product/customer keywords contain
+// any token from a bucket (e.g. user asks for "SaaS database
+// distributor" → SaaS bucket has "database"/"saas"/"cloud platform"),
+// that bucket is skipped entirely so we don't reject candidates the
+// user actually wants.
+const offIndustryBuckets: Record<string, string[]> = {
+  medical: [
+    "medical",
+    "clinical",
+    "clinic",
+    "hospital",
+    "pharma",
+    "pharmaceutical",
+    "biotech",
+    "biocartis",
+    "diagnostic",
+    "surgery",
+    "surgical",
+    "dental",
+    "dentist",
+    "cosmetic",
+    "aesthetic",
+    "aesthetix",
+    "skincare",
+    "beauty",
+    "spa",
+    "wellness",
+    "healthcare",
+    "health care"
+  ],
+  software_saas: [
+    "saas",
+    "database",
+    "cloud platform",
+    "software platform",
+    "developer platform",
+    "devops",
+    "crm",
+    "erp software",
+    "analytics platform",
+    "data platform",
+    "data lake",
+    "data warehouse",
+    "managed cloud",
+    "kubernetes",
+    "cybersecurity software",
+    "antivirus",
+    "code repository",
+    "git platform",
+    "no-code platform",
+    "low-code platform"
+  ],
+  consumer_retail: [
+    "consumer electronics",
+    "mobile phone retail",
+    "online shopping",
+    "ecommerce platform",
+    "e-commerce platform",
+    "retail store",
+    "grocery",
+    "fashion",
+    "apparel",
+    "clothing brand",
+    "footwear",
+    "toys",
+    "household goods",
+    "kitchenware"
+  ],
+  finance: [
+    "bank",
+    "banking",
+    "insurance",
+    "fintech",
+    "wealth management",
+    "asset management",
+    "loans",
+    "credit card",
+    "stock trading",
+    "investment fund",
+    "private equity"
+  ],
+  food_hospitality: [
+    "restaurant",
+    "cafe",
+    "catering",
+    "hotel chain",
+    "hospitality",
+    "travel agency",
+    "tourism",
+    "menu",
+    "food service",
+    "kitchen equipment"
+  ],
+  education: [
+    "university",
+    "college",
+    "school",
+    "academy",
+    "kindergarten",
+    "tutoring",
+    "online course",
+    "e-learning",
+    "mooc"
+  ]
+};
+
+function detectOffIndustryBucket(
+  text: string,
+  context: {
+    productKeywords: string[];
+    customerTypeKeywords: string[];
+    hasSpecificProductSignal: boolean;
+    hasTargetCustomerType: boolean;
+  }
+): string | null {
+  // Override gate: candidate already shows a specific product term or
+  // a target customer-type match in its own text — that's a stronger
+  // signal than any off-industry bucket can be, so don't reject.
+  if (context.hasSpecificProductSignal || context.hasTargetCustomerType) {
+    return null;
+  }
+  const lowerText = text.toLowerCase();
+  // Self-guard: combine the user's own product + customer keywords
+  // (lowercased) so we can skip any bucket the user is actually
+  // shopping in. Example: a user looking for "MongoDB resellers"
+  // would have "mongodb" or "database" in productKeywords; the
+  // software_saas bucket is then disabled for that scoring pass.
+  const userKeywords = [
+    ...context.productKeywords,
+    ...context.customerTypeKeywords
+  ]
+    .map((term) => term.toLowerCase())
+    .filter(Boolean);
+  for (const [bucketName, bucketTerms] of Object.entries(offIndustryBuckets)) {
+    const userOverlapsBucket = bucketTerms.some((bucketTerm) =>
+      userKeywords.some(
+        (userTerm) => userTerm.includes(bucketTerm) || bucketTerm.includes(userTerm)
+      )
+    );
+    if (userOverlapsBucket) {
+      // User is hunting in this bucket; don't reject candidates here.
+      continue;
+    }
+    let hits = 0;
+    const seen = new Set<string>();
+    for (const bucketTerm of bucketTerms) {
+      if (lowerText.includes(bucketTerm) && !seen.has(bucketTerm)) {
+        seen.add(bucketTerm);
+        hits += 1;
+        if (hits >= 2) {
+          return bucketName;
+        }
+      }
+    }
+  }
+  return null;
+}
 
 const strongProcurementIntentTerms = [
   "tender",

@@ -6726,7 +6726,16 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
       ),
       ...referenceCustomerDomains.map((d) => domainToReferenceCompanyName(d))
     ]).filter(Boolean).slice(0, 30),
-    disqualifiers: [
+    disqualifiers: uniqueStrings([
+      // 2026-05 Stage 2 follow-up: pull GPT-derived negatives in
+      // addition to the static blocklist. productProfileAnalysis.
+      // negativeKeywords are seller-specific ("consumer phones",
+      // "retail electronics") and customerProfileAnalysis.
+      // disqualifiers are buyer-specific ("training center"). Both
+      // get -20 via the existing matchedRisks path so off-target
+      // pages get penalized without changing the scoring pipeline.
+      ...asStringArray(payload.productProfileAnalysis?.negativeKeywords),
+      ...asStringArray(payload.customerProfileAnalysis?.disqualifiers),
       "job",
       "career",
       "training",
@@ -6741,7 +6750,10 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
       "GlobalSources",
       "IndiaMART",
       "TradeIndia"
-    ]
+    ])
+      .map((term) => term.trim())
+      .filter(Boolean)
+      .slice(0, 30)
   };
 }
 
