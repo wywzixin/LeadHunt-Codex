@@ -397,7 +397,12 @@ export function AiWorkerClient() {
   }, [actionableDisplayLeads]);
 
   useEffect(() => {
-    if (!currentTask?.id || !isBackendTaskActive(currentTask)) {
+    // 2026-05 LeadHunt 2.0: poll while the task is active OR while we
+    // optimistically marked the page as searching. The latter covers
+    // the race window after firing POST /search where the backend
+    // hasn't yet flipped the task row to "running".
+    const taskActive = currentTask ? isBackendTaskActive(currentTask) : false;
+    if (!currentTask?.id || (!taskActive && !searching && !creating)) {
       return;
     }
 
@@ -438,7 +443,7 @@ export function AiWorkerClient() {
     return () => {
       cancelled = true;
     };
-  }, [currentTask?.id, currentTask?.status]);
+  }, [currentTask?.id, currentTask?.status, searching, creating]);
 
   useEffect(() => {
     if (!displayLeads.length) {
@@ -531,18 +536,44 @@ export function AiWorkerClient() {
     }
   }
 
+  // 2026-05 LeadHunt 2.0: real task-search trigger.
+  // Calls `POST /api/lead-tasks/:taskId/search` to kick a new batch of
+  // queries on the backend. Polling effect picks up status and lead
+  // updates afterwards. Always switches to the conversation view so
+  // the user sees the run-batch card live.
   async function runTaskSearch(taskId = currentTask?.id) {
     if (!taskId) {
       setStatus("请先创建任务，后端会自动完成本轮搜索。");
       return;
     }
 
+    setView("conversation");
+    setSearching(true);
+    setError("");
+    setStatus("已发起新一批搜索，正在等待后端 LLM 规划与 Brave 调用...");
+
     try {
+      // Fire-and-forget the workflow trigger. The endpoint blocks until
+      // the LangGraph batch finishes, so we pull a fresh snapshot in
+      // parallel via refreshTask. The polling effect (above) will keep
+      // updating the page once currentTask flips to running.
+      void apiRequest(`/api/lead-tasks/${taskId}/search`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 30 })
+      }).catch((requestError) => {
+        // We don't fail the page on a search-trigger error — the polling
+        // loop will surface failed steps as they arrive. Log to status
+        // so the user sees the upstream cause.
+        setError(errorMessage(requestError));
+        setStatus("发起搜索失败，可在状态恢复后重试。");
+      });
+      // Optimistically refresh once so the UI flips to "running" without
+      // waiting for the next poll tick.
       const refreshedTask = await refreshTask(taskId);
       applyTaskProgress(refreshedTask);
     } catch (requestError) {
       setError(errorMessage(requestError));
-      setStatus("任务状态刷新失败；后端会自动执行搜索，稍后可从任务历史打开查看。");
+      setStatus("任务状态刷新失败；后端搜索仍可能继续，可稍后从任务历史打开查看。");
     }
   }
 
