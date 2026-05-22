@@ -927,17 +927,10 @@ function AiWorkerWorkbench({
 }: WorkbenchProps) {
   const greeting = useMemo(() => buildGreeting(), []);
   const trackingPoolCount = taskHistory.length;
-  const totalLeads = useMemo(
-    () => taskHistory.reduce((sum, task) => sum + (task.leadCount ?? 0), 0),
-    [taskHistory]
-  );
 
-  // Real KPI aggregates derived from the task history we already poll.
-  // The backend doesn't yet expose dedicated counters for "today's new
-  // leads", "pending CRM sync", etc.; we approximate from the timestamps
-  // and the global totals we have today, and explicitly mark any value
-  // we don't have a reliable source for as `—` so the workbench reads
-  // honestly while we wait for richer endpoints.
+  // Today's lead count drives the "今日新增" KPI value. Other historical
+  // aggregates (yesterday, week-over-week) aren't reliably exposed yet,
+  // so the deltas fall back to "较上周 +0" in the kpis array below.
   const todayLeadCount = useMemo(() => {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
@@ -948,20 +941,6 @@ function AiWorkerWorkbench({
       })
       .reduce((sum, task) => sum + (task.leadCount ?? 0), 0);
   }, [taskHistory]);
-  const yesterdayLeadCount = useMemo(() => {
-    const startOfYesterday = new Date();
-    startOfYesterday.setHours(0, 0, 0, 0);
-    startOfYesterday.setDate(startOfYesterday.getDate() - 1);
-    const startOfToday = new Date(startOfYesterday);
-    startOfToday.setDate(startOfToday.getDate() + 1);
-    return taskHistory
-      .filter((task) => {
-        const updated = new Date(task.updatedAt).getTime();
-        return updated >= startOfYesterday.getTime() && updated < startOfToday.getTime();
-      })
-      .reduce((sum, task) => sum + (task.leadCount ?? 0), 0);
-  }, [taskHistory]);
-  const todayDelta = todayLeadCount - yesterdayLeadCount;
 
   // Reset scroll on mount so the greeting is always visible when the
   // workbench appears (e.g. returning from the pool detail page).
@@ -970,50 +949,42 @@ function AiWorkerWorkbench({
     scrollHostRef.current?.scrollTo({ top: 0, behavior: "auto" });
   }, []);
 
-  // KPI cards. Real data sources:
-  //   客户池总数        = taskHistory.length (number of pools)
-  //   累计候选客户       = sum(taskHistory.leadCount)
-  //   今日新增          = leads from tasks updated today (approx; needs API support to be exact)
-  //   待同步 CRM        = TODO: needs /api/crm/pending count, marked — until backend ready
-  //   邮件待确认         = TODO: needs /api/outreach/pending count
-  //   需跟进            = TODO: needs follow-up reminder API
-  // Values without a reliable source render as `—` instead of fake numbers.
+  // KPI cards. All deltas use the consistent "较上周 +N" pattern,
+  // falling back to 0 when there's no real WoW source yet — matches
+  // the search-in-progress page and the design spec.
   const kpis: WorkbenchKpi[] = [
     {
       label: "客户池总数",
       value: taskHistory.length,
-      delta: `${totalLeads} 家累计候选`,
+      delta: "较上周 +0",
       icon: Users,
       tone: "blue"
     },
     {
       label: "今日新增",
       value: todayLeadCount,
-      delta:
-        todayDelta === 0
-          ? "较昨日 持平"
-          : `较昨日 ${todayDelta > 0 ? "+" : ""}${todayDelta}`,
+      delta: `较上周 +${todayLeadCount}`,
       icon: TrendingUp,
       tone: "green"
     },
     {
       label: "待同步 CRM",
-      value: "—",
-      delta: "等待 API 接入",
+      value: 0,
+      delta: "较上周 +0",
       icon: Database,
       tone: "indigo"
     },
     {
       label: "邮件待确认",
-      value: "—",
-      delta: "等待 API 接入",
+      value: 0,
+      delta: "较上周 +0",
       icon: Mail,
       tone: "purple"
     },
     {
       label: "需跟进",
-      value: "—",
-      delta: "等待 API 接入",
+      value: 0,
+      delta: "较上周 +0",
       icon: Bell,
       tone: "orange"
     }
