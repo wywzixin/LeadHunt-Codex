@@ -715,6 +715,9 @@ export function AiWorkerClient() {
               onOpenMail={() => void approveSelectedLead()}
               onOpenCrm={openCrmPreview}
               onBack={backToLanding}
+              onContinueSearch={() => {
+                if (currentTask?.id) void runTaskSearch(currentTask.id);
+              }}
             />
           )}
         </section>
@@ -2037,6 +2040,7 @@ type ConversationProps = {
   onOpenMail: () => void;
   onOpenCrm: () => void;
   onBack: () => void;
+  onContinueSearch: () => void;
 };
 
 function AiWorkerConversation({
@@ -2055,7 +2059,8 @@ function AiWorkerConversation({
   onSelectLead,
   onOpenMail,
   onOpenCrm,
-  onBack
+  onBack,
+  onContinueSearch
 }: ConversationProps) {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
   const executedCount =
@@ -2215,6 +2220,9 @@ function AiWorkerConversation({
         <div className="aiPoolHeaderRow">
           <div className="aiPoolHeaderLeft">
             <div className="aiPoolHeaderTitle">
+              <span className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
+                <RadioTower size={22} />
+              </span>
               <h1>{poolTitle}</h1>
               <span className={`aiPoolBadge state-${poolStatus.kind}`}>
                 {poolStatus.label}
@@ -2234,8 +2242,8 @@ function AiWorkerConversation({
         </div>
       </header>
 
-      {/* KPI strip — 4 cards (less dense than the 6-card pool view because
-          there's a search-batch card to make room for) */}
+      {/* KPI strip — 4 cards. Tones match the design: blue / green /
+          orange / purple. */}
       <section className="aiPoolKpis aiSearchRunKpis" aria-label="数据概览">
         <article className="aiPoolKpi tone-blue">
           <span className="aiPoolKpiIcon" aria-hidden="true">
@@ -2249,7 +2257,7 @@ function AiWorkerConversation({
             </span>
           </div>
         </article>
-        <article className="aiPoolKpi tone-orange">
+        <article className="aiPoolKpi tone-green">
           <span className="aiPoolKpiIcon" aria-hidden="true">
             <TrendingUp size={20} />
           </span>
@@ -2261,7 +2269,7 @@ function AiWorkerConversation({
             </span>
           </div>
         </article>
-        <article className="aiPoolKpi tone-rose">
+        <article className="aiPoolKpi tone-orange">
           <span className="aiPoolKpiIcon" aria-hidden="true">
             <Bell size={20} />
           </span>
@@ -2297,6 +2305,15 @@ function AiWorkerConversation({
             </p>
           </div>
           <div className="aiSearchRunHeadActions">
+            <button
+              type="button"
+              className="aiPoolPrimaryBtn"
+              onClick={onContinueSearch}
+              disabled={running}
+            >
+              <Play size={14} aria-hidden="true" />
+              继续搜索 30 条
+            </button>
             <button
               type="button"
               className="aiPoolGhostBtn"

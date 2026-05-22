@@ -11003,6 +11003,20 @@ button.primary {
   gap: 4px;
 }
 
+/* The pool icon is large (44x44) on the regular pool detail page;
+   shrink it on the search-in-progress page to keep the header at
+   ~85px and leave room for the run card below. */
+.aiSearchRunPool .aiPoolHeaderTitle .aiPoolIcon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.aiSearchRunPool .aiPoolHeaderTitle .aiPoolIcon svg {
+  width: 18px;
+  height: 18px;
+}
+
 .aiSearchRunPool .aiPoolHeaderTitle h1 {
   font-size: 19px;
 }
@@ -11439,14 +11453,20 @@ button.primary {
 
 .aiSearchRunConvertCard {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: 10px;
+  padding: 10px 14px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: var(--shadow-card);
+}
+
+.aiSearchRunConvertCard .aiPoolIcon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
 }
 
 .aiSearchRunConvertBody {
