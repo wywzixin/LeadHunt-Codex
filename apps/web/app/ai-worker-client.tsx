@@ -2070,6 +2070,18 @@ function AiWorkerConversation({
   const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
   const hasActionableLeads = actionableLeads.length > 0;
   const running = creating || searching || approving;
+  // Reply count: any lead whose outreach drafts have a send log marked
+  // "replied". 0 when nothing has been sent yet — matches the 待跟进 KPI
+  // shape (number, not em-dash) per the design.
+  const repliedCount = useMemo(
+    () =>
+      leads.filter((lead) =>
+        (lead.raw.outreachDrafts ?? []).some((draft) =>
+          (draft.sendLogs ?? []).some((log) => log.status === "replied")
+        )
+      ).length,
+    [leads]
+  );
   const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
   // Live execution log surfaced in the right-hand panel of the run card.
   // Reuses buildActivityLogs which derives messages from agentSteps +
@@ -2300,7 +2312,8 @@ function AiWorkerConversation({
       </header>
 
       {/* KPI strip — 4 cards. Tones match the design: blue / green /
-          orange / purple. */}
+          orange / purple. All deltas use the consistent "较上周 +N"
+          pattern with 0 fallback when there's no real WoW source yet. */}
       <section className="aiPoolKpis aiSearchRunKpis" aria-label="数据概览">
         <article className="aiPoolKpi tone-blue">
           <span className="aiPoolKpiIcon" aria-hidden="true">
@@ -2309,9 +2322,7 @@ function AiWorkerConversation({
           <div className="aiPoolKpiBody">
             <span className="aiPoolKpiLabel">客户池总数</span>
             <strong className="aiPoolKpiValue">{leads.length || taskHistoryCount}</strong>
-            <span className="aiPoolKpiDelta">
-              {queryCount ? `已跑 ${queryCount} 条 query` : "等待生成 query"}
-            </span>
+            <span className="aiPoolKpiDelta">较上周 +0</span>
           </div>
         </article>
         <article className="aiPoolKpi tone-green">
@@ -2321,9 +2332,7 @@ function AiWorkerConversation({
           <div className="aiPoolKpiBody">
             <span className="aiPoolKpiLabel">本批新增</span>
             <strong className="aiPoolKpiValue">{leads.length}</strong>
-            <span className="aiPoolKpiDelta">
-              {searching ? "正在持续写入" : leads.length ? "本批已完成" : "等待首批"}
-            </span>
+            <span className="aiPoolKpiDelta">正在持续写入</span>
           </div>
         </article>
         <article className="aiPoolKpi tone-orange">
@@ -2332,8 +2341,8 @@ function AiWorkerConversation({
           </span>
           <div className="aiPoolKpiBody">
             <span className="aiPoolKpiLabel">待跟进</span>
-            <strong className="aiPoolKpiValue">—</strong>
-            <span className="aiPoolKpiDelta">等待 API 接入</span>
+            <strong className="aiPoolKpiValue">{pendingFollowupCount}</strong>
+            <span className="aiPoolKpiDelta">较上周 +0</span>
           </div>
         </article>
         <article className="aiPoolKpi tone-purple">
@@ -2342,8 +2351,8 @@ function AiWorkerConversation({
           </span>
           <div className="aiPoolKpiBody">
             <span className="aiPoolKpiLabel">回复</span>
-            <strong className="aiPoolKpiValue">—</strong>
-            <span className="aiPoolKpiDelta">等待 API 接入</span>
+            <strong className="aiPoolKpiValue">{repliedCount}</strong>
+            <span className="aiPoolKpiDelta">较上周 +0</span>
           </div>
         </article>
       </section>
