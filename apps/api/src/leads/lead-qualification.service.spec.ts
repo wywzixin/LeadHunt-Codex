@@ -3140,8 +3140,7 @@ describe("LeadQualificationService", () => {
         // Two off-industry medical bucket terms (aesthetic +
         // skincare), zero target product/customer signal.
         summary:
-          "Aesthetix is an aesthetic medical clinic offering cosmetic skincare treatments and dental services for retail customers.",
-        title: "Aesthetix Aesthetic Clinic"
+          "Aesthetix is an aesthetic medical clinic offering cosmetic skincare treatments and dental services for retail customers."
       },
       {
         ...criteria,
@@ -3180,8 +3179,7 @@ describe("LeadQualificationService", () => {
         // Two software_saas bucket hits (database, cloud platform);
         // zero PLC/automation/integrator signal.
         summary:
-          "MongoDB Atlas is a developer database and cloud platform used by enterprises around the world.",
-        title: "MongoDB Atlas — The Developer Database"
+          "MongoDB Atlas is a developer database and cloud platform used by enterprises around the world."
       },
       {
         ...criteria,
@@ -3223,10 +3221,8 @@ describe("LeadQualificationService", () => {
           }
         ],
         summary:
-          "Medico distributes RRU spare parts and BBU equipment to medical hospitals and clinical telecom rooms across Germany.",
-        title: "Medico Telecom Distributor"
-      },
-      {
+          "Medico distributes RRU spare parts and BBU equipment to medical hospitals and clinical telecom rooms across Germany."
+      },      {
         ...criteria,
         targetRegions: ["Germany"],
         productKeywords: ["RRU", "BBU", "telecom power"],
@@ -3259,8 +3255,7 @@ describe("LeadQualificationService", () => {
           }
         ],
         summary:
-          "MongoDB Atlas is a developer database and cloud platform used by enterprises around the world.",
-        title: "MongoDB Atlas — The Developer Database"
+          "MongoDB Atlas is a developer database and cloud platform used by enterprises around the world."
       },
       {
         ...criteria,
