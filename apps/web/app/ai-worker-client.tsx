@@ -251,6 +251,11 @@ type LeadTaskListItem = {
   title: string;
   leadCount: number;
   queryCount: number;
+  // 2026-05 Stage 3 workbench KPI aggregation. Optional for backwards
+  // compatibility — older API responses without these fields fall
+  // through to 0 in the workbench KPI cards.
+  pendingCrmCount?: number;
+  pendingEmailCount?: number;
 };
 
 type LeadTaskListResponse = {
@@ -1049,19 +1054,39 @@ function AiWorkerWorkbench({
   const greeting = useMemo(() => buildGreeting(), []);
   const trackingPoolCount = taskHistory.length;
 
-  // Today's lead count drives the "今日新增" KPI value. Other historical
-  // aggregates (yesterday, week-over-week) aren't reliably exposed yet,
-  // so the deltas fall back to "较上周 +0" in the kpis array below.
+  // 2026-05 Stage 3 workbench KPI aggregation. All counters read ONLY
+  // from real taskHistory fields; nothing is estimated, and any field
+  // we don't actually have falls through to 0 with no fake delta.
+  //
+  // 今日新增: sum of leadCount for tasks created today. Uses createdAt
+  // (not updatedAt) so a task that re-runs tomorrow still counts under
+  // its original creation day instead of jumping back into "今日".
   const todayLeadCount = useMemo(() => {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     return taskHistory
       .filter((task) => {
-        const updated = new Date(task.updatedAt).getTime();
-        return Number.isFinite(updated) && updated >= startOfDay.getTime();
+        const created = new Date(task.createdAt).getTime();
+        return Number.isFinite(created) && created >= startOfDay.getTime();
       })
       .reduce((sum, task) => sum + (task.leadCount ?? 0), 0);
   }, [taskHistory]);
+
+  // 待同步 CRM: sum of pendingCrmCount across every tracked task — any
+  // candidate in main pool (review/qualified) that hasn't been
+  // approved into a CRM row yet. Backend list endpoint computes this
+  // SQL-side; we just add up the per-task counter.
+  const pendingCrmAcrossPools = useMemo(
+    () => taskHistory.reduce((sum, task) => sum + (task.pendingCrmCount ?? 0), 0),
+    [taskHistory]
+  );
+
+  // 邮件待确认: sum of pendingEmailCount — leads with at least one
+  // outreach draft in 'draft' status and no successful send_log yet.
+  const pendingEmailAcrossPools = useMemo(
+    () => taskHistory.reduce((sum, task) => sum + (task.pendingEmailCount ?? 0), 0),
+    [taskHistory]
+  );
 
   // Reset scroll on mount so the greeting is always visible when the
   // workbench appears (e.g. returning from the pool detail page).
@@ -1070,9 +1095,9 @@ function AiWorkerWorkbench({
     scrollHostRef.current?.scrollTo({ top: 0, behavior: "auto" });
   }, []);
 
-  // KPI cards. All deltas use the consistent "较上周 +N" pattern,
-  // falling back to 0 when there's no real WoW source yet — matches
-  // the search-in-progress page and the design spec.
+  // KPI cards. Values come from real taskHistory aggregations; deltas
+  // stay at "较上周 +0" because we don't have a trustworthy
+  // week-over-week baseline yet (per Stage 3 spec — no estimation).
   const kpis: WorkbenchKpi[] = [
     {
       label: "客户池总数",
@@ -1084,20 +1109,20 @@ function AiWorkerWorkbench({
     {
       label: "今日新增",
       value: todayLeadCount,
-      delta: `较上周 +${todayLeadCount}`,
+      delta: "较上周 +0",
       icon: TrendingUp,
       tone: "green"
     },
     {
       label: "待同步 CRM",
-      value: 0,
+      value: pendingCrmAcrossPools,
       delta: "较上周 +0",
       icon: Database,
       tone: "indigo"
     },
     {
       label: "邮件待确认",
-      value: 0,
+      value: pendingEmailAcrossPools,
       delta: "较上周 +0",
       icon: Mail,
       tone: "purple"
