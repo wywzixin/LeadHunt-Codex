@@ -10238,23 +10238,21 @@ button.primary {
   --pool-green-bg: #e8fff0;
   --pool-green-fg: #00b42a;
 
+  /* 2026-05 LeadHunt 2.0: pool detail page is a vertical stack where
+     the candidate table absorbs remaining vertical space. Flex column
+     handles the conditional bulk-action bar gracefully (pure grid
+     positions would skip a row when bulkBar isn't rendered). The
+     table inside this column claims `flex: 1; min-height: 0` so it
+     fills whatever space is left and scrolls *its own* tbody if the
+     row count is huge — nothing else on the page scrolls. */
   display: flex;
   flex-direction: column;
   gap: 20px;
-  padding: 24px 32px 96px;
+  padding: 24px 32px 32px;
   background: var(--bg);
   height: 100%;
-  overflow-y: auto;
-}
-
-/* 2026-05 LeadHunt 2.0: in flex column with overflow-y:auto, browsers
-   may shrink children whose intrinsic content is taller than the
-   remaining space (e.g. a 13-row table). We mark every direct child
-   non-shrinkable so the natural content height drives scrolling instead
-   of getting compressed to ~1px. The .aiPoolTableScroll wrapper inside
-   handles its own horizontal overflow independently. */
-.aiPool > * {
-  flex-shrink: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* ----- Reusable colored icon chips ----- */
@@ -10702,6 +10700,14 @@ button.primary {
 
 /* ----- Table ----- */
 .aiPoolTableWrap {
+  /* 2026-05 LeadHunt 2.0: this wrapper takes the remaining vertical
+     space of .aiPool. Internal layout is a flex column: the scroll
+     area expands and scrolls; the table footer (pagination + page
+     size + total) sits at the bottom and never moves. */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -10710,7 +10716,14 @@ button.primary {
 }
 
 .aiPoolTableScroll {
-  overflow-x: auto;
+  /* The actual scrolling element. Vertical scroll appears here when
+     the candidate list is taller than the wrapper; horizontal scroll
+     for the 13-column table when the viewport is narrower than ~1080px.
+     min-height: 0 is required for the flex parent to be allowed to
+     shrink this child below its natural content height. */
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .aiPoolTable {
@@ -11012,65 +11025,8 @@ button.primary {
   color: var(--primary);
 }
 
-/* ----- Footer AI input bar ----- */
-.aiPoolFooter {
-  position: sticky;
-  bottom: 0;
-  margin: 16px -32px -96px;
-  padding: 14px 32px 18px;
-  background: linear-gradient(180deg, transparent 0%, var(--bg) 30%);
-  z-index: 5;
-}
-
-.aiPoolFooterForm {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow-card);
-}
-
-.aiPoolFooterForm input {
-  flex: 1;
-  border: none;
-  background: transparent;
-  font-size: 13px;
-  color: var(--title);
-  font-family: inherit;
-}
-
-.aiPoolFooterForm input:focus {
-  outline: none;
-}
-
-.aiPoolFooterForm input::placeholder {
-  color: var(--secondary);
-}
-
-.aiPoolFooterSend {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  background: var(--primary);
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.aiPoolFooterSend:hover {
-  background: var(--primary-hover);
-}
-
-/* ----- Narrow viewport ----- */
-@media (max-width: 1280px) {
-  .aiPoolKpis {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
+/* 2026-05 LeadHunt 2.0: no narrow-viewport breakpoint for the pool
+   detail page. Below 1280px the leadApp shell already enforces a
+   1232px min-width and turns on horizontal scroll, so the 6-col KPI
+   strip just squeezes horizontally. Stacking KPIs into 2 rows here
+   was eating ~80px of vertical space that the candidate table needs. */

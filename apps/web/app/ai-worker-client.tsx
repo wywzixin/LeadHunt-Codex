@@ -1970,23 +1970,6 @@ function AiWorkerPool({
           查看健康度报告 <ChevronRight size={13} aria-hidden="true" />
         </a>
       </section>
-
-      {/* Bottom AI input bar */}
-      <footer className="aiPoolFooter">
-        <form
-          className="aiPoolFooterForm"
-          onSubmit={(event) => event.preventDefault()}
-        >
-          <input
-            type="text"
-            placeholder="告诉 AI：筛选沙特客户 / 批量加入CRM / 给高匹配客户生成邮件 / 继续搜索30条"
-            aria-label="AI 指令输入"
-          />
-          <button type="submit" className="aiPoolFooterSend">
-            <Send size={16} aria-hidden="true" />
-          </button>
-        </form>
-      </footer>
     </div>
   );
 }
