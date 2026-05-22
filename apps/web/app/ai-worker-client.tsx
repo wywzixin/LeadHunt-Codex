@@ -594,7 +594,12 @@ export function AiWorkerClient() {
     // updating the page once currentTask flips to running.
     void apiRequest(`/api/lead-tasks/${taskId}/search`, {
       method: "POST",
-      body: JSON.stringify({ limit: 30 })
+      // 2026-05 Stage 2 follow-up: appendIfEmpty=true tells the
+      // backend to generate and insert a new batch of pending
+      // queries when the task has already drained its queue. Without
+      // it, /search on a finished task is a no-op (returns 201 with
+      // executedQueries=0) and "继续搜索 30 条" looks broken.
+      body: JSON.stringify({ limit: 30, appendIfEmpty: true })
     }).catch((requestError) => {
       // We don't fail the page on a search-trigger error — the polling
       // loop will surface failed steps as they arrive. Log to status

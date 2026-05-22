@@ -20,7 +20,14 @@ const approveLeadTaskSchema = z.object({
 });
 
 const executeSearchSchema = z.object({
-  limit: z.number().int().min(1).max(500).optional()
+  limit: z.number().int().min(1).max(500).optional(),
+  // 2026-05 Stage 2 follow-up: when set, the backend appends a fresh
+  // batch of pending queries before running the worker pool if the
+  // task has no pending/running queries left. Without this, /search
+  // is a no-op for tasks that have already drained their queue
+  // (the "继续搜索 30 条" button used to fire a 201 with
+  // executedQueries=0).
+  appendIfEmpty: z.boolean().optional()
 });
 
 @Controller("api/lead-tasks")

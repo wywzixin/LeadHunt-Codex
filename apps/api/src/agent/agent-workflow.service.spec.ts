@@ -2419,4 +2419,151 @@ describe("AgentWorkflowService", () => {
       expect(cleanupCall).toBeDefined();
     });
   });
+
+  // 2026-05 Stage 2 follow-up: "继续搜索 30 条" path. /search with
+  // appendIfEmpty=true must append a new pending batch when the
+  // existing queue is drained, instead of returning a no-op.
+  describe("appendContinuationSearchQueriesForTask", () => {
+    function buildContinuationPrismaMock() {
+      const prisma = createPrismaMock();
+      prisma.leadTask.findFirst = vi.fn().mockResolvedValue({
+        id: "task-1",
+        targetCount: 20,
+        inputPayload: {
+          prompt: "Find UAE telecom distributors",
+          targetCount: 20,
+          productProfileAnalysis: {
+            keyProducts: ["RRU"],
+            productCategories: ["Telecom"],
+            websiteUrls: []
+          },
+          customerProfileAnalysis: {
+            buyerTypes: ["distributor"],
+            customerScenarios: [],
+            targetMarkets: ["UAE"]
+          },
+          keywordGroups: {
+            productTerms: ["RRU"],
+            buyerRoles: ["telecom distributor"],
+            scenarioTerms: ["base station maintenance"],
+            marketTerms: ["UAE"],
+            excludeTerms: []
+          },
+          aiKeywordExpansion: null,
+          profileSignals: {}
+        }
+      });
+      prisma.searchQuery.count = vi.fn().mockResolvedValue(0);
+      prisma.searchQuery.findMany = vi.fn().mockResolvedValue([
+        { query: "old query 1" },
+        { query: "old query 2" }
+      ]);
+      prisma.searchQuery.createMany = vi.fn().mockResolvedValue({ count: 0 });
+      prisma.leadTask.update = vi.fn().mockResolvedValue({});
+      return prisma;
+    }
+
+    it("appends new pending queries when the existing queue is drained", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async (input) => ({
+        queries: simpleAiQueriesForMarkets(input.targetMarkets)
+      }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      // Stub the deeper slow-planning helper so this unit test focuses
+      // on the append-orchestration logic (pending check, user gate,
+      // task touch). The slow planning path itself is already covered
+      // by the createTaskWithTimeline tests above.
+      const runSlowSpy = vi
+        .spyOn(service as any, "runSlowPlanningAndAppendGptQueries")
+        .mockResolvedValue({
+          slowResult: { searchQueries: [], fallbackReasons: [] },
+          appendedCount: 12
+        });
+
+      const appended = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(runSlowSpy).toHaveBeenCalledTimes(1);
+      expect(appended).toBe(12);
+      // Task gets touched back to running so the polling effect resumes.
+      expect(prisma.leadTask.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "task-1" } })
+      );
+    });
+
+    it("skips append when there are still pending queries", async () => {
+      const prisma = buildContinuationPrismaMock();
+      prisma.searchQuery.count = vi.fn().mockResolvedValue(5);
+      const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      const appended = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(appended).toBe(0);
+      expect(ai.generateSearchStrategy).not.toHaveBeenCalled();
+      expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
+    });
+
+    it("returns 0 when GPT errors out instead of failing the whole call", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async () => {
+        throw new Error("gpt timeout");
+      });
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      const appended = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(appended).toBe(0);
+      expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
+    });
+
+    it("rejects when the task does not belong to the user", async () => {
+      const prisma = buildContinuationPrismaMock();
+      prisma.leadTask.findFirst = vi.fn().mockResolvedValue(null);
+      const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      await expect(
+        (service as any).appendContinuationSearchQueriesForTask("user-1", "task-1", {
+          limit: 30
+        })
+      ).rejects.toThrow("Lead task not found");
+    });
+  });
 });

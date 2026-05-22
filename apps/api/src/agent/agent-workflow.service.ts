@@ -1565,7 +1565,24 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async executeBraveSearchForTask(userId: string, taskId: string, input: { limit?: number } = {}) {
+  async executeBraveSearchForTask(
+    userId: string,
+    taskId: string,
+    input: { limit?: number; appendIfEmpty?: boolean } = {}
+  ) {
+    // 2026-05 Stage 2 follow-up: "继续搜索 30 条" path. When the task
+    // has no pending/running queries left, /search is a no-op without
+    // explicitly appending a new batch first. The pool detail page now
+    // sends `appendIfEmpty=true`; legacy callers (graph workflow's own
+    // brave_search node, polling resumes) leave it false so they keep
+    // the existing "drain pending queue" semantics.
+    let appendedCount = 0;
+    if (input.appendIfEmpty) {
+      appendedCount = await this.appendContinuationSearchQueriesForTask(userId, taskId, {
+        limit: input.limit ?? DEFAULT_SEARCH_QUERY_COUNT
+      });
+    }
+
     const graphRun = this.createSearchToEmailGraphHandlers(userId, taskId, input);
     const workflow = (await createLeadHuntWorkflowGraph({
       startAt: "brave_search",
@@ -1580,6 +1597,30 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     await this.persistWorkflowSnapshot(taskId, workflow, "search-to-email");
     const searchResult = graphRun.getSearchResult();
 
+    // 2026-05 Stage 2 follow-up: only surface appendedQueries when the
+    // caller actually requested an append. The legacy graph-driven
+    // path (and existing tests) rely on the search result shape
+    // staying byte-identical.
+    if (input.appendIfEmpty) {
+      return (
+        searchResult
+          ? { ...searchResult, appendedQueries: appendedCount }
+          : {
+              ok: false,
+              executedQueries: 0,
+              resultCount: 0,
+              createdCandidates: 0,
+              skippedCandidates: 0,
+              appendedQueries: appendedCount,
+              errors: [
+                { queryId: taskId, message: workflow.error ?? "Search workflow did not run" }
+              ],
+              hasMore: false,
+              remainingQueries: 0
+            }
+      );
+    }
+
     return (
       searchResult ?? {
         ok: false,
@@ -1587,7 +1628,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         resultCount: 0,
         createdCandidates: 0,
         skippedCandidates: 0,
-        errors: [{ queryId: taskId, message: workflow.error ?? "Search workflow did not run" }],
+        errors: [
+          { queryId: taskId, message: workflow.error ?? "Search workflow did not run" }
+        ],
         hasMore: false,
         remainingQueries: 0
       }
@@ -3129,6 +3172,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       channelCustomersRequested: boolean;
     };
     targetMarkets?: string[];
+    // 2026-05 Stage 2 follow-up: when set, the first GPT call seeds
+    // its refillContext.acceptedQueries with prior queries so the
+    // model is told upfront not to repeat them. Used by the
+    // "继续搜索 30 条" path so a second batch doesn't collide with
+    // the first.
+    priorAcceptedQueries?: Array<{
+      query: string;
+      country: string | null;
+      strategyType: string | null;
+    }>;
   }): Promise<{
     searchQueries: PlannedSearchQuery[];
     keywordPool?: {
@@ -3175,7 +3228,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       const searchTargetMarkets = input.targetMarkets?.length
         ? input.targetMarkets
         : keywordGroups.marketTerms;
-      const searchStrategyInput = buildSearchStrategyInput({
+      const baseStrategyInput = buildSearchStrategyInput({
         keywordGroups,
         aiKeywordExpansion,
         productProfileAnalysis: productProfileAnalysis as ProductProfileAnalysis,
@@ -3184,6 +3237,27 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         operatorLibrary: compactOperatorLibrary(),
         minQueryCount: SEARCH_STRATEGY_INITIAL_QUERY_COUNT
       });
+      // 2026-05 Stage 2 follow-up: continuation runs seed the very
+      // first GPT call with refillContext.acceptedQueries so the
+      // model is told upfront not to repeat the prior batch. Without
+      // this, GPT can return queries identical to what's already in
+      // search_queries; runSlowPlanningAndAppendGptQueries would
+      // dedupe them all out and append nothing.
+      const searchStrategyInput: SearchStrategyInput =
+        input.priorAcceptedQueries && input.priorAcceptedQueries.length > 0
+          ? {
+              ...baseStrategyInput,
+              refillContext: {
+                requiredAdditionalQueries: SEARCH_STRATEGY_INITIAL_QUERY_COUNT,
+                acceptedQueries: input.priorAcceptedQueries.map((q) => ({
+                  query: q.query,
+                  country: q.country,
+                  strategyType: q.strategyType
+                })),
+                rejectedQueries: []
+              }
+            }
+          : baseStrategyInput;
       const searchPlan = await withTimeout(
         this.leadHuntAiService.generateSearchStrategy(searchStrategyInput),
         SEARCH_STRATEGY_TIMEOUT_MS,
@@ -3593,7 +3667,15 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   private async runSlowPlanningAndAppendGptQueries(
     taskId: string,
     fastResult: Awaited<ReturnType<AgentWorkflowService["runFastPlanning"]>>,
-    targetMarkets: string[]
+    targetMarkets: string[],
+    // 2026-05 Stage 2 follow-up: continuation path (continuing search
+    // on a drained task) seeds GPT's refillContext with prior queries
+    // so the new batch doesn't collide with what's already there.
+    priorAcceptedQueries: Array<{
+      query: string;
+      country: string | null;
+      strategyType: string | null;
+    }> = []
   ): Promise<{
     slowResult: Awaited<ReturnType<AgentWorkflowService["runSlowPlanning"]>>;
     appendedCount: number;
@@ -3607,7 +3689,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         aiKeywordExpansion: fastResult.aiKeywordExpansion,
         channelCustomersRequested: fastResult.channelCustomersRequested
       },
-      targetMarkets
+      targetMarkets,
+      priorAcceptedQueries
     });
 
     if (!slowResult.searchQueries.length) {
@@ -3646,6 +3729,122 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     });
 
     return { slowResult, appendedCount: newQueries.length };
+  }
+
+  // 2026-05 Stage 2 follow-up: "继续搜索 30 条" path. Appends a fresh
+  // batch of pending search_queries to a task that has already drained
+  // its existing queue. Reuses the slow planning pipeline + dedupes
+  // against existing queries so we don't re-issue the same Brave call
+  // and waste credits. Pre-existing candidates / approved status /
+  // CRM rows are not touched — this only adds new pending rows.
+  //
+  // Returns the number of new queries actually inserted (0 when the
+  // task still has pending/running work, or when GPT returned only
+  // duplicates).
+  private async appendContinuationSearchQueriesForTask(
+    userId: string,
+    taskId: string,
+    input: { limit: number }
+  ): Promise<number> {
+    const task = await this.prisma.leadTask.findFirst({
+      where: { id: taskId, userId },
+      select: { id: true, inputPayload: true, targetCount: true }
+    });
+    if (!task) {
+      throw new NotFoundException("Lead task not found");
+    }
+
+    // Skip the append when there's still work to drain — the worker
+    // pool will pick those up on the brave_search call below. This is
+    // the legacy "resume / continue draining" semantics.
+    const pendingCount = await this.prisma.searchQuery.count({
+      where: {
+        taskId,
+        executionStatus: { in: ["pending", "running"] }
+      }
+    });
+    if (pendingCount > 0) {
+      return 0;
+    }
+
+    if (!this.leadHuntAiService) {
+      return 0;
+    }
+
+    const payload = toPlainObject(task.inputPayload);
+    const productProfileAnalysis = (payload.productProfileAnalysis ?? null) as
+      | ProductProfileAnalysis
+      | null;
+    const customerProfileAnalysis = (payload.customerProfileAnalysis ?? null) as
+      | CustomerProfileAnalysis
+      | null;
+    const keywordGroups = (payload.keywordGroups ?? null) as KeywordGroups | null;
+    if (!productProfileAnalysis || !customerProfileAnalysis || !keywordGroups) {
+      // Task was created before fast planning persisted these fields;
+      // we can't safely re-run slow planning without them.
+      return 0;
+    }
+    const aiKeywordExpansion = (payload.aiKeywordExpansion ?? null) as
+      | KeywordExpansionResult
+      | null;
+    const channelCustomersRequested = Boolean(
+      ((payload.profileSignals ?? {}) as Record<string, unknown>)?.channelCustomersRequested
+    );
+    const targetMarkets =
+      (keywordGroups.marketTerms?.length ? keywordGroups.marketTerms : []) ?? [];
+
+    // Reuse the slow planning + dedupe pipeline. It already inserts
+    // pending rows via prisma.searchQuery.createMany after deduping
+    // against existing queries. We synthesize a minimal "fastResult"
+    // shape from the persisted inputPayload — only the fields that
+    // runSlowPlanning actually reads.
+    const fastResult = {
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      keywordGroups,
+      aiKeywordExpansion,
+      fallbackReasons: [] as string[],
+      channelCustomersRequested,
+      serviceAvailable: true
+    } as Awaited<ReturnType<AgentWorkflowService["runFastPlanning"]>>;
+
+    // Pull existing queries to seed GPT's refillContext. Without this
+    // the model is blind to the prior batch and will frequently
+    // regenerate the exact same queries — runSlowPlanning's dedupe
+    // would then strip every one of them and we'd append nothing.
+    const existingQueries = await this.prisma.searchQuery.findMany({
+      where: { taskId },
+      select: { query: true, country: true, strategyTemplate: true }
+    });
+    const priorAcceptedQueries = existingQueries.map((row) => ({
+      query: row.query,
+      country: row.country ?? null,
+      strategyType: row.strategyTemplate ?? null
+    }));
+
+    try {
+      const { appendedCount } = await this.runSlowPlanningAndAppendGptQueries(
+        taskId,
+        fastResult,
+        targetMarkets,
+        priorAcceptedQueries
+      );
+      // Mark task as running again so the polling effect picks the new
+      // work up. updateTaskStatusFromWorkflow runs after the worker
+      // pool finishes and will move it to paused/completed/failed.
+      if (appendedCount > 0) {
+        await this.touchRunningTask(taskId);
+      }
+      return appendedCount;
+    } catch (error) {
+      // GPT timeout / rate-limit shouldn't fail the whole /search call —
+      // worker pool will simply find no pending queries and the route
+      // returns executedQueries=0 with appendedQueries=0 so the
+      // frontend can surface "no new queries generated".
+      // Caller already runs the search graph after this returns.
+      void error;
+      return 0;
+    }
   }
 
   private async markOptionalPlanningStepRunning(
