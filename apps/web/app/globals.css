@@ -11488,7 +11488,11 @@ button.primary {
   display: flex;
   align-items: center;
   gap: 0;
-  margin-top: auto;
+  /* 2026-05 LeadHunt 2.0: tight spacing under the "本批已沉淀 N 家
+     客户" line. The previous `margin-top: auto` shoved the timeline
+     to the bottom of the run card, leaving an awkward gap when the
+     progress block was short. */
+  margin-top: 4px;
   padding: 4px 0;
 }
 
