@@ -685,6 +685,38 @@ export function AiWorkerClient() {
     }
   }
 
+  // 2026-05 Stage 2: bulk approve from the pool detail page. Posts
+  // every selected leadId to the existing /approve endpoint so the
+  // backend builds CRM rows + email drafts for them, then refreshes
+  // the task so the UI reflects the new crmLead/draft entries.
+  async function approveSelectedLeads(taskId: string, leadIds: string[]) {
+    if (!leadIds.length) return;
+    setApproving(true);
+    setError("");
+    setStatus(`正在批量加入 CRM：已选择 ${leadIds.length} 家客户...`);
+
+    try {
+      const result = await apiRequest<ApprovalResult>(`/api/lead-tasks/${taskId}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ leadIds })
+      });
+      await refreshTask(taskId).catch(() => undefined);
+      setStatus(
+        `已加入 CRM ${result.approvedCount} 家客户，并生成 ${result.draftCount} 封开发信草稿。`
+      );
+    } catch (requestError) {
+      const message = errorMessage(requestError);
+      setError(message);
+      setStatus(
+        isMissingLeadTaskError(message)
+          ? "当前任务不属于当前登录账号或已失效，批量加入 CRM 已取消。"
+          : "批量加入 CRM 失败；可重试或先单条审批。"
+      );
+    } finally {
+      setApproving(false);
+    }
+  }
+
   function submitLanding() {
     void startLeadTask(landingPrompt);
   }
@@ -770,11 +802,17 @@ export function AiWorkerClient() {
                 taskHistory.find((task) => task.id === currentTask?.id) ?? null
               }
               leads={displayLeads}
+              approving={approving}
               onBack={() => setView("workbench")}
               onContinueSearch={() => {
                 if (currentTask?.id) {
                   setView("conversation");
                   void runTaskSearch(currentTask.id);
+                }
+              }}
+              onBulkApprove={(leadIds) => {
+                if (currentTask?.id && leadIds.length > 0) {
+                  void approveSelectedLeads(currentTask.id, leadIds);
                 }
               }}
             />
@@ -1409,8 +1447,10 @@ type PoolProps = {
   task: LeadTask | null;
   taskHistoryItem: LeadTaskListItem | null;
   leads: DisplayLead[];
+  approving: boolean;
   onBack: () => void;
   onContinueSearch: () => void;
+  onBulkApprove: (leadIds: string[]) => void;
 };
 
 type PoolKpi = {
@@ -1424,10 +1464,6 @@ type PoolKpi = {
 type PoolFilterDropdown = {
   label: string;
   icon?: typeof Filter;
-};
-
-type PoolSelectedChip = {
-  label: string;
 };
 
 type PoolTableRow = {
@@ -1453,8 +1489,10 @@ function AiWorkerPool({
   task,
   taskHistoryItem,
   leads,
+  approving,
   onBack,
-  onContinueSearch
+  onContinueSearch,
+  onBulkApprove
 }: PoolProps) {
   const poolTitle = useMemo(() => {
     if (taskHistoryItem?.title) {
@@ -1472,27 +1510,37 @@ function AiWorkerPool({
     return mapTaskStatusToPool(taskHistoryItem?.status ?? task?.status ?? "");
   }, [task, taskHistoryItem]);
 
-  // KPIs derived from the task. Falls back to demo values when task data
-  // hasn't loaded yet so the layout still reads naturally.
-  const totalLeads = leads.length || taskHistoryItem?.leadCount || 328;
+  // 2026-05 Stage 2: KPIs and the candidate table read ONLY from
+  // currentTask.leadCandidates (via the displayLeads prop). When the
+  // task hasn't loaded yet we render zeroes / placeholders rather
+  // than synthesised demo numbers — those used to leak across into
+  // production and made the page look fake.
+  const totalLeads = leads.length;
   const queryCount = task?.searchQueries?.length ?? 0;
   const highMatch = useMemo(
-    () => leads.filter((lead) => lead.score >= 80).length || Math.round(totalLeads * 0.186),
-    [leads, totalLeads]
+    () => leads.filter((lead) => lead.score >= 80).length,
+    [leads]
   );
   const withContact = useMemo(
-    () =>
-      leads.filter((lead) => lead.email !== "—" || lead.phone !== "—").length ||
-      Math.round(totalLeads * 0.53),
-    [leads, totalLeads]
+    () => leads.filter((lead) => lead.email !== "—" || lead.phone !== "—").length,
+    [leads]
   );
   const pendingCrm = useMemo(
-    () => leads.filter((lead) => !lead.raw.crmLead).length || Math.round(totalLeads * 0.073),
-    [leads, totalLeads]
+    () =>
+      leads.filter((lead) => {
+        const status = lead.raw.status ?? "";
+        const inCrm =
+          Boolean(lead.raw.crmLead) ||
+          status === "approved" ||
+          status === "contacted" ||
+          status === "email_sent";
+        return !inCrm;
+      }).length,
+    [leads]
   );
   const emailReached = useMemo(
-    () => leads.filter((lead) => hasSentEmail(lead.raw)).length || Math.round(totalLeads * 0.116),
-    [leads, totalLeads]
+    () => leads.filter((lead) => hasSentEmail(lead.raw)).length,
+    [leads]
   );
   // Reply rate is unknown until backend exposes it; show 0 when no
   // email actually went out so the table doesn't read as if 5 customers
@@ -1511,6 +1559,24 @@ function AiWorkerPool({
       ? Math.round((repliedCount / emailReached) * 1000) / 10
       : 0;
 
+  // Main vs review-tail counts. buildDisplayLeads already gives us a
+  // sorted combined list (mainLeads first, reviewTail after), so we
+  // recompute the split here for the "待复核 N 条" hint.
+  const mainLeadCount = useMemo(
+    () => leads.filter((lead) => lead.actionable).length,
+    [leads]
+  );
+  const reviewTailCount = totalLeads - mainLeadCount;
+
+  // 2026-05 Stage 2: when the backend returns evidence/intelligence
+  // candidates that buildDisplayLeads filters out (content_evidence,
+  // intelligence, hidden_evidence), the user sees fewer rows than the
+  // raw API count. Surface the gap so they know we didn't lose data.
+  const hiddenEvidenceCount = Math.max(
+    0,
+    (task?.leadCandidates?.length ?? 0) - totalLeads
+  );
+
   const kpis: PoolKpi[] = [
     {
       label: "本池客户",
@@ -1524,35 +1590,35 @@ function AiWorkerPool({
     {
       label: "高匹配",
       value: highMatch,
-      delta: `占比 ${percent(highMatch, totalLeads)}`,
+      delta: totalLeads > 0 ? `占比 ${percent(highMatch, totalLeads)}` : "暂无数据",
       icon: Star,
       tone: "orange"
     },
     {
       label: "有联系方式",
       value: withContact,
-      delta: `占比 ${percent(withContact, totalLeads)}`,
+      delta: totalLeads > 0 ? `占比 ${percent(withContact, totalLeads)}` : "暂无数据",
       icon: PhoneCall,
       tone: "teal"
     },
     {
       label: "待加入 CRM",
       value: pendingCrm,
-      delta: `占比 ${percent(pendingCrm, totalLeads)}`,
+      delta: totalLeads > 0 ? `占比 ${percent(pendingCrm, totalLeads)}` : "暂无数据",
       icon: Database,
       tone: "indigo"
     },
     {
       label: "已触达",
       value: emailReached,
-      delta: `占比 ${percent(emailReached, totalLeads)}`,
+      delta: totalLeads > 0 ? `占比 ${percent(emailReached, totalLeads)}` : "暂无数据",
       icon: Send,
       tone: "purple"
     },
     {
       label: "回复",
       value: repliedCount,
-      delta: `回复率 ${replyRate}%`,
+      delta: emailReached > 0 ? `回复率 ${replyRate}%` : "暂无数据",
       icon: MessageCircle,
       tone: "rose"
     }
@@ -1570,35 +1636,78 @@ function AiWorkerPool({
     { label: "更新时间" }
   ];
 
-  const selectedChips: PoolSelectedChip[] = [
-    { label: "Saudi Arabia" },
-    { label: "推荐指数 60+" },
-    { label: "有邮箱" }
-  ];
+  // 2026-05 Stage 2: header chips reflect the real target markets
+  // for this task only. No fallback to UAE/Saudi/Qatar — that used to
+  // read like a hardcoded sample whenever currentTask hadn't loaded.
+  const countryChips = targetMarkets.slice(0, 6);
 
-  // Build table rows from real candidates with sensible fallbacks when
-  // data is missing. Also supplies demo rows when leads is empty so the
-  // layout looks complete on first render.
-  const rows: PoolTableRow[] = useMemo(() => {
-    if (leads.length) {
-      return leads.slice(0, 10).map((lead) => buildPoolTableRow(lead));
-    }
-    return demoPoolRows();
-  }, [leads]);
-
-  // Header chips for target markets. Falls back to a sensible default.
-  const countryChips =
-    targetMarkets.length > 0 ? targetMarkets.slice(0, 6) : ["UAE", "Saudi Arabia", "Qatar", "Oman"];
-
-  // Local UI state (selection, search input). Real bulk actions are
-  // wired in a follow-up; for now selection is local-only.
+  // Local UI state. selection / search / page is purely local; the
+  // data source is currentTask.leadCandidates via the leads prop.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchInput, setSearchInput] = useState("");
   const [pageNumber, setPageNumber] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  const totalPages = Math.max(1, Math.ceil(totalLeads / pageSize));
+  // Filter leads by the search input (company, country, website,
+  // email, phone). Empty input means show everything.
+  const filteredLeads = useMemo(() => {
+    const needle = searchInput.trim().toLowerCase();
+    if (!needle) return leads;
+    return leads.filter((lead) => {
+      const haystack = [
+        lead.companyName,
+        lead.country,
+        lead.website,
+        lead.email,
+        lead.phone,
+        lead.tag
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [leads, searchInput]);
+
+  const filteredCount = filteredLeads.length;
+  const totalPages = Math.max(1, Math.ceil(filteredCount / pageSize));
+  const safePage = Math.min(pageNumber, totalPages);
+  const pageStart = (safePage - 1) * pageSize;
+  const pageEnd = Math.min(pageStart + pageSize, filteredCount);
+  const pagedLeads = useMemo(
+    () => filteredLeads.slice(pageStart, pageEnd),
+    [filteredLeads, pageStart, pageEnd]
+  );
+
+  // Build table rows from the paged candidates. No demo fallback —
+  // empty state shows a single row with a placeholder message.
+  const rows: PoolTableRow[] = useMemo(
+    () => pagedLeads.map((lead) => buildPoolTableRow(lead)),
+    [pagedLeads]
+  );
+
   const allChecked = rows.length > 0 && rows.every((row) => selectedIds.has(row.id));
+
+  // Drop selection ids that no longer exist in the candidate list (e.g.
+  // after polling pulls a refreshed task) so the bulk bar count stays
+  // honest.
+  useEffect(() => {
+    setSelectedIds((current) => {
+      const ids = new Set(leads.map((lead) => lead.id));
+      const next = new Set<string>();
+      current.forEach((id) => {
+        if (ids.has(id)) next.add(id);
+      });
+      return next.size === current.size ? current : next;
+    });
+  }, [leads]);
+
+  // Snap pageNumber back into range whenever the filtered set shrinks.
+  useEffect(() => {
+    if (pageNumber > totalPages) {
+      setPageNumber(totalPages);
+    }
+  }, [pageNumber, totalPages]);
 
   function toggleAll() {
     if (allChecked) {
@@ -1649,7 +1758,9 @@ function AiWorkerPool({
               ))}
             </div>
             <p className="aiPoolMeta">
-              累计沉淀 {totalLeads} 家客户
+              {totalLeads > 0
+                ? `本池 ${totalLeads} 家客户`
+                : "本池暂无候选客户"}
               {queryCount > 0 ? `，本批跑了 ${queryCount} 条 query` : ""}
             </p>
           </div>
@@ -1731,14 +1842,43 @@ function AiWorkerPool({
         </button>
       </section>
 
-      <div className="aiPoolSelectedChips">
-        {selectedChips.map((chip) => (
-          <span key={chip.label} className="aiPoolSelectedChip">
-            {chip.label}
-            <X size={12} aria-hidden="true" />
-          </span>
-        ))}
-      </div>
+      {/* 2026-05 Stage 2: meta hint row replaces the old hardcoded
+          "Saudi Arabia / 推荐指数 60+ / 有邮箱" chips. Now shows the
+          real review-tail count and the batch query count, so users
+          know where the difference between the API total and the
+          main table comes from. */}
+      {(reviewTailCount > 0 || queryCount > 0 || hiddenEvidenceCount > 0) ? (
+        <div className="aiPoolSelectedChips">
+          {queryCount > 0 ? (
+            <span className="aiPoolSelectedChip" data-tone="info">
+              本批 {queryCount} 条 query
+            </span>
+          ) : null}
+          {totalLeads > 0 ? (
+            <span className="aiPoolSelectedChip" data-tone="info">
+              主客户 {mainLeadCount} 条
+            </span>
+          ) : null}
+          {reviewTailCount > 0 ? (
+            <span
+              className="aiPoolSelectedChip"
+              data-tone="warn"
+              title="国家/邮箱待补全的候选客户，需要先逐条复核再纳入主客户"
+            >
+              待复核 {reviewTailCount} 条
+            </span>
+          ) : null}
+          {hiddenEvidenceCount > 0 ? (
+            <span
+              className="aiPoolSelectedChip"
+              data-tone="muted"
+              title="内容证据/情报类候选已自动归档，不进入主客户表"
+            >
+              情报归档 {hiddenEvidenceCount} 条
+            </span>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Bulk action bar (shown when selection exists) */}
       {selectedIds.size > 0 ? (
@@ -1752,19 +1892,39 @@ function AiWorkerPool({
             />
             已选择 <strong>{selectedIds.size}</strong> 家客户
           </label>
-          <button type="button" className="aiPoolBulkAction primary">
+          <button
+            type="button"
+            className="aiPoolBulkAction primary"
+            disabled={approving}
+            onClick={() => onBulkApprove(Array.from(selectedIds))}
+          >
             <Database size={13} aria-hidden="true" />
-            加入 CRM
+            {approving ? "加入中..." : "加入 CRM"}
           </button>
-          <button type="button" className="aiPoolBulkAction">
+          <button
+            type="button"
+            className="aiPoolBulkAction"
+            disabled
+            title="批量生成邮件功能开发中，请先完成 CRM 同步"
+          >
             <Mail size={13} aria-hidden="true" />
             生成邮件
           </button>
-          <button type="button" className="aiPoolBulkAction">
+          <button
+            type="button"
+            className="aiPoolBulkAction"
+            disabled
+            title="标记无效功能开发中"
+          >
             <X size={13} aria-hidden="true" />
             标记无效
           </button>
-          <button type="button" className="aiPoolBulkAction">
+          <button
+            type="button"
+            className="aiPoolBulkAction"
+            disabled
+            title="导出选中功能开发中"
+          >
             <Download size={13} aria-hidden="true" />
             导出选中
           </button>
@@ -1800,7 +1960,8 @@ function AiWorkerPool({
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {rows.length ? (
+                rows.map((row) => (
                 <tr key={row.id} className={selectedIds.has(row.id) ? "selected" : undefined}>
                   <td className="col-check">
                     <input
@@ -1859,14 +2020,24 @@ function AiWorkerPool({
                     </button>
                   </td>
                 </tr>
-              ))}
+              ))
+              ) : (
+                <tr>
+                  <td className="leadEmptyCell" colSpan={13}>
+                    {searchInput
+                      ? "没有匹配当前搜索条件的候选客户。"
+                      : "暂无候选客户。回到搜索页继续搜索 30 条来扩充客户池。"}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
 
         <footer className="aiPoolTableFooter">
           <p className="aiPoolTableFootHint">
-            显示 1-{rows.length} / {totalLeads}
+            显示 {filteredCount === 0 ? 0 : pageStart + 1}-{pageEnd} / {filteredCount}
+            {filteredCount !== totalLeads ? `（全部 ${totalLeads}）` : ""}
             <span className="aiPoolTableFootSep">·</span>
             点击公司可查看完整邮箱、电话、地址、来源 query 和评分原因
           </p>
@@ -1875,7 +2046,10 @@ function AiWorkerPool({
               每页
               <select
                 value={pageSize}
-                onChange={(event) => setPageSize(Number(event.target.value))}
+                onChange={(event) => {
+                  setPageSize(Number(event.target.value));
+                  setPageNumber(1);
+                }}
               >
                 <option value={10}>10</option>
                 <option value={20}>20</option>
@@ -1885,38 +2059,24 @@ function AiWorkerPool({
             <button
               type="button"
               className="aiPoolPageBtn"
-              disabled={pageNumber <= 1}
+              disabled={safePage <= 1}
               onClick={() => setPageNumber((current) => Math.max(1, current - 1))}
             >
               上一页
             </button>
             <span className="aiPoolPageIndicator">
-              {pageNumber} / {totalPages}
+              {safePage} / {totalPages}
             </span>
             <button
               type="button"
               className="aiPoolPageBtn"
-              disabled={pageNumber >= totalPages}
+              disabled={safePage >= totalPages}
               onClick={() => setPageNumber((current) => Math.min(totalPages, current + 1))}
             >
               下一页
             </button>
           </div>
         </footer>
-      </section>
-
-      {/* Pool health hint */}
-      <section className="aiPoolHealth" aria-label="客户池健康度">
-        <span className="aiPoolHealthIcon" aria-hidden="true">
-          <CheckCircle2 size={18} />
-        </span>
-        <p>
-          获客池健康度：有效客户率 <strong>27%</strong>，重复率 <strong>18%</strong>，
-          平均推荐指数 <strong>62</strong>。建议下一批增加维护商和渠道商，减少库存关键词 query。
-        </p>
-        <a className="aiPoolHealthLink" href="#health">
-          查看健康度报告 <ChevronRight size={13} aria-hidden="true" />
-        </a>
       </section>
     </div>
   );
@@ -1962,6 +2122,25 @@ function buildPoolTableRow(lead: DisplayLead): PoolTableRow {
   const phoneCount = contacts.filter((contact) => contact.type === "phone").length;
   const crmStage = lead.raw.crmLead?.stage ?? null;
   const sentEmail = hasSentEmail(lead.raw);
+  // 2026-05 Stage 2: CRM status reflects either an explicit crmLead row
+  // OR the candidate having been approved (status approved / contacted
+  // / email_sent). The /approve endpoint flips status before the CRM
+  // row is created, so mapping only on crmLead would leave the table
+  // stuck on "待加入CRM" right after a successful bulk approve.
+  const status = lead.raw.status ?? "";
+  const isApproved =
+    status === "approved" ||
+    status === "contacted" ||
+    status === "email_sent";
+  const crmActive = Boolean(crmStage) || isApproved;
+  // Most recent action label: newest row reflects what just happened
+  // ("已加入 CRM"/"已发送邮件") instead of the static "新发现".
+  let lastAction = "新发现";
+  if (sentEmail) {
+    lastAction = "邮件已发送";
+  } else if (isApproved) {
+    lastAction = "已加入 CRM";
+  }
   return {
     id: lead.id,
     companyName: lead.companyName,
@@ -1975,124 +2154,11 @@ function buildPoolTableRow(lead: DisplayLead): PoolTableRow {
     phoneCount,
     website: lead.website || "—",
     sourceBatch: lead.source || "第 1 批",
-    crmStatus: crmStage ? "synced" : "pending",
-    crmStatusLabel: crmStage ? "已同步" : "待加入CRM",
-    mailStatus: sentEmail ? "已发送" : "未触达",
-    lastAction: "新发现"
+    crmStatus: crmActive ? "synced" : "pending",
+    crmStatusLabel: crmActive ? "已加入CRM" : "待加入CRM",
+    mailStatus: sentEmail ? "已发送" : isApproved ? "待发送" : "未触达",
+    lastAction
   };
-}
-
-function demoPoolRows(): PoolTableRow[] {
-  return [
-    {
-      id: "demo-1",
-      companyName: "HCC",
-      country: "Saudi Arabia",
-      industry: "工程/系统集成",
-      scoreStars: 4,
-      scoreValue: 82,
-      hasEmail: true,
-      emailCount: 1,
-      hasPhone: true,
-      phoneCount: 1,
-      website: "htcc.com.sa",
-      sourceBatch: "第 3 批",
-      crmStatus: "pending",
-      crmStatusLabel: "待加入CRM",
-      mailStatus: "未触达",
-      lastAction: "新发现"
-    },
-    {
-      id: "demo-2",
-      companyName: "Agile Qatar",
-      country: "Qatar",
-      industry: "通信系统集成",
-      scoreStars: 3,
-      scoreValue: 68,
-      hasEmail: true,
-      emailCount: 1,
-      hasPhone: false,
-      phoneCount: 0,
-      website: "agileqatar.com",
-      sourceBatch: "第 2 批",
-      crmStatus: "synced",
-      crmStatusLabel: "已同步",
-      mailStatus: "待发送",
-      lastAction: "邮件待确认"
-    },
-    {
-      id: "demo-3",
-      companyName: "Al Suroor United Group",
-      country: "Saudi Arabia",
-      industry: "承包商",
-      scoreStars: 4,
-      scoreValue: 60,
-      hasEmail: false,
-      emailCount: 0,
-      hasPhone: false,
-      phoneCount: 0,
-      website: "alsuroor.com",
-      sourceBatch: "第 2 批",
-      crmStatus: "synced",
-      crmStatusLabel: "已发送",
-      mailStatus: "已发送",
-      lastAction: "3 天后跟进"
-    },
-    {
-      id: "demo-4",
-      companyName: "Cloud Connect Co.",
-      country: "Saudi Arabia",
-      industry: "网络运维客户",
-      scoreStars: 3,
-      scoreValue: 57,
-      hasEmail: false,
-      emailCount: 0,
-      hasPhone: false,
-      phoneCount: 0,
-      website: "cloud-connect.sa",
-      sourceBatch: "第 3 批",
-      crmStatus: "pending",
-      crmStatusLabel: "待加入CRM",
-      mailStatus: "未触达",
-      lastAction: "需补充信息"
-    },
-    {
-      id: "demo-5",
-      companyName: "1COM",
-      country: "Oman",
-      industry: "ISP/FTTH 客户",
-      scoreStars: 3,
-      scoreValue: 55,
-      hasEmail: true,
-      emailCount: 1,
-      hasPhone: false,
-      phoneCount: 0,
-      website: "1com.net",
-      sourceBatch: "第 2 批",
-      crmStatus: "pending",
-      crmStatusLabel: "待加入CRM",
-      mailStatus: "未触达",
-      lastAction: "待处理"
-    },
-    {
-      id: "demo-6",
-      companyName: "Spectrum Engineering",
-      country: "Saudi Arabia",
-      industry: "工程服务",
-      scoreStars: 3,
-      scoreValue: 53,
-      hasEmail: true,
-      emailCount: 1,
-      hasPhone: false,
-      phoneCount: 0,
-      website: "sesksa.com",
-      sourceBatch: "第 2 批",
-      crmStatus: "synced",
-      crmStatusLabel: "已忽略",
-      mailStatus: "未触达",
-      lastAction: "标记弱相关"
-    }
-  ];
 }
 
 type ConversationProps = {
