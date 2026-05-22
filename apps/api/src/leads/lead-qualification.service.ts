@@ -1415,7 +1415,7 @@ function assessCountryValidation(candidate: NormalizedLeadCandidate) {
   // has a Qatar branch, so we infer Qatar.
   let inferredCountry: string | null = null;
   let countryConflict = evidenceConflict;
-  let countryConflictCountries = countryConflict ? uniqueCountries(candidateCountries) : [];
+  const countryConflictCountries = countryConflict ? uniqueCountries(candidateCountries) : [];
 
   if (candidateCountries.length === 1) {
     inferredCountry = candidateCountries[0]!;

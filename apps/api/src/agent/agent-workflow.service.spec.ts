@@ -2344,7 +2344,7 @@ describe("AgentWorkflowService", () => {
       // because in this mock, the worker pool finishes cleanly.
       prisma.searchQuery.updateMany = vi
         .fn()
-        .mockImplementation(async ({ where, data }: any) => {
+        .mockImplementation(async ({ where }: any) => {
           if (where?.id && where?.executionStatus === "pending") {
             if (claimedSet.has(where.id)) return { count: 0 };
             claimedSet.add(where.id);

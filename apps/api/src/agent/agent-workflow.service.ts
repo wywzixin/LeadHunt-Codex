@@ -5186,7 +5186,7 @@ function shortenLongQuotedPhrases(query: string) {
 // hurt exact match (LLC, FZE, FZCO, etc.).
 function trimReferenceCompanyName(name: string): string {
   const aliases = name
-    .split(/\s*[\/|,]\s*/)
+    .split(/\s*[/|,]\s*/)
     .map((alias) => alias.trim())
     .filter(Boolean);
   if (aliases.length === 0) {
@@ -5744,30 +5744,6 @@ function buildReverseCustomerNetworkQueries(input: {
   }
 
   return queries;
-}
-
-function mergeSearchQueriesPreservingOrder(
-  base: PlannedSearchQuery[],
-  injected: PlannedSearchQuery[]
-): PlannedSearchQuery[] {
-  if (injected.length === 0) {
-    return base;
-  }
-  const seen = new Set(base.map((query) => normalizeForDedup(query.query)));
-  const merged = [...base];
-  for (const query of injected) {
-    const key = normalizeForDedup(query.query);
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    merged.push(query);
-  }
-  return merged;
-}
-
-function normalizeForDedup(query: string) {
-  return query.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function referenceSiteDomain(site: WebsiteEvidence) {
@@ -6835,7 +6811,7 @@ export function splitReferenceCompanyAliases(name: string): string[] {
   // single split below. \s+aka\s+ to match " aka ", " AKA ", etc.
   const normalizedForSplit = trimmed.replace(/\s+aka\s+/gi, "/");
   const parts = normalizedForSplit
-    .split(/\s*[\/;,]\s*/)
+    .split(/\s*[/;,]\s*/)
     .map((part) => part.trim())
     .filter(Boolean);
   if (parts.length <= 1) {
