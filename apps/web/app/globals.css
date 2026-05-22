@@ -11768,12 +11768,14 @@ button.primary {
   box-shadow: 0 0 0 1px var(--border);
 }
 
-.aiSearchRunLogItem.state-completed .aiSearchRunLogBullet {
+.aiSearchRunLogItem.state-completed .aiSearchRunLogBullet,
+.aiSearchRunLogItem.state-done .aiSearchRunLogBullet {
   background: var(--success);
   box-shadow: 0 0 0 1px var(--success);
 }
 
-.aiSearchRunLogItem.state-running .aiSearchRunLogBullet {
+.aiSearchRunLogItem.state-running .aiSearchRunLogBullet,
+.aiSearchRunLogItem.state-active .aiSearchRunLogBullet {
   background: var(--primary);
   box-shadow: 0 0 0 1px var(--primary);
 }
@@ -11821,8 +11823,10 @@ button.primary {
   text-overflow: ellipsis;
 }
 
-.aiSearchRunLogItem.state-completed .aiSearchRunLogTime { color: var(--success); }
-.aiSearchRunLogItem.state-running .aiSearchRunLogTime { color: var(--primary); }
+.aiSearchRunLogItem.state-completed .aiSearchRunLogTime,
+.aiSearchRunLogItem.state-done .aiSearchRunLogTime { color: var(--success); }
+.aiSearchRunLogItem.state-running .aiSearchRunLogTime,
+.aiSearchRunLogItem.state-active .aiSearchRunLogTime { color: var(--primary); }
 .aiSearchRunLogItem.state-failed .aiSearchRunLogTime { color: var(--danger); }
 
 /* ----- Lead table tweaks for the search-in-progress version ----- */
