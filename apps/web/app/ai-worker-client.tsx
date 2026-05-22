@@ -681,6 +681,12 @@ export function AiWorkerClient() {
               historyLoading={historyLoading}
               onSelectHistoryTask={openPoolFromHistory}
               onRefreshHistory={() => void loadTaskHistory(taskSearch)}
+              onContinueSearch={(taskId) => {
+                // Active pool card "继续搜索 30 条" — open the conversation
+                // view and re-trigger the search agent against the task.
+                setView("conversation");
+                void runTaskSearch(taskId);
+              }}
             />
           ) : view === "pool" ? (
             <AiWorkerPool
@@ -886,6 +892,7 @@ type WorkbenchProps = {
   historyLoading: boolean;
   onSelectHistoryTask: (taskId: string) => void;
   onRefreshHistory: () => void;
+  onContinueSearch?: (taskId: string) => void;
 };
 
 type WorkbenchKpi = {
@@ -923,7 +930,8 @@ function AiWorkerWorkbench({
   taskHistory,
   historyLoading,
   onSelectHistoryTask,
-  onRefreshHistory
+  onRefreshHistory,
+  onContinueSearch
 }: WorkbenchProps) {
   const greeting = useMemo(() => buildGreeting(), []);
   const trackingPoolCount = taskHistory.length;
@@ -1223,31 +1231,49 @@ function AiWorkerWorkbench({
           <h2 className="aiWorkbenchSectionTitle">最近客户池</h2>
         </header>
         <div className="aiWorkbenchPoolGrid">
-          {poolCards.map((pool) => (
-            <article className={`aiWorkbenchPoolCard tone-${pool.tone}`} key={pool.id}>
-              <header className="aiWorkbenchPoolHead">
+          {poolCards.map((pool) => {
+            const isActive = pool.status === "active";
+            const isDemo = pool.id.startsWith("demo-");
+            return (
+              <article className={`aiWorkbenchPoolCard tone-${pool.tone}`} key={pool.id}>
                 <span className="aiWorkbenchPoolIcon" aria-hidden="true">
-                  <pool.icon size={20} />
+                  <pool.icon size={22} />
                 </span>
-                <span className={`aiWorkbenchPoolBadge state-${pool.status}`}>
-                  {pool.statusLabel}
-                </span>
-              </header>
-              <h3 className="aiWorkbenchPoolTitle">{pool.title}</h3>
-              <p className="aiWorkbenchPoolDetail">{pool.detail}</p>
-              <footer className="aiWorkbenchPoolFoot">
-                <button
-                  type="button"
-                  className="aiWorkbenchPoolPrimary"
-                  onClick={() =>
-                    pool.id.startsWith("demo-") ? undefined : onSelectHistoryTask(pool.id)
-                  }
-                >
-                  {pool.primaryActionLabel}
-                </button>
-              </footer>
-            </article>
-          ))}
+                <div className="aiWorkbenchPoolBody">
+                  <header className="aiWorkbenchPoolHead">
+                    <h3 className="aiWorkbenchPoolTitle" title={pool.title}>{pool.title}</h3>
+                    <span className={`aiWorkbenchPoolBadge state-${pool.status}`}>
+                      {pool.statusLabel}
+                    </span>
+                  </header>
+                  <p className="aiWorkbenchPoolDetail">{pool.detail}</p>
+                  <footer className="aiWorkbenchPoolFoot">
+                    <button
+                      type="button"
+                      className="aiWorkbenchPoolPrimary"
+                      onClick={() =>
+                        isDemo
+                          ? undefined
+                          : isActive
+                            ? onContinueSearch?.(pool.id)
+                            : onSelectHistoryTask(pool.id)
+                      }
+                    >
+                      {isActive ? <Play size={14} aria-hidden="true" /> : null}
+                      {isActive ? "继续搜索 30 条" : "继续搜索"}
+                    </button>
+                    <button
+                      type="button"
+                      className="aiWorkbenchPoolSecondary"
+                      onClick={() => (isDemo ? undefined : onSelectHistoryTask(pool.id))}
+                    >
+                      查看客户池
+                    </button>
+                  </footer>
+                </div>
+              </article>
+            );
+          })}
         </div>
       </section>
     </div>

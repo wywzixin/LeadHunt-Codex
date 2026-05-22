@@ -10269,16 +10269,18 @@ button.primary {
 }
 
 .aiWorkbenchPoolCard {
-  /* Natural height, with a comfortable min/max so the cards read like
-     the design spec (≈210–240px) regardless of how much breathing
-     room the 1fr row above leaves. */
+  /* Per the design: horizontal layout. icon on the left, body (title +
+     badge + subtitle + 2 buttons) on the right. min-height keeps a
+     comfortable rest height; max-height stops the card from stretching
+     when the 1fr row above has lots of room. */
   height: auto;
-  min-height: 210px;
-  max-height: 240px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
+  min-height: 150px;
+  max-height: 200px;
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  padding: 16px 18px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -10303,17 +10305,27 @@ button.primary {
   background: var(--pool-orange-bg);
 }
 
+.aiWorkbenchPoolBody {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+}
+
+/* Top row inside body: title (1fr) + badge (auto). */
 .aiWorkbenchPoolHead {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
 }
 
 .aiWorkbenchPoolIcon {
   display: inline-grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   border-radius: 12px;
   color: #fff;
   background: var(--primary);
@@ -10333,6 +10345,8 @@ button.primary {
   border-radius: 12px;
   font-size: 12px;
   font-weight: 500;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .aiWorkbenchPoolBadge.state-active {
@@ -10355,22 +10369,27 @@ button.primary {
   color: var(--title);
   font-size: 16px;
   font-weight: 700;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .aiWorkbenchPoolDetail {
   margin: 0;
   color: var(--secondary);
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .aiWorkbenchPoolFoot {
   display: flex;
   gap: 8px;
-  /* 2026-05 LeadHunt 2.0: padding-top gives the foot a bit of breathing
-     room so the button doesn't read as "sunk to the bottom" of the card. */
+  /* margin-top: auto pushes the buttons to the bottom of the body so
+     cards line up uniformly even if subtitle wraps differently. */
   margin-top: auto;
-  padding-top: 16px;
+  padding-top: 4px;
 }
 
 .aiWorkbenchPoolPrimary {
