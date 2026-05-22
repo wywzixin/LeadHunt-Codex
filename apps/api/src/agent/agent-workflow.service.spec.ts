@@ -1624,6 +1624,11 @@ describe("AgentWorkflowService", () => {
 
     await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
 
+    // 2026-05 Stage 2 follow-up: legacy fixture has no marketSelection
+    // in profileSignals, so buildIcpCriteria falls back to the merge
+    // path. This pins the backwards-compatibility behavior — old
+    // task rows persisted before the marketSource feature existed
+    // must keep merging prompt + profile markets.
     expect(leadQualification.saveCandidates).toHaveBeenCalledWith(
       "task-1",
       expect.any(Array),
@@ -1642,6 +1647,191 @@ describe("AgentWorkflowService", () => {
         ])
       }),
       "Oman"
+    );
+  });
+
+  // 2026-05 Stage 2 follow-up: when the user's prompt explicitly named
+  // markets, marketSelection.marketSource is "prompt" and the
+  // qualification layer should NOT inherit the long-lived
+  // customerProfile.targetRegions. This is what makes the
+  // verified-off-target hard reject actually bite — without it, a
+  // Germany task would still fall back to a saved Middle East/Africa
+  // profile and let Egypt-verified candidates pass as in-target.
+  it("uses prompt markets only when marketSource=prompt, ignoring profile targetRegions", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValueOnce({
+      id: "task-1",
+      userId: "user-1",
+      inputPayload: {
+        customerProfile: {
+          targetRegions: ["Middle East", "Africa", "Brazil"]
+        },
+        keywordGroups: {
+          productTerms: ["telecom equipment"],
+          customerIntentTerms: ["telecom contractor"],
+          marketTerms: ["Germany"]
+        },
+        profileSignals: {
+          marketSelection: {
+            targetMarkets: ["Germany"],
+            promptMarkets: ["Germany"],
+            profileMarkets: ["Middle East", "Africa", "Brazil"],
+            marketSource: "prompt"
+          }
+        }
+      },
+      searchQueries: [
+        {
+          id: "query-1",
+          query: "telecom contractor Germany contact",
+          country: "Germany",
+          createdAt: new Date("2026-04-30T01:00:00.000Z")
+        }
+      ]
+    });
+    prisma.searchQuery.findFirst
+      .mockReset()
+      .mockResolvedValueOnce({
+        id: "query-1",
+        query: "telecom contractor Germany contact",
+        country: "Germany",
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      })
+      .mockResolvedValue(null);
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    const call = leadQualification.saveCandidates.mock.calls[0];
+    const criteria = call?.[2] as { targetRegions?: string[] };
+    expect(criteria?.targetRegions).toEqual(["Germany"]);
+    // Profile macros must not leak through.
+    expect(criteria?.targetRegions).not.toContain("Middle East");
+    expect(criteria?.targetRegions).not.toContain("Africa");
+    expect(criteria?.targetRegions).not.toContain("Brazil");
+  });
+
+  it("falls back to profile targetRegions when marketSource=profile (no prompt market)", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValueOnce({
+      id: "task-1",
+      userId: "user-1",
+      inputPayload: {
+        customerProfile: {
+          targetRegions: ["Middle East", "Africa", "Brazil"]
+        },
+        keywordGroups: {
+          productTerms: ["telecom equipment"],
+          customerIntentTerms: ["telecom contractor"],
+          // marketTerms come from the profile expansion (UAE/Saudi/Qatar)
+          // because the prompt did not call out a specific country.
+          marketTerms: ["UAE", "Saudi Arabia", "Qatar"]
+        },
+        profileSignals: {
+          marketSelection: {
+            targetMarkets: ["UAE", "Saudi Arabia", "Qatar"],
+            promptMarkets: [],
+            profileMarkets: ["Middle East", "Africa", "Brazil"],
+            marketSource: "profile"
+          }
+        }
+      },
+      searchQueries: [
+        {
+          id: "query-1",
+          query: "telecom contractor Oman contact",
+          country: "Oman",
+          createdAt: new Date("2026-04-30T01:00:00.000Z")
+        }
+      ]
+    });
+    prisma.searchQuery.findFirst
+      .mockReset()
+      .mockResolvedValueOnce({
+        id: "query-1",
+        query: "telecom contractor Oman contact",
+        country: "Oman",
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      })
+      .mockResolvedValue(null);
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    const call = leadQualification.saveCandidates.mock.calls[0];
+    const criteria = call?.[2] as { targetRegions?: string[] };
+    // marketSource=profile keeps the legacy merge behavior so the
+    // qualification layer sees both the expanded prompt markets AND
+    // the profile macros for matchesTargetRegion fall-throughs.
+    expect(criteria?.targetRegions).toEqual(
+      expect.arrayContaining(["UAE", "Saudi Arabia", "Qatar", "Middle East", "Africa", "Brazil"])
+    );
+  });
+
+  it("falls back to merge when marketSource is missing (legacy task rows)", async () => {
+    // Same fixture as the legacy test above but explicitly asserting
+    // the fallback path: when the persisted payload predates the
+    // marketSelection feature, buildIcpCriteria still merges.
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValueOnce({
+      id: "task-1",
+      userId: "user-1",
+      inputPayload: {
+        customerProfile: {
+          targetRegions: ["Middle East", "Africa"]
+        },
+        keywordGroups: {
+          productTerms: ["telecom equipment"],
+          customerIntentTerms: ["telecom contractor"],
+          marketTerms: ["UAE"]
+        }
+        // No profileSignals -> no marketSelection -> legacy merge path.
+      },
+      searchQueries: [
+        {
+          id: "query-1",
+          query: "telecom contractor UAE contact",
+          country: "UAE",
+          createdAt: new Date("2026-04-30T01:00:00.000Z")
+        }
+      ]
+    });
+    prisma.searchQuery.findFirst
+      .mockReset()
+      .mockResolvedValueOnce({
+        id: "query-1",
+        query: "telecom contractor UAE contact",
+        country: "UAE",
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      })
+      .mockResolvedValue(null);
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    const call = leadQualification.saveCandidates.mock.calls[0];
+    const criteria = call?.[2] as { targetRegions?: string[] };
+    // Legacy behavior: prompt + profile merged.
+    expect(criteria?.targetRegions).toEqual(
+      expect.arrayContaining(["UAE", "Middle East", "Africa"])
     );
   });
 

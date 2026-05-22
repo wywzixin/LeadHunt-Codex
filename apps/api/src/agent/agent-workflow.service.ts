@@ -6626,6 +6626,17 @@ function parseTaskPayload(value: Prisma.JsonValue | null): {
   profileSignals?: {
     referenceCustomerUrlsUsed?: string[];
     referenceCustomerUrlsRead?: string[];
+    // 2026-05 Stage 2 follow-up: marketSelection is persisted by
+    // resolveTargetMarketSelection at planning time. buildIcpCriteria
+    // reads marketSource to decide whether to override profile
+    // targetRegions with the prompt-named markets.
+    marketSelection?: {
+      targetMarkets?: string[];
+      secondaryMarkets?: string[];
+      promptMarkets?: string[];
+      profileMarkets?: string[];
+      marketSource?: "prompt" | "profile" | "none";
+    } | null;
   } | null;
 } {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -6653,7 +6664,19 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
   const keywordGroups = payload.keywordGroups ?? {};
   const marketTerms = asStringArray(keywordGroups.marketTerms).slice(0, 40);
   const profileRegions = asStringArray(payload.customerProfile?.targetRegions).slice(0, 40);
-  const targetRegions = mergeQualificationTargetRegions(marketTerms, profileRegions);
+  // 2026-05 Stage 2 follow-up: when the user's prompt explicitly named
+  // target markets (marketSource === "prompt"), those markets win
+  // over the long-lived customerProfile.targetRegions. Earlier we
+  // merged both — which meant a Germany task would still inherit a
+  // user's saved Middle East/Africa/Brazil profile and let Egypt-
+  // verified candidates pass as "in target". The new rule keeps
+  // profile markets only when prompt didn't call any out (or asked
+  // for Global), preserving the legacy "profile-only task" flow.
+  const marketSource = payload.profileSignals?.marketSelection?.marketSource;
+  const targetRegions =
+    marketSource === "prompt" && marketTerms.length > 0
+      ? marketTerms
+      : mergeQualificationTargetRegions(marketTerms, profileRegions);
   const productProfile = payload.productProfile;
   const ownDomains = domainsFromUrls([
     productProfile?.websiteUrl,
