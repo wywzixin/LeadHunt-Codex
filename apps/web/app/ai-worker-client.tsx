@@ -413,7 +413,6 @@ export function AiWorkerClient() {
   const [crmPage, setCrmPage] = useState(1);
   const [status, setStatus] = useState("等待分配任务");
   const [error, setError] = useState("");
-  const [command, setCommand] = useState("");
   // 2026-05 LeadHunt 2.0: workbench is the only home view. The legacy
   // landing has been retired (kept in branch history if needed).
   const [view, setView] = useState<ViewState>("workbench");
@@ -758,7 +757,6 @@ export function AiWorkerClient() {
 
   function backToLanding() {
     setView("workbench");
-    setCommand("");
     setStatus(currentTask ? "任务已保留，可确认客户或重新执行搜索" : "等待分配任务");
   }
 
@@ -778,24 +776,6 @@ export function AiWorkerClient() {
     }
     setStatus(formatMailSentStatus(result));
     setError("");
-  }
-
-  function sendCommand() {
-    const text = command.trim();
-    if (!text) return;
-    setCommand("");
-
-    if (/搜索|重新执行|search/i.test(text)) {
-      void runTaskSearch();
-      return;
-    }
-
-    if (/邮件|开发信|发信|mail/i.test(text)) {
-      void approveSelectedLead();
-      return;
-    }
-
-    setStatus(text);
   }
 
   return (
@@ -840,7 +820,6 @@ export function AiWorkerClient() {
               prompt={taskPrompt}
               status={status}
               error={error}
-              command={command}
               currentTask={currentTask}
               keywordRows={keywordRows}
               profileSourceRows={profileSourceRows}
@@ -856,8 +835,6 @@ export function AiWorkerClient() {
               approving={approving}
               selectedLeadId={selectedLeadId}
               onSelectLead={setSelectedLeadId}
-              onCommandChange={setCommand}
-              onSendCommand={sendCommand}
               onOpenMail={() => void approveSelectedLead()}
               onOpenCrm={openCrmPreview}
               onBack={backToLanding}
@@ -2170,7 +2147,6 @@ type ConversationProps = {
   prompt: string;
   status: string;
   error: string;
-  command: string;
   currentTask: LeadTask | null;
   keywordRows: KeywordRow[];
   profileSourceRows: ProfileSourceRow[];
@@ -2186,8 +2162,6 @@ type ConversationProps = {
   approving: boolean;
   selectedLeadId: string | null;
   onSelectLead: (leadId: string) => void;
-  onCommandChange: (value: string) => void;
-  onSendCommand: () => void;
   onOpenMail: () => void;
   onOpenCrm: () => void;
   onBack: () => void;
@@ -2197,7 +2171,6 @@ function AiWorkerConversation({
   prompt,
   status,
   error,
-  command,
   currentTask,
   keywordRows,
   profileSourceRows,
@@ -2213,8 +2186,6 @@ function AiWorkerConversation({
   approving,
   selectedLeadId,
   onSelectLead,
-  onCommandChange,
-  onSendCommand,
   onOpenMail,
   onOpenCrm,
   onBack
@@ -2716,42 +2687,6 @@ function AiWorkerConversation({
             邮件发送前仍会打开确认弹窗；确认后客户可同步进入 CRM，并按 3 天后跟进的节奏继续推进。
           </p>
         </section>
-      </div>
-
-      <div className="projectComposer">
-        <label className="srOnly" htmlFor="project-command">
-          继续输入任务
-        </label>
-        <textarea
-          aria-label="继续输入任务"
-          id="project-command"
-          name="command"
-          placeholder="请输入内容... 例如：重新执行搜索 / 打开邮件确认弹窗"
-          value={command}
-          onChange={(event) => onCommandChange(event.target.value)}
-        />
-        <div className="composerBottom">
-          <label className="srOnly" htmlFor="project-hosting-mode">
-            托管模式
-          </label>
-          <select
-            aria-label="托管模式"
-            defaultValue="semi"
-            id="project-hosting-mode"
-            name="hostingMode"
-          >
-            <option value="semi">半托管</option>
-            <option value="full">全托管</option>
-          </select>
-          <button
-            className="sendCircle"
-            type="button"
-            onClick={onSendCommand}
-            disabled={running || command.trim().length === 0}
-          >
-            ↑
-          </button>
-        </div>
       </div>
     </>
   );

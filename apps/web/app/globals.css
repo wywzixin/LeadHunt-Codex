@@ -787,11 +787,11 @@ body:has(.aiProjectApp) {
 }
 
 .projectWorkspace:has(.aiConversationBar) {
-  grid-template-rows: 44px minmax(0, 1fr) 120px;
-}
-
-.projectWorkspace:has(.chatScroll):not(:has(.aiConversationBar)) {
-  grid-template-rows: minmax(0, 1fr) 120px;
+  /* 2026-05 LeadHunt 2.0: the trailing 120px row used to host the
+     bottom AI command input. The composer was removed alongside
+     the workbench / pool footers; the chat area now claims the full
+     remaining height and scrolls internally. */
+  grid-template-rows: 44px minmax(0, 1fr);
 }
 
 .aiConversationBar {
@@ -1921,7 +1921,6 @@ body:has(.aiProjectApp) {
 .primaryBtn:disabled,
 .tableSendBtn:disabled,
 .leadAction:disabled,
-.sendCircle:disabled,
 .aiLandingSend:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -2086,65 +2085,6 @@ body:has(.aiProjectApp) {
   color: var(--body);
   font-size: 14px;
   line-height: 1.8;
-}
-
-.projectComposer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 124px;
-  gap: 12px;
-  align-items: stretch;
-  border-top: 1px solid var(--border);
-  background: #fff;
-  padding: 16px 24px 18px;
-}
-
-.projectComposer textarea {
-  min-width: 0;
-  min-height: 74px;
-  resize: none;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: #fff;
-  color: var(--title);
-  font-size: 14px;
-  line-height: 1.7;
-  outline: none;
-  padding: 14px 16px;
-}
-
-.projectComposer textarea:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.12);
-}
-
-.composerBottom {
-  display: grid;
-  grid-template-rows: 38px 1fr;
-  gap: 10px;
-}
-
-.composerBottom select {
-  width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: #fff;
-  color: var(--body);
-  padding: 0 10px;
-}
-
-.sendCircle {
-  display: grid;
-  width: 48px;
-  height: 48px;
-  place-items: center;
-  justify-self: end;
-  align-self: end;
-  border: 0;
-  border-radius: 50%;
-  background: var(--primary);
-  color: #fff;
-  font-size: 22px;
-  font-weight: 800;
 }
 
 .crmDataBackdrop {
