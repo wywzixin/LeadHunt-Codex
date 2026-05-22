@@ -468,14 +468,15 @@ export class LeadQualificationService {
       );
     }
 
-    if (targetCountryMismatch) {
-      // Country mismatch is now a soft signal, not a score floor.
-      // We keep the candidate in the running ("opening a new market")
-      // and only let downstream scoring decide.
-      risks.push(
-        "Verified candidate country differs from selected target markets; treated as new-market exploration"
-      );
-    }
+    // 2026-05 Stage 2 follow-up: removed the legacy duplicate
+    // "Verified candidate country differs from selected target markets;
+    // treated as new-market exploration" risk push. The country mismatch
+    // branch above already emits the right risk for both paths:
+    //   - hard reject: "Verified candidate country is outside the selected target markets"
+    //   - soft mismatch: "Official country evidence does not match the selected target markets"
+    // Re-pushing here would either duplicate the soft message or
+    // contradict the hard-reject decision (claiming the row is "kept
+    // as new-market exploration" while status === "rejected").
 
     // targetCountryUnverified no longer reduces the score. The 2026-05
     // policy is "country unconfirmed → still go to review". Old code
