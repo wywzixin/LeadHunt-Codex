@@ -207,6 +207,12 @@ export class LeadQualificationService {
     const risks: string[] = [];
     let score = 0;
     let forcedStatus: IcpScoreDraft["status"] | null = null;
+    // 2026-05 Stage 2 follow-up: when set, the candidate is a
+    // verified-off-target hard reject; the final score is capped
+    // BELOW the main-pool threshold AFTER any later +score steps
+    // (contactScore, buyer-role floor) so the row can't be rescued
+    // back into review/qualified.
+    let verifiedOffTargetCountryReject = false;
     const pageType = classifyCandidatePage(candidate, criteria);
     const pageQuality = assessPageQuality(candidate, criteria, pageType);
     const evidenceClassification = classifyEvidenceLead(candidate, criteria, pageType);
@@ -316,15 +322,37 @@ export class LeadQualificationService {
         );
       }
     } else if (targetCountryMismatch) {
-      // 2026-05: country mismatch is a soft signal. We deduct 20 but
-      // do NOT hard-cap the score, so candidates with weak country
-      // evidence (e.g. country=null from missing contact-page probe)
-      // can still pass through if they have strong product+role
-      // signals. The earlier "hard cap at 49" was too aggressive — it
-      // killed 80% of legitimate candidates whose country was simply
-      // not yet verified.
-      score -= 20;
-      risks.push("Official country evidence does not match the selected target markets");
+      // 2026-05 Stage 2 follow-up: hard reject when the candidate's
+      // country is verified (high/medium confidence, no conflict) AND
+      // proven to be outside the selected target markets. Earlier
+      // versions kept these as "new-market exploration" leads with
+      // only -20 score penalty, but the buyer-role floor below would
+      // routinely rescue US/UK/FR sellers (HCT, MongoDB, Cisco, etc.)
+      // back into the main pool of a Germany-targeted task. Verified
+      // off-target = settled fact, not a soft hint, so we drain the
+      // score AND force the status, ensuring buyer-role floor cannot
+      // override (it explicitly skips when forcedStatus === "rejected").
+      //
+      // Lower-confidence cases (low / unknown / countryConflict) still
+      // fall through to the soft-signal branches below, so candidates
+      // with truly missing / ambiguous country evidence keep their
+      // chance to surface for human review.
+      const verifiedOffTargetCountry =
+        targetCountryVerified &&
+        !countryValidation.countryConflict;
+      if (verifiedOffTargetCountry) {
+        verifiedOffTargetCountryReject = true;
+        forcedStatus = "rejected";
+        risks.push(
+          "Verified candidate country is outside the selected target markets"
+        );
+      } else {
+        // Unverified / conflicting country mismatches stay soft so a
+        // candidate with weak country evidence can still pass through
+        // on strong product+role signals.
+        score -= 20;
+        risks.push("Official country evidence does not match the selected target markets");
+      }
     } else if (!hasTargetMarketConstraint && hasAny(text, criteria.targetRegions)) {
       score += 10;
       reasons.push("Mentions target market");
@@ -547,6 +575,14 @@ export class LeadQualificationService {
       }
     }
     // ---- end customer-role floor ----
+
+    // 2026-05 Stage 2 follow-up: verified-off-target candidates must
+    // never come back above the main-pool threshold even after
+    // contactScore + buyer-role floor have run. Cap right before
+    // finalScore so it survives every later additive bump.
+    if (verifiedOffTargetCountryReject) {
+      score = Math.min(score, 39);
+    }
 
     const finalScore = clamp(Math.round(score), 0, 100);
     const grade = finalScore >= 75 ? "high" : finalScore >= 50 ? "medium" : "low";

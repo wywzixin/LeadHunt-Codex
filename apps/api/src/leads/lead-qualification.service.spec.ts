@@ -744,13 +744,14 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps verified-country candidates from outside the target list as new-market leads", async () => {
-    // 2026-05 product policy: a verified country outside the selected
-    // target markets is no longer a hard reject. The user explicitly
-    // said "validation fails �?just let it through, more customers is
-    // fine, treat it as opening a new market." We assert both rows
-    // come through and Berlin lands at review-or-better with a
-    // soft-mismatch risk note.
+  it("hard-rejects verified-country candidates from outside the target list (no new-market exploration)", async () => {
+    // 2026-05 Stage 2 follow-up: a verified country (high/medium
+    // confidence, no conflict) outside the selected target markets
+    // is now a hard reject. Earlier policy kept these as soft
+    // "new-market exploration" leads, but the buyer-role floor would
+    // routinely rescue them back into the main pool — a Germany task
+    // would surface US/UK/FR sellers for outreach, which the user
+    // never asked for. Verified off-target = settled fact, not hint.
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -796,21 +797,22 @@ describe("LeadQualificationService", () => {
     expect(berlinCall?.[0].data.country).toBe("GERMANY");
     expect(berlinCall?.[0].data.queryCountry).toBe("POLAND");
     expect(berlinCall?.[0].data.countryConflict).toBe(false);
-    expect(["review", "qualified"]).toContain(berlinCall?.[0].data.status);
+    expect(berlinCall?.[0].data.status).toBe("rejected");
+    expect(berlinCall?.[0].data.icpScore.create.score).toBeLessThanOrEqual(39);
     expect(berlinCall?.[0].data.icpScore.create.reasons.risks).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("new-market exploration")
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
       ])
     );
   });
 
-  it("keeps off-target verified countries as new-market leads instead of rejecting them", async () => {
-    // 2026-05: candidate verified outside target markets is no longer
-    // a hard reject. We let it through; the user accepted opening new
-    // markets when validation differs from the query country. The
-    // status here will be review or qualified depending on score; the
-    // important assertion is that we record the country mismatch in
-    // risks rather than dropping the row.
+  it("hard-rejects verified off-target countries (e.g. Kenya target, US-verified Tempest)", async () => {
+    // 2026-05 Stage 2 follow-up: previously this test asserted the
+    // candidate landed at review/qualified with a soft "new-market
+    // exploration" risk. Policy reversed: verified off-target is a
+    // hard reject so the user's selected target markets stay clean.
+    // We still keep the row + record the mismatch in risks so the
+    // user can audit later.
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -844,10 +846,11 @@ describe("LeadQualificationService", () => {
     expect(tempestCall.country).toBe("UNITED STATES");
     expect(tempestCall.inferredCountry).toBe("UNITED STATES");
     expect(tempestCall.countryConflict).toBe(false);
-    expect(["review", "qualified"]).toContain(tempestCall.status);
+    expect(tempestCall.status).toBe("rejected");
+    expect(tempestCall.icpScore.create.score).toBeLessThanOrEqual(39);
     expect(tempestCall.icpScore.create.reasons.risks).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("new-market exploration")
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
       ])
     );
   });
@@ -1023,14 +1026,227 @@ describe("LeadQualificationService", () => {
 
     expect(uaeScore.status).not.toBe("rejected");
     expect(southAfricaScore.status).not.toBe("rejected");
-    // 2026-05: US (outside the macro region) is now allowed through as
-    // a soft new-market lead, not hard-rejected. The US fixture above
-    // is a real DAS integrator with a verified phone, so it lands in
-    // "review" with a new-market-exploration risk note.
-    expect(usScore.status).not.toBe("rejected");
+    // 2026-05 Stage 2 follow-up: US (verified outside the macro region
+    // Middle East/Africa) is now hard-rejected. Macro target regions
+    // expand member countries (UAE, Saudi, South Africa, etc.) but
+    // anything outside the expanded set + verified high/medium is a
+    // settled off-target.
+    expect(usScore.status).toBe("rejected");
     expect(usScore.risks).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("new-market exploration")
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
+      ])
+    );
+  });
+
+  // 2026-05 Stage 2 follow-up: verified-off-target hard reject must
+  // only fire when (a) the country is verified high/medium, (b) there
+  // is no country conflict, and (c) the country is outside the target
+  // markets. The next four tests pin down those guardrails so the
+  // policy doesn't regress into killing soft / ambiguous candidates.
+
+  it("does NOT hard-reject off-target candidates when country confidence is low", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Mystery DAS Integrator",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        // Low confidence — phone area code only, no address evidence.
+        countryConfidence: "low",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "UNITED STATES",
+            value: "+1 555 1234567",
+            sourceUrl: "https://example.com",
+            confidence: "low"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Germany"] }
+    );
+
+    // Soft mismatch only — score gets the legacy -20 nudge but the
+    // candidate still has a chance to surface for human review.
+    expect(score.status).not.toBe("rejected");
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Official country evidence does not match the selected target markets")
+      ])
+    );
+  });
+
+  it("does NOT hard-reject off-target candidates when country confidence is unknown", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Mystery DAS Integrator",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "unknown",
+        countryConflict: false,
+        countryEvidence: [],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Germany"] }
+    );
+
+    // Unknown confidence falls through to the targetCountryUnverified
+    // branch (risk note, no -20). Candidate keeps its review chance.
+    expect(score.status).not.toBe("rejected");
+  });
+
+  it("does NOT hard-reject off-target candidates when country conflict is true", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Multi-country Integrator",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "medium",
+        countryConflict: true,
+        countryConflictCountries: ["UNITED STATES", "GERMANY"],
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "UNITED STATES",
+            value: "+1 555 1234567",
+            sourceUrl: "https://example.com",
+            confidence: "medium"
+          },
+          {
+            type: "phone",
+            country: "GERMANY",
+            value: "+49 30 1234567",
+            sourceUrl: "https://example.com",
+            confidence: "medium"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Germany"] }
+    );
+
+    // Country conflict means evidence points to two different
+    // countries — that's an ambiguity signal, not a settled
+    // off-target. The legacy conflict-risk path still fires, but we
+    // don't hard-reject.
+    expect(score.status).not.toBe("rejected");
+  });
+
+  it("does NOT hard-reject member-country candidates of a macro target (Middle East + Qatar)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Doha Telecom Maintenance",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "QATAR",
+        inferredCountry: "QATAR",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "QATAR",
+            value: "+974 4 123 4567",
+            sourceUrl: "https://example.com",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Middle East"] }
+    );
+
+    // Qatar is a member country of the "Middle East" macro region, so
+    // matchesTargetRegion must accept it; verified-off-target hard
+    // reject must NOT fire.
+    expect(score.status).not.toBe("rejected");
+  });
+
+  it("hard-rejects medium-confidence verified off-target countries (Germany target + US medium)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        // Strong buyer-role + product signals so the legacy floor
+        // would normally rescue this row to score 55-63. The hard
+        // reject must override regardless.
+        companyName: "US DAS Integrator",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "medium",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "UNITED STATES",
+            value: "+1 630 209 8300",
+            sourceUrl: "https://example.com",
+            confidence: "medium"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Germany"] }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
       ])
     );
   });
