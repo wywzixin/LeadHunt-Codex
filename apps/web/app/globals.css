@@ -11446,12 +11446,18 @@ button.primary {
   font-size: 12px;
 }
 
-/* ----- Progress bar + inline label on the right ----- */
+/* ----- Progress bar + inline label on the right -----
+   Per the design, the slider isn't full width — it spans roughly the
+   first 4/5 of the run card (up to the "ICP 评分" pill below). The
+   inline "N / M query 已执行" sits at the end of that band. */
 .aiSearchRunProgressRow {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
+  /* Cap the row width so it doesn't run all the way to the right
+     edge of the run card. 4/5 of 5 step pills ≈ 80% of the row. */
+  max-width: 80%;
 }
 
 .aiSearchRunProgressBar {
@@ -11486,6 +11492,8 @@ button.primary {
   font-variant-numeric: tabular-nums;
 }
 
+/* Current query gray box — caps at ~3/5 of the run card so it ends
+   roughly under the "清洗候选" pill, matching the design. */
 .aiSearchRunCurrent {
   display: flex;
   align-items: center;
@@ -11496,6 +11504,7 @@ button.primary {
   border: 1px solid var(--border);
   border-radius: 8px;
   min-width: 0;
+  max-width: 60%;
 }
 
 .aiSearchRunCurrentLabel {
