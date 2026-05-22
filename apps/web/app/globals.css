@@ -10043,8 +10043,10 @@ button.primary {
   /* 2026-05 LeadHunt 2.0: lives in the 1fr row of the workbench grid.
      The section container takes the remaining vertical space, but
      content stays top-aligned so the cards keep a natural height
-     instead of being stretched to ~280px. */
+     instead of being stretched to ~280px. margin-top adds a touch of
+     air between the search card and the section heading. */
   min-height: 0;
+  margin-top: 4px;
   display: flex;
   flex-direction: column;
 }
@@ -10158,8 +10160,10 @@ button.primary {
 .aiWorkbenchPoolFoot {
   display: flex;
   gap: 8px;
+  /* 2026-05 LeadHunt 2.0: padding-top gives the foot a bit of breathing
+     room so the button doesn't read as "sunk to the bottom" of the card. */
   margin-top: auto;
-  padding-top: 6px;
+  padding-top: 16px;
 }
 
 .aiWorkbenchPoolPrimary {
