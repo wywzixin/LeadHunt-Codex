@@ -4887,110 +4887,193 @@ const defaultRiskTerms = [
 // independently; a candidate can only trip ONE bucket per scoring
 // pass.
 //
+// 2026-05 Stage 2 follow-up (revised): each bucket has STRONG and
+// WEAK terms.
+//
+// STRONG = unambiguous industry self-identification, e.g.
+//   "private bank" / "investment bank" / "wealth management firm"
+//   / "aesthetic clinic" / "developer database platform". These
+//   are phrases real off-industry companies say about themselves.
+//
+// WEAK = single nouns that legitimate target buyers commonly print
+// in served-industries menus, e.g. "bank", "banking", "healthcare",
+// "hospital", "retail". A telecom system integrator's homepage
+// often lists "Banking, Healthcare, Retail, Government" as the
+// industries it serves — those should NOT count as the candidate
+// being a bank/hospital/retailer themselves.
+//
+// Detection rule: fire only when the candidate trips
+//   (a) at least one STRONG hit AND total ≥ 2 hits, OR
+//   (b) at least 2 STRONG hits.
+//
+// Two WEAK hits alone (e.g. "Banking" + "Healthcare" in a nav menu)
+// no longer fire. A real bank like "Hamburg Commercial Bank" still
+// fires because the body text contains "private banking", "asset
+// management", "investment banking" — multiple STRONG phrases.
+//
 // Self-guard: when the user's own product/customer keywords contain
-// any token from a bucket (e.g. user asks for "SaaS database
-// distributor" → SaaS bucket has "database"/"saas"/"cloud platform"),
-// that bucket is skipped entirely so we don't reject candidates the
-// user actually wants.
-const offIndustryBuckets: Record<string, string[]> = {
-  medical: [
-    "medical",
-    "clinical",
-    "clinic",
-    "hospital",
-    "pharma",
-    "pharmaceutical",
-    "biotech",
-    "biocartis",
-    "diagnostic",
-    "surgery",
-    "surgical",
-    "dental",
-    "dentist",
-    "cosmetic",
-    "aesthetic",
-    "aesthetix",
-    "skincare",
-    "beauty",
-    "spa",
-    "wellness",
-    "healthcare",
-    "health care"
-  ],
-  software_saas: [
-    "saas",
-    "database",
-    "cloud platform",
-    "software platform",
-    "developer platform",
-    "devops",
-    "crm",
-    "erp software",
-    "analytics platform",
-    "data platform",
-    "data lake",
-    "data warehouse",
-    "managed cloud",
-    "kubernetes",
-    "cybersecurity software",
-    "antivirus",
-    "code repository",
-    "git platform",
-    "no-code platform",
-    "low-code platform"
-  ],
-  consumer_retail: [
-    "consumer electronics",
-    "mobile phone retail",
-    "online shopping",
-    "ecommerce platform",
-    "e-commerce platform",
-    "retail store",
-    "grocery",
-    "fashion",
-    "apparel",
-    "clothing brand",
-    "footwear",
-    "toys",
-    "household goods",
-    "kitchenware"
-  ],
-  finance: [
-    "bank",
-    "banking",
-    "insurance",
-    "fintech",
-    "wealth management",
-    "asset management",
-    "loans",
-    "credit card",
-    "stock trading",
-    "investment fund",
-    "private equity"
-  ],
-  food_hospitality: [
-    "restaurant",
-    "cafe",
-    "catering",
-    "hotel chain",
-    "hospitality",
-    "travel agency",
-    "tourism",
-    "menu",
-    "food service",
-    "kitchen equipment"
-  ],
-  education: [
-    "university",
-    "college",
-    "school",
-    "academy",
-    "kindergarten",
-    "tutoring",
-    "online course",
-    "e-learning",
-    "mooc"
-  ]
+// any token from a bucket's STRONG list, that bucket is skipped
+// entirely. (Weak terms are too generic for self-guard; using them
+// would disable the medical bucket for any task that mentions
+// "healthcare verticals" in its product keywords.)
+const offIndustryBuckets: Record<string, { strong: string[]; weak: string[] }> = {
+  medical: {
+    strong: [
+      "medical clinic",
+      "medical center",
+      "aesthetic clinic",
+      "aesthetic medical",
+      "aesthetix",
+      "dental clinic",
+      "dental practice",
+      "dentist",
+      "cosmetic clinic",
+      "skincare",
+      "beauty clinic",
+      "beauty salon",
+      "pharmaceutical company",
+      "pharma manufacturer",
+      "biotech firm",
+      "biocartis",
+      "molecular diagnostic",
+      "surgical center",
+      "surgery center",
+      "wellness center",
+      "spa resort",
+      "health clinic"
+    ],
+    // Weak terms: single-word industry mentions that nav menus and
+    // generic copy commonly use without meaning the company itself
+    // is a medical org.
+    weak: [
+      "medical",
+      "clinical",
+      "clinic",
+      "hospital",
+      "pharma",
+      "pharmaceutical",
+      "biotech",
+      "diagnostic",
+      "surgery",
+      "surgical",
+      "dental",
+      "cosmetic",
+      "aesthetic",
+      "beauty",
+      "spa",
+      "wellness",
+      "healthcare",
+      "health care"
+    ]
+  },
+  software_saas: {
+    strong: [
+      "saas platform",
+      "developer database",
+      "cloud database",
+      "developer platform",
+      "no-code platform",
+      "low-code platform",
+      "kubernetes platform",
+      "managed cloud platform",
+      "data lake platform",
+      "data warehouse platform",
+      "code repository",
+      "git platform",
+      "antivirus software",
+      "cybersecurity software",
+      "crm software",
+      "erp software"
+    ],
+    weak: [
+      "saas",
+      "database",
+      "cloud platform",
+      "software platform",
+      "devops",
+      "crm",
+      "analytics platform",
+      "data platform",
+      "data lake",
+      "data warehouse",
+      "managed cloud",
+      "kubernetes"
+    ]
+  },
+  consumer_retail: {
+    strong: [
+      "consumer electronics",
+      "mobile phone retail",
+      "online shopping",
+      "ecommerce platform",
+      "e-commerce platform",
+      "fashion brand",
+      "clothing brand",
+      "footwear brand",
+      "grocery chain"
+    ],
+    weak: [
+      "retail store",
+      "grocery",
+      "fashion",
+      "apparel",
+      "footwear",
+      "toys",
+      "household goods",
+      "kitchenware"
+    ]
+  },
+  finance: {
+    // Strong = unambiguous "we are a financial firm" phrases. A real
+    // bank's homepage will print "private banking", "investment
+    // banking", "wealth management" etc. multiple times in body
+    // copy, easily clearing the threshold. A telecom integrator's
+    // industries menu listing "Banking" alone will not.
+    strong: [
+      "private bank",
+      "investment bank",
+      "commercial bank",
+      "private banking",
+      "investment banking",
+      "retail banking",
+      "wealth management",
+      "asset management",
+      "fintech",
+      "credit card issuer",
+      "stock trading",
+      "investment fund",
+      "private equity",
+      "hedge fund",
+      "insurance broker",
+      "insurance company"
+    ],
+    weak: ["bank", "banking", "insurance", "loans"]
+  },
+  food_hospitality: {
+    strong: [
+      "restaurant",
+      "cafe",
+      "catering company",
+      "hotel chain",
+      "travel agency",
+      "tourism agency",
+      "food service",
+      "kitchen equipment"
+    ],
+    weak: ["hospitality", "tourism", "menu"]
+  },
+  education: {
+    strong: [
+      "university",
+      "college",
+      "kindergarten",
+      "tutoring center",
+      "online course",
+      "e-learning platform",
+      "mooc"
+    ],
+    weak: ["school", "academy", "tutoring"]
+  }
 };
 
 function detectOffIndustryBucket(
@@ -5014,32 +5097,46 @@ function detectOffIndustryBucket(
   // shopping in. Example: a user looking for "MongoDB resellers"
   // would have "mongodb" or "database" in productKeywords; the
   // software_saas bucket is then disabled for that scoring pass.
+  // We only check overlap against the STRONG list; weak terms are
+  // too generic to drive self-guard (they'd disable medical for any
+  // task that incidentally mentions healthcare as a vertical).
   const userKeywords = [
     ...context.productKeywords,
     ...context.customerTypeKeywords
   ]
     .map((term) => term.toLowerCase())
     .filter(Boolean);
-  for (const [bucketName, bucketTerms] of Object.entries(offIndustryBuckets)) {
-    const userOverlapsBucket = bucketTerms.some((bucketTerm) =>
+  for (const [bucketName, bucket] of Object.entries(offIndustryBuckets)) {
+    const userOverlapsBucket = bucket.strong.some((bucketTerm) =>
       userKeywords.some(
         (userTerm) => userTerm.includes(bucketTerm) || bucketTerm.includes(userTerm)
       )
     );
     if (userOverlapsBucket) {
-      // User is hunting in this bucket; don't reject candidates here.
       continue;
     }
-    let hits = 0;
+    let strongHits = 0;
+    let weakHits = 0;
     const seen = new Set<string>();
-    for (const bucketTerm of bucketTerms) {
-      if (lowerText.includes(bucketTerm) && !seen.has(bucketTerm)) {
-        seen.add(bucketTerm);
-        hits += 1;
-        if (hits >= 2) {
-          return bucketName;
-        }
+    for (const term of bucket.strong) {
+      if (lowerText.includes(term) && !seen.has(term)) {
+        seen.add(term);
+        strongHits += 1;
       }
+    }
+    for (const term of bucket.weak) {
+      if (lowerText.includes(term) && !seen.has(term)) {
+        seen.add(term);
+        weakHits += 1;
+      }
+    }
+    // Fire when:
+    //   (a) ≥1 strong AND total ≥2 (real industry phrasing plus any
+    //       additional signal)
+    //   (b) ≥2 strong (multiple unambiguous phrases regardless of
+    //       weak signal)
+    if (strongHits >= 2 || (strongHits >= 1 && strongHits + weakHits >= 2)) {
+      return bucketName;
     }
   }
   return null;

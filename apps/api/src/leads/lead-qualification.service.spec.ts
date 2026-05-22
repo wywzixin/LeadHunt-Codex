@@ -3275,6 +3275,208 @@ describe("LeadQualificationService", () => {
     expect(score.status).not.toBe("rejected");
   });
 
+  // 2026-05 P0 follow-up to off-industry hard reject. The first
+  // pass used flat `text.includes(term)` checks, so single-word
+  // bucket terms like `bank`/`banking`/`healthcare` could hit on a
+  // telecom integrator's "industries we serve" nav menu (Kuwait
+  // Telecom + Amanco SA in real GCC tasks). The fix splits each
+  // bucket into STRONG (unambiguous self-identification phrases like
+  // "private bank", "aesthetic medical", "developer database") and
+  // WEAK (single nouns that nav menus use). Detection now requires
+  // ≥1 strong AND total ≥2 hits, OR ≥2 strong hits. Two weak hits
+  // alone never fire.
+
+  it("does NOT off-industry-reject a telecom system integrator that lists Banking/Healthcare in its served-industries menu (Kuwait Telecom scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Kuwait Telecom",
+        website: "https://kuwait-telecom.example.com",
+        sourceUrl: "https://kuwait-telecom.example.com/services",
+        country: "KUWAIT",
+        inferredCountry: "KUWAIT",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+96522123456",
+            country: "KUWAIT",
+            sourceUrl: "https://kuwait-telecom.example.com/contact",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@kuwait-telecom.example.com",
+            sourceUrl: "https://kuwait-telecom.example.com/contact"
+          },
+          {
+            type: "phone" as const,
+            value: "+96522123456",
+            sourceUrl: "https://kuwait-telecom.example.com/contact"
+          }
+        ],
+        // The body says "we are a telecom services provider"; the
+        // header lists served verticals "Telecom Banking Retail
+        // Healthcare". Under the old flat-includes rule the words
+        // banking + healthcare counted as 2 hits and the candidate
+        // was rejected. Under the new strong/weak split they are
+        // both WEAK only — no STRONG finance/medical phrase appears
+        // — so the bucket never fires.
+        summary:
+          "Kuwait Telecom is a Kuwait-based telecom services provider and system integrator delivering IP networks, voice termination services, and managed telecom solutions for governments, enterprises, and operators. Industries served: Telecom, Banking, Retail, Media, Healthcare, Security."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Kuwait", "UAE", "Saudi Arabia"],
+        // Note: no overlap with finance/medical bucket strong terms,
+        // so neither bucket is self-guarded — the win must come from
+        // the strong/weak split alone.
+        productKeywords: ["RRU", "BBU", "telecom equipment", "5G"],
+        customerTypeKeywords: ["operator", "system integrator"]
+      }
+    );
+
+    // The off-industry rule must NOT have fired; that's the only
+    // thing this test pins. The candidate may still land in any of
+    // qualified/review depending on other signals.
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("does NOT off-industry-reject an HCIS-approved security/telecom integrator whose markets menu lists Banking/Healthcare/Government (Amanco SA scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Amanco",
+        website: "https://amanco.example.com",
+        sourceUrl: "https://amanco.example.com/about",
+        country: "SAUDI ARABIA",
+        inferredCountry: "SAUDI ARABIA",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+966114736100",
+            country: "SAUDI ARABIA",
+            sourceUrl: "https://amanco.example.com/contact",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@amanco.example.com",
+            sourceUrl: "https://amanco.example.com/contact"
+          },
+          {
+            type: "phone" as const,
+            value: "+966114736100",
+            sourceUrl: "https://amanco.example.com/contact"
+          }
+        ],
+        summary:
+          "Amanco is a Saudi Arabia HCIS Approved Security System Integrator and telecom solutions supplier. We provide complete telecommunication and security solutions including PAGA, mass notification, fire alarm, and industrial communication systems for industrial buyers. Our Markets: Oil & Gas, Petrochemical, Transportation, Government, Banking, Healthcare, Defence, Education."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia", "UAE", "Qatar"],
+        productKeywords: ["telecom equipment", "fire alarm", "PAGA"],
+        customerTypeKeywords: ["system integrator", "industrial buyer"]
+      }
+    );
+
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("STILL hard-rejects a real bank whose own copy contains multiple strong finance phrases (Hamburg Commercial Bank scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Hamburg Commercial Bank",
+        website: "https://hcob-bank.example.com",
+        sourceUrl: "https://hcob-bank.example.com/business-areas/corporates",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@hcob-bank.example.com",
+            sourceUrl: "https://hcob-bank.example.com/contact"
+          }
+        ],
+        // A genuine commercial bank's own page. Multiple STRONG
+        // finance phrases ("commercial bank", "investment banking",
+        // "wealth management", "asset management") plus the WEAK
+        // "bank"/"banking" mentions easily clear the threshold.
+        summary:
+          "Hamburg Commercial Bank is a leading commercial bank offering investment banking, wealth management, and asset management services to corporates and institutional investors across Germany."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["PLC programmer", "industrial automation", "automation"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("STILL hard-rejects an aesthetic clinic with multiple strong medical phrases (Aesthetix scenario, post-strong/weak refactor)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Aesthetix Beauty Clinic",
+        website: "https://aesthetix.example.com",
+        sourceUrl: "https://aesthetix.example.com/services",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@aesthetix.example.com",
+            sourceUrl: "https://aesthetix.example.com/contact"
+          }
+        ],
+        // Strong: "aesthetic medical", "medical clinic", "skincare",
+        // "dental clinic". Comfortably ≥2 strong, no self-guard.
+        summary:
+          "Aesthetix is an aesthetic medical clinic offering cosmetic skincare treatments and dental clinic services for retail customers."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["PLC programmer", "industrial automation"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
   it("threads productProfileAnalysis.negativeKeywords + customerProfileAnalysis.disqualifiers into the disqualifying-terms penalty", async () => {
     // 2026-05 Stage 2 follow-up first cut (item A): disqualifiers
     // pulled from the persisted profile analyses. We assert via
