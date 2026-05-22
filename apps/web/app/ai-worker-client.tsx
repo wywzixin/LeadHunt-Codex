@@ -9,27 +9,21 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Circle,
   Clock,
   Database,
   Download,
   ExternalLink,
   Factory,
-  FileText,
   Filter,
   Globe2,
-  GraduationCap,
   Mail,
   MessageCircle,
   MoreHorizontal,
-  Paperclip,
   PhoneCall,
   Play,
   RadioTower,
-  RefreshCw,
   Search,
   Send,
-  Settings,
   Sparkles,
   Star,
   SunMedium,
@@ -50,37 +44,8 @@ import {
 const defaultTaskPrompt =
   "帮我找某类产品相关的买家客户，优先找维护商、工程商、运营商、采购方、项目方和运维客户。";
 
-const landingShortcuts = [
-  { label: "找客户", icon: Target },
-  { label: "营销触达", icon: Mail },
-  { label: "客户管理", icon: UsersRound },
-  { label: "外贸导师", icon: GraduationCap },
-  { label: "我的配置", icon: Settings }
-];
-
-const landingExamples = [
-  {
-    icon: Target,
-    title: "找 B2B 买家客户",
-    description:
-      "读取已保存的产品画像和客户画像，搜索维护商、工程商、运营商、采购方和运维客户，并筛选可做首轮触达的目标。",
-    prompt: "帮我找某类产品的买家客户，优先找维护公司、工程商、运营商、采购方和网络运维客户。"
-  },
-  {
-    icon: UsersRound,
-    title: "按客户画像找同类客户",
-    description:
-      "使用已保存的参考客户画像，提炼客户类型、关键词、采购场景与地域特征，用于搜索同类客户。",
-    prompt: "按已保存的客户画像，帮我找同类型买家客户。"
-  },
-  {
-    icon: Mail,
-    title: "生成开发信并同步 CRM",
-    description:
-      "面向高相关客户生成首封英文开发信，确认发送后自动写入 CRM，并设置 3 天后二次跟进提醒。",
-    prompt: "面向高相关客户生成首封英文开发信，确认发送后自动写入 CRM，并设置 3 天后二次跟进提醒。"
-  }
-];
+// landingShortcuts / landingExamples were the legacy AiWorkerLanding
+// catalog. They were removed alongside that component in 2026-05.
 
 const fallbackKeywordRows: KeywordRow[] = [
   {
@@ -454,9 +419,14 @@ export function AiWorkerClient() {
   // landing has been retired (kept in branch history if needed).
   const [view, setView] = useState<ViewState>("workbench");
   const [landingPrompt, setLandingPrompt] = useState("");
-  const [taskSearch, setTaskSearch] = useState("");
+  // 2026-05 LeadHunt 2.0: the legacy AiWorkerLanding had a "search tasks"
+  // input bound to this state and a hosting-mode toggle. Both were retired
+  // along with that screen. The remaining `loadTaskHistory(taskSearch)`
+  // calls always pass an empty filter today; we keep the variable as a
+  // const so callers don't need to change. When the workbench grows a
+  // history filter, restore useState here.
+  const taskSearch = "";
   const [taskPrompt, setTaskPrompt] = useState(defaultTaskPrompt);
-  const [hostingMode, setHostingMode] = useState<"semi" | "full">("semi");
   const [taskHistory, setTaskHistory] = useState<LeadTaskListItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [currentTask, setCurrentTask] = useState<LeadTask | null>(null);
@@ -626,28 +596,6 @@ export function AiWorkerClient() {
   useEffect(() => {
     void loadTaskHistory();
   }, []);
-
-  async function openHistoryTask(taskId: string) {
-    setView("conversation");
-    setStatus("正在恢复任务...");
-    setError("");
-    setMailLead(null);
-    try {
-      const refreshed = await apiRequest<LeadTask>(`/api/lead-tasks/${taskId}`);
-      setCurrentTask(refreshed);
-      const payload = refreshed.inputPayload as { prompt?: string } | null;
-      const restoredPrompt =
-        typeof payload?.prompt === "string" ? payload.prompt : defaultTaskPrompt;
-      setTaskPrompt(restoredPrompt);
-      applyTaskProgress(refreshed);
-      if ((refreshed.leadCandidates?.length ?? 0) > 0) {
-        setSelectedLeadId(buildDisplayLeads(refreshed)[0]?.id ?? null);
-      }
-    } catch (requestError) {
-      setError(errorMessage(requestError));
-      setStatus("恢复任务失败，请检查登录状态。");
-    }
-  }
 
   // 2026-05 LeadHunt 2.0: workbench → pool view. Loads the task's full
   // candidate list and switches into the pool detail page (instead of
@@ -1056,261 +1004,10 @@ export function AiWorkerClient() {
   );
 }
 
-type LandingProps = {
-  prompt: string;
-  onPromptChange: (value: string) => void;
-  onSubmit: () => void;
-  taskSearch: string;
-  onTaskSearchChange: (value: string) => void;
-  submitting: boolean;
-  hostingMode: "semi" | "full";
-  onHostingModeChange: (mode: "semi" | "full") => void;
-  taskHistory: LeadTaskListItem[];
-  historyLoading: boolean;
-  onSelectHistoryTask: (taskId: string) => void;
-  onRefreshHistory: () => void;
-};
-
-function AiWorkerLanding({
-  prompt,
-  onPromptChange,
-  onSubmit,
-  taskSearch,
-  onTaskSearchChange,
-  submitting,
-  hostingMode,
-  onHostingModeChange,
-  taskHistory,
-  historyLoading,
-  onSelectHistoryTask,
-  onRefreshHistory
-}: LandingProps) {
-  const [hostingDialogOpen, setHostingDialogOpen] = useState(false);
-  const [draftHostingMode, setDraftHostingMode] = useState<"semi" | "full">(hostingMode);
-  const filteredHistory = useMemo(() => {
-    const keyword = taskSearch.trim().toLowerCase();
-    if (!keyword) return taskHistory;
-    return taskHistory.filter(
-      (task) =>
-        task.title.toLowerCase().includes(keyword) || task.prompt.toLowerCase().includes(keyword)
-    );
-  }, [taskHistory, taskSearch]);
-  function pickExample(text: string) {
-    onPromptChange(text);
-  }
-
-  function openHostingDialog() {
-    setDraftHostingMode(hostingMode);
-    setHostingDialogOpen(true);
-  }
-
-  function confirmHostingMode() {
-    onHostingModeChange(draftHostingMode);
-    setHostingDialogOpen(false);
-  }
-
-  return (
-    <div className="aiLanding">
-      <aside className="aiLandingTasks" aria-label="历史任务">
-        <div className="aiLandingTaskHead">
-          <button className="aiLandingTaskBtn primary" type="button" onClick={onRefreshHistory}>
-            <span aria-hidden="true">+</span> 新任务
-          </button>
-          <button className="aiLandingTaskBtn" type="button">
-            <Settings size={15} aria-hidden="true" /> 我的配置
-          </button>
-        </div>
-        <label className="aiLandingTaskSearch">
-          <Search size={15} aria-hidden="true" />
-          <input
-            type="search"
-            value={taskSearch}
-            onChange={(event) => onTaskSearchChange(event.target.value)}
-            placeholder="搜索任务"
-            aria-label="搜索历史任务"
-          />
-        </label>
-        <div className="aiLandingTaskTitle">
-          历史任务
-          <span className="aiLandingTaskCount">
-            {historyLoading ? "..." : `${filteredHistory.length}`}
-          </span>
-        </div>
-        {filteredHistory.length === 0 ? (
-          <div className="aiLandingTaskEmpty">
-            <div className="aiLandingTaskEmptyIcon" aria-hidden="true" />
-            <strong>{historyLoading ? "正在读取历史任务..." : "暂无历史任务"}</strong>
-            <span>{historyLoading ? "请稍候" : "创建任务后将在此展示"}</span>
-          </div>
-        ) : (
-          <ul className="aiLandingTaskList" aria-label="历史任务列表">
-            {filteredHistory.map((task) => (
-              <li key={task.id}>
-                <button
-                  type="button"
-                  className="aiLandingTaskItem"
-                  onClick={() => onSelectHistoryTask(task.id)}
-                >
-                  <strong>{task.title || "未命名任务"}</strong>
-                  <small>
-                    {formatHistoryDate(task.createdAt)} · 主客户 {task.leadCount} · 指令{" "}
-                    {task.queryCount}
-                  </small>
-                  <span className={`aiLandingTaskStatus status-${task.status}`}>{task.status}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </aside>
-
-      <section className="aiLandingHero">
-        <div className="aiLandingHeroInner">
-          <h1 className="aiLandingTitle">外贸获客 寻找下一个客户</h1>
-          <p className="aiLandingSubtitle">
-            你的 AI 外贸员 7×24 小时工作，先理解产品与客户画像，再自动搜索潜在客户、判断
-            ICP、生成开发信，并同步 CRM 跟进。
-          </p>
-
-          <div className="aiLandingComposer">
-            <div className="aiLandingComposerHead">分配一个任务，开始对话吧</div>
-            <textarea
-              className="aiLandingComposerInput"
-              value={prompt}
-              onChange={(event) => onPromptChange(event.target.value)}
-              placeholder="例如：帮我找某类产品买家客户，先筛选目标客户，再生成首封开发信"
-              aria-label="分配一个任务"
-            />
-            <div className="aiLandingComposerBottom">
-              <button
-                className="aiLandingHostingPill"
-                type="button"
-                aria-expanded={hostingDialogOpen}
-                aria-haspopup="dialog"
-                onClick={openHostingDialog}
-              >
-                <span className="hostingLabel">当前：</span>
-                <strong>{hostingMode === "semi" ? "半托管" : "全托管"}</strong>
-                <ChevronDown size={14} aria-hidden="true" />
-              </button>
-              <button className="aiLandingAttach" type="button" aria-label="添加附件">
-                <Paperclip size={16} aria-hidden="true" />
-              </button>
-              <span className="aiLandingComposerSpacer" />
-              <button
-                className="aiLandingSend"
-                type="button"
-                aria-label="发送任务"
-                onClick={onSubmit}
-                disabled={submitting || prompt.trim().length === 0}
-              >
-                ↑
-              </button>
-            </div>
-          </div>
-
-          {hostingDialogOpen ? (
-            <div
-              className="hostingModeBackdrop"
-              role="presentation"
-              onClick={() => setHostingDialogOpen(false)}
-            >
-              <section
-                className="hostingModeDialog"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="hosting-mode-title"
-                onClick={(event) => event.stopPropagation()}
-              >
-                <button
-                  className="hostingModeClose"
-                  type="button"
-                  aria-label="关闭托管模式选择"
-                  onClick={() => setHostingDialogOpen(false)}
-                >
-                  <X size={16} aria-hidden="true" />
-                </button>
-                <button
-                  className={
-                    draftHostingMode === "semi" ? "hostingModeOption active" : "hostingModeOption"
-                  }
-                  type="button"
-                  onClick={() => setDraftHostingMode("semi")}
-                >
-                  {draftHostingMode === "semi" ? (
-                    <CheckCircle2 size={20} aria-hidden="true" />
-                  ) : (
-                    <Circle size={20} aria-hidden="true" />
-                  )}
-                  <span className="hostingModeBadge">半</span>
-                  <span className="hostingModeCopy">
-                    <strong id="hosting-mode-title">半托管状态</strong>
-                    <small>AI 执行关键步骤前会征求您的确认</small>
-                  </span>
-                  <em>运行中</em>
-                </button>
-                <button
-                  className={
-                    draftHostingMode === "full" ? "hostingModeOption active" : "hostingModeOption"
-                  }
-                  type="button"
-                  onClick={() => setDraftHostingMode("full")}
-                >
-                  {draftHostingMode === "full" ? (
-                    <CheckCircle2 size={20} aria-hidden="true" />
-                  ) : (
-                    <Circle size={20} aria-hidden="true" />
-                  )}
-                  <span className="hostingModeBadge">全</span>
-                  <span className="hostingModeCopy">
-                    <strong>全托管状态</strong>
-                    <small>满足条件后自动执行任务，适合成熟规则下批量运行</small>
-                  </span>
-                  <em>可切换</em>
-                </button>
-                <button className="hostingModeConfirm" type="button" onClick={confirmHostingMode}>
-                  确定
-                </button>
-              </section>
-            </div>
-          ) : null}
-
-          <div className="aiLandingShortcuts">
-            {landingShortcuts.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button className="aiLandingShortcut" type="button" key={item.label}>
-                  <Icon size={16} aria-hidden="true" />
-                  {item.label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="aiLandingExamples">
-            {landingExamples.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button
-                  className="aiLandingExampleCard"
-                  type="button"
-                  key={item.title}
-                  onClick={() => pickExample(item.prompt)}
-                >
-                  <div className="aiLandingExampleHead">
-                    <Icon size={16} aria-hidden="true" />
-                    <strong>{item.title}</strong>
-                  </div>
-                  <p>{item.description}</p>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </section>
-    </div>
-  );
-}
+// AiWorkerLanding (the legacy v1 landing screen) was removed in 2026-05.
+// AiWorkerClient now defaults to view: "workbench" and renders the new
+// workbench / pool / conversation triad. Anything that pointed at
+// view === "landing" is gone.
 
 // ============================================================================
 // 2026-05 LeadHunt 2.0 — AiWorkerWorkbench
@@ -1366,7 +1063,8 @@ type WorkbenchTodoItem = {
   id: string;
   icon: typeof Database;
   title: string;
-  count: number;
+  /** Numeric count, or "—" when the corresponding API isn't wired yet. */
+  count: number | string;
   description: string;
   cta: string;
   tone: "blue" | "purple" | "orange";
@@ -1383,11 +1081,42 @@ function AiWorkerWorkbench({
   onRefreshHistory
 }: WorkbenchProps) {
   const greeting = useMemo(() => buildGreeting(), []);
-  const trackingPoolCount = Math.min(taskHistory.length, 12);
+  const trackingPoolCount = taskHistory.length;
   const totalLeads = useMemo(
     () => taskHistory.reduce((sum, task) => sum + (task.leadCount ?? 0), 0),
     [taskHistory]
   );
+
+  // Real KPI aggregates derived from the task history we already poll.
+  // The backend doesn't yet expose dedicated counters for "today's new
+  // leads", "pending CRM sync", etc.; we approximate from the timestamps
+  // and the global totals we have today, and explicitly mark any value
+  // we don't have a reliable source for as `—` so the workbench reads
+  // honestly while we wait for richer endpoints.
+  const todayLeadCount = useMemo(() => {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    return taskHistory
+      .filter((task) => {
+        const updated = new Date(task.updatedAt).getTime();
+        return Number.isFinite(updated) && updated >= startOfDay.getTime();
+      })
+      .reduce((sum, task) => sum + (task.leadCount ?? 0), 0);
+  }, [taskHistory]);
+  const yesterdayLeadCount = useMemo(() => {
+    const startOfYesterday = new Date();
+    startOfYesterday.setHours(0, 0, 0, 0);
+    startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+    const startOfToday = new Date(startOfYesterday);
+    startOfToday.setDate(startOfToday.getDate() + 1);
+    return taskHistory
+      .filter((task) => {
+        const updated = new Date(task.updatedAt).getTime();
+        return updated >= startOfYesterday.getTime() && updated < startOfToday.getTime();
+      })
+      .reduce((sum, task) => sum + (task.leadCount ?? 0), 0);
+  }, [taskHistory]);
+  const todayDelta = todayLeadCount - yesterdayLeadCount;
 
   // Reset scroll on mount so the greeting is always visible when the
   // workbench appears (e.g. returning from the pool detail page).
@@ -1396,45 +1125,50 @@ function AiWorkerWorkbench({
     scrollHostRef.current?.scrollTo({ top: 0, behavior: "auto" });
   }, []);
 
-  // KPI cards. Real data sources (when available):
-  //   客户池总数 = taskHistory.reduce(leadCount)
-  //   今日新增 = leads created today (TODO: needs API support)
-  //   待同步 CRM / 邮件待确认 / 需跟进 = aggregates over latest tasks
-  // Until those endpoints exist, fall back to derived placeholder values
-  // so the layout reads naturally.
+  // KPI cards. Real data sources:
+  //   客户池总数        = taskHistory.length (number of pools)
+  //   累计候选客户       = sum(taskHistory.leadCount)
+  //   今日新增          = leads from tasks updated today (approx; needs API support to be exact)
+  //   待同步 CRM        = TODO: needs /api/crm/pending count, marked — until backend ready
+  //   邮件待确认         = TODO: needs /api/outreach/pending count
+  //   需跟进            = TODO: needs follow-up reminder API
+  // Values without a reliable source render as `—` instead of fake numbers.
   const kpis: WorkbenchKpi[] = [
     {
       label: "客户池总数",
-      value: totalLeads || 328,
-      delta: "较上周 +42",
+      value: taskHistory.length,
+      delta: `${totalLeads} 家累计候选`,
       icon: Users,
       tone: "blue"
     },
     {
       label: "今日新增",
-      value: 12,
-      delta: "较昨日 +6",
+      value: todayLeadCount,
+      delta:
+        todayDelta === 0
+          ? "较昨日 持平"
+          : `较昨日 ${todayDelta > 0 ? "+" : ""}${todayDelta}`,
       icon: TrendingUp,
       tone: "green"
     },
     {
       label: "待同步 CRM",
-      value: 24,
-      delta: "较昨日 -2",
+      value: "—",
+      delta: "等待 API 接入",
       icon: Database,
       tone: "indigo"
     },
     {
       label: "邮件待确认",
-      value: 9,
-      delta: "较昨日 +3",
+      value: "—",
+      delta: "等待 API 接入",
       icon: Mail,
       tone: "purple"
     },
     {
       label: "需跟进",
-      value: 6,
-      delta: "较昨日 +1",
+      value: "—",
+      delta: "等待 API 接入",
       icon: Bell,
       tone: "orange"
     }
@@ -1528,7 +1262,12 @@ function AiWorkerWorkbench({
         leadCount: task.leadCount ?? 0,
         weekDelta: 0,
         detail,
-        primaryActionLabel: isActive ? "继续搜索 30 条" : "查看客户池",
+        // 2026-05 LeadHunt 2.0: both primary and secondary buttons open
+        // the pool detail page; the actual "继续搜索 30 条" trigger lives
+        // on the pool detail header (where it calls runTaskSearch).
+        // Keeping the workbench label honest until backend supports a
+        // one-click incremental search from the workbench card.
+        primaryActionLabel: "查看客户池",
         icon: pickIcon(`${task.title ?? ""} ${task.prompt ?? ""}`),
         tone: tones[index] ?? "blue"
       };
@@ -1547,7 +1286,7 @@ function AiWorkerWorkbench({
           leadCount: 328,
           weekDelta: 42,
           detail: "328 家客户 · 本周新增 42 · 第 3 批搜索中",
-          primaryActionLabel: "继续搜索 30 条",
+          primaryActionLabel: "查看客户池",
           icon: RadioTower,
           tone: "blue"
         },
@@ -1559,7 +1298,7 @@ function AiWorkerWorkbench({
           leadCount: 96,
           weekDelta: 0,
           detail: "96 家客户 · 高匹配 18 · 待同步 CRM 7",
-          primaryActionLabel: "继续搜索",
+          primaryActionLabel: "查看客户池",
           icon: Factory,
           tone: "green"
         },
@@ -1571,18 +1310,21 @@ function AiWorkerWorkbench({
           leadCount: 74,
           weekDelta: 11,
           detail: "74 家客户 · 本周新增 11 · 邮件待确认 4",
-          primaryActionLabel: "继续搜索",
+          primaryActionLabel: "查看客户池",
           icon: SunMedium,
           tone: "orange"
         }
       ];
 
+  // Todo cards. The corresponding aggregate APIs aren't shipped yet, so
+  // we render `—` until they exist instead of a hardcoded number that
+  // will look stale forever.
   const todos: WorkbenchTodoItem[] = [
     {
       id: "crm",
       icon: Database,
       title: "加入 CRM",
-      count: 9,
+      count: "—",
       description: "家客户待同步",
       cta: "去处理",
       tone: "blue"
@@ -1591,7 +1333,7 @@ function AiWorkerWorkbench({
       id: "mail",
       icon: Mail,
       title: "邮件确认",
-      count: 3,
+      count: "—",
       description: "封邮件待确认",
       cta: "预览邮件",
       tone: "purple"
@@ -1600,7 +1342,7 @@ function AiWorkerWorkbench({
       id: "followup",
       icon: Bell,
       title: "跟进提醒",
-      count: 6,
+      count: "—",
       description: "家客户需跟进",
       cta: "查看跟进",
       tone: "orange"
@@ -1718,17 +1460,7 @@ function AiWorkerWorkbench({
                     pool.id.startsWith("demo-") ? undefined : onSelectHistoryTask(pool.id)
                   }
                 >
-                  {pool.status === "active" ? <Play size={14} aria-hidden="true" /> : null}
                   {pool.primaryActionLabel}
-                </button>
-                <button
-                  type="button"
-                  className="aiWorkbenchPoolSecondary"
-                  onClick={() =>
-                    pool.id.startsWith("demo-") ? undefined : onSelectHistoryTask(pool.id)
-                  }
-                >
-                  查看客户池
                 </button>
               </footer>
             </article>
@@ -2056,10 +1788,6 @@ function AiWorkerPool({
   // Header chips for target markets. Falls back to a sensible default.
   const countryChips =
     targetMarkets.length > 0 ? targetMarkets.slice(0, 6) : ["UAE", "Saudi Arabia", "Qatar", "Oman"];
-
-  const lastBatchLabel = taskHistoryItem
-    ? formatHistoryDate(taskHistoryItem.updatedAt)
-    : "今日";
 
   // Local UI state (selection, search input). Real bulk actions are
   // wired in a follow-up; for now selection is local-only.
