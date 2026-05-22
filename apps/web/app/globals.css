@@ -11396,9 +11396,48 @@ button.primary {
   min-width: 0;
 }
 
+/* ----- Big "第 N 批正在搜索中..." headline + ETA ----- */
+.aiSearchRunHeadline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.aiSearchRunHeadlineDot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.aiSearchRunHeadlineTitle {
+  color: var(--title);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.aiSearchRunHeadlineEta {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+/* ----- Progress bar + inline label on the right ----- */
+.aiSearchRunProgressRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
 .aiSearchRunProgressBar {
   position: relative;
-  height: 8px;
+  height: 6px;
   border-radius: 999px;
   background: var(--primary-light);
   overflow: hidden;
@@ -11414,15 +11453,16 @@ button.primary {
 .aiSearchRunProgressLabel {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 4px;
   margin: 0;
   color: var(--secondary);
-  font-size: 13px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .aiSearchRunProgressLabel strong {
   color: var(--title);
-  font-size: 18px;
+  font-size: 14px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
@@ -11678,10 +11718,53 @@ button.primary {
 
 .aiSearchRunLogItem {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-columns: 42px 14px minmax(0, 1fr);
+  align-items: start;
   gap: 8px;
   font-size: 12px;
   color: var(--body);
+  position: relative;
+}
+
+/* Vertical timeline line connecting the bullets, plus a circular
+   bullet on each row in the second grid column. Mirrors the design's
+   small green/blue/grey dots beside each log entry. */
+.aiSearchRunLogBullet {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--secondary);
+  border: 2px solid var(--card);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.aiSearchRunLogItem.state-completed .aiSearchRunLogBullet {
+  background: var(--success);
+  box-shadow: 0 0 0 1px var(--success);
+}
+
+.aiSearchRunLogItem.state-running .aiSearchRunLogBullet {
+  background: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+
+.aiSearchRunLogItem.state-failed .aiSearchRunLogBullet {
+  background: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+
+/* Connector line between bullets (from the bullet down to the next). */
+.aiSearchRunLogItem:not(:last-child) .aiSearchRunLogBullet::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  width: 1px;
+  height: 32px;
+  background: var(--border);
+  transform: translateX(-50%);
 }
 
 .aiSearchRunLogTime {

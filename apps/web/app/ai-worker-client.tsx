@@ -2146,6 +2146,15 @@ function AiWorkerConversation({
   // simultaneously.
   const isRunComplete = queryCount > 0 && pendingQueryCount === 0 && !searching && !creating;
   const isRunActive = searching || creating || pendingQueryCount > 0;
+  // Rough ETA: each remaining query typically takes ~15s in the polling
+  // backend. Floor at 1 minute so we don't say "0 minutes" while there
+  // are still queries pending. When everything is done it's hidden.
+  const estimateEtaMinutes = useMemo(() => {
+    if (!isRunActive) return 0;
+    const remaining = pendingQueryCount;
+    const seconds = remaining * 15;
+    return Math.max(1, Math.ceil(seconds / 60));
+  }, [isRunActive, pendingQueryCount]);
   const currentRunningQuery = useMemo(
     () => currentTask?.searchQueries?.find((query) => query.executionStatus === "running") ?? null,
     [currentTask]
@@ -2380,18 +2389,41 @@ function AiWorkerConversation({
         <div className="aiSearchRunBody">
           {/* Left: progress + current query */}
           <div className="aiSearchRunProgress">
-            <div className="aiSearchRunProgressBar" aria-hidden="true">
-              <div
-                className="aiSearchRunProgressFill"
-                style={{
-                  width: `${queryCount ? Math.min(100, Math.round((executedCount / queryCount) * 100)) : 0}%`
-                }}
-              />
+            {/* Big "第 N 批正在搜索中..." headline + ETA, matching the
+                design. The batch number uses the count of completed
+                searchQueries divided by 30 (one batch per the legacy
+                "继续搜索 30 条" affordance), defaulting to 1. */}
+            <div className="aiSearchRunHeadline">
+              <span className="aiSearchRunHeadlineDot" aria-hidden="true">
+                {isRunActive ? <Sparkles size={14} /> : <CheckCircle2 size={14} />}
+              </span>
+              <strong className="aiSearchRunHeadlineTitle">
+                {isRunActive
+                  ? `第 ${Math.max(1, Math.ceil(queryCount / 30))} 批正在搜索中...`
+                  : isRunComplete
+                    ? "本批搜索已完成"
+                    : "等待启动"}
+              </strong>
+              {isRunActive ? (
+                <span className="aiSearchRunHeadlineEta">预计还需 {estimateEtaMinutes} 分钟</span>
+              ) : null}
             </div>
-            <p className="aiSearchRunProgressLabel">
-              <strong>{executedCount}</strong>
-              <span>/ {queryCount || "—"} query 已执行</span>
-            </p>
+
+            {/* Progress bar + inline "N / M query 已执行" label on the right. */}
+            <div className="aiSearchRunProgressRow">
+              <div className="aiSearchRunProgressBar" aria-hidden="true">
+                <div
+                  className="aiSearchRunProgressFill"
+                  style={{
+                    width: `${queryCount ? Math.min(100, Math.round((executedCount / queryCount) * 100)) : 0}%`
+                  }}
+                />
+              </div>
+              <p className="aiSearchRunProgressLabel">
+                <strong>{executedCount}</strong>
+                <span>/ {queryCount || "—"} query 已执行</span>
+              </p>
+            </div>
 
             {currentRunningQuery ? (
               <div className="aiSearchRunCurrent">
@@ -2406,7 +2438,7 @@ function AiWorkerConversation({
             ) : null}
 
             <p className="aiSearchRunStat">
-              本批已沉淀 <strong>{leads.length}</strong> 家客户
+              本批新增 <strong>{leads.length}</strong> 家客户
               {failedQueryCount > 0
                 ? `，${failedQueryCount} 条 query 失败已忽略`
                 : ""}
@@ -2468,6 +2500,7 @@ function AiWorkerConversation({
                   key={`${log.title}-${index}`}
                 >
                   <span className="aiSearchRunLogTime">{formatLogTime(index, Math.min(activityLogs.length, 4))}</span>
+                  <span className="aiSearchRunLogBullet" aria-hidden="true" />
                   <span className="aiSearchRunLogText">
                     <strong>{log.title}</strong>
                     <em>{log.detail}</em>
@@ -2477,6 +2510,7 @@ function AiWorkerConversation({
               {activityLogs.length === 0 ? (
                 <li className="aiSearchRunLogItem state-pending">
                   <span className="aiSearchRunLogTime">--:--</span>
+                  <span className="aiSearchRunLogBullet" aria-hidden="true" />
                   <span className="aiSearchRunLogText">
                     <strong>等待任务调度</strong>
                     <em>{status}</em>
