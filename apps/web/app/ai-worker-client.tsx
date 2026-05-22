@@ -2359,17 +2359,19 @@ function AiWorkerConversation({
         <header className="aiSearchRunHead">
           <div className="aiSearchRunHeadLeft">
             <h2>持续搜索批次</h2>
-            <p>
-              {isRunActive
-                ? `正在执行：已完成 ${executedCount}/${queryCount || "—"} 条 query${
-                    failedQueryCount ? `，失败 ${failedQueryCount} 条` : ""
-                  }`
-                : isRunComplete
-                  ? failedQueryCount > 0
-                    ? `本批已跑完：${executedCount} 条成功，${failedQueryCount} 条失败`
-                    : `本批 ${queryCount} 条 query 已跑完，等待下一轮`
-                  : status}
-            </p>
+            {isRunActive ? (
+              <p>
+                {`正在执行：已完成 ${executedCount}/${queryCount || "—"} 条 query${
+                  failedQueryCount ? `，失败 ${failedQueryCount} 条` : ""
+                }`}
+              </p>
+            ) : isRunComplete && failedQueryCount > 0 ? (
+              <p>
+                {`本批已跑完：${executedCount} 条成功，${failedQueryCount} 条失败`}
+              </p>
+            ) : !isRunComplete ? (
+              <p>{status}</p>
+            ) : null}
           </div>
           <div className="aiSearchRunHeadActions">
             <button
