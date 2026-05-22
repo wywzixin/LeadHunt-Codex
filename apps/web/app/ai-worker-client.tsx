@@ -1469,8 +1469,8 @@ function mapTaskStatusToPool(
 //                     联系方式 / 电话 / 官网 / 来源批次 / CRM状态 / 邮件状态 /
 //                     最近动作 / 操作)
 //   - Pagination
-//   - Pool health hint
-//   - Bottom AI input bar
+//   - Pool health hint (last item; no AI input bar — that was removed
+//     in 2026-05 to keep the page within one viewport).
 //
 // This is a static-first implementation. Real data wiring (filter state,
 // bulk actions to API, pagination state) comes in a follow-up commit.
@@ -1546,6 +1546,7 @@ function AiWorkerPool({
   // KPIs derived from the task. Falls back to demo values when task data
   // hasn't loaded yet so the layout still reads naturally.
   const totalLeads = leads.length || taskHistoryItem?.leadCount || 328;
+  const queryCount = task?.searchQueries?.length ?? 0;
   const highMatch = useMemo(
     () => leads.filter((lead) => lead.score >= 80).length || Math.round(totalLeads * 0.186),
     [leads, totalLeads]
@@ -1583,9 +1584,11 @@ function AiWorkerPool({
 
   const kpis: PoolKpi[] = [
     {
-      label: "客户池总数",
+      label: "本池客户",
       value: totalLeads,
-      delta: "较上周 +42",
+      // 2026-05 LeadHunt 2.0: no honest week-over-week source yet, so
+      // surface batch metadata instead of fake growth deltas.
+      delta: queryCount ? `${queryCount} 条 query` : "首批",
       icon: Users,
       tone: "blue"
     },
@@ -1717,7 +1720,8 @@ function AiWorkerPool({
               ))}
             </div>
             <p className="aiPoolMeta">
-              累计沉淀 {totalLeads} 家客户，来自 4 个搜索批次
+              累计沉淀 {totalLeads} 家客户
+              {queryCount > 0 ? `，本批跑了 ${queryCount} 条 query` : ""}
             </p>
           </div>
           <div className="aiPoolHeaderActions">
@@ -1729,15 +1733,30 @@ function AiWorkerPool({
               <Play size={14} aria-hidden="true" />
               继续搜索 30 条
             </button>
-            <button type="button" className="aiPoolGhostBtn">
+            <button
+              type="button"
+              className="aiPoolGhostBtn"
+              disabled
+              title="导出功能开发中"
+            >
               <Download size={14} aria-hidden="true" />
               导出
             </button>
-            <button type="button" className="aiPoolGhostBtn">
+            <button
+              type="button"
+              className="aiPoolGhostBtn"
+              disabled
+              title="批量加入 CRM 功能开发中"
+            >
               <Database size={14} aria-hidden="true" />
               批量加入 CRM
             </button>
-            <button type="button" className="aiPoolGhostBtn">
+            <button
+              type="button"
+              className="aiPoolGhostBtn"
+              disabled
+              title="批量生成邮件功能开发中"
+            >
               <Mail size={14} aria-hidden="true" />
               批量生成邮件
             </button>

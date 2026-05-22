@@ -10440,10 +10440,20 @@ button.primary {
   transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 
-.aiPoolGhostBtn:hover {
+.aiPoolGhostBtn:hover:not(:disabled) {
   border-color: var(--primary-border);
   color: var(--primary);
   background: var(--primary-light);
+}
+
+.aiPoolGhostBtn:disabled {
+  /* 2026-05 LeadHunt 2.0: 导出 / 批量加入 CRM / 批量生成邮件 are
+     disabled until their backend handlers ship. Keep the affordance
+     visible (so the design reads correctly) but make non-interactivity
+     obvious — the title attribute on the JSX explains why. */
+  opacity: 0.55;
+  cursor: not-allowed;
+  color: var(--secondary);
 }
 
 /* ----- KPI cards ----- */
