@@ -2602,63 +2602,70 @@ function AiWorkerConversation({
         </footer>
       </section>
 
-      {/* 底部紧凑操作栏 — 三张转化卡。健康度行已删除（放底部太抢戏，
-          后续可以挪进表格 footer）。 */}
-      <section className="aiSearchRunBottomBar" aria-label="下一步操作">
-        <article className="aiSearchRunBottomCard tone-blue">
-          <div className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
-            <span className="aiPoolIconText">CRM</span>
-          </div>
-          <div className="aiSearchRunBottomBody">
-            <p className="aiSearchRunBottomTitle">CRM 同步</p>
-            <p className="aiSearchRunBottomMeta">
-              <strong>{Math.max(leads.length - crmSyncedCount, 0)}</strong> 家待同步
-            </p>
-          </div>
-          <button type="button" className="aiSearchRunBottomCta" onClick={onOpenCrm}>
-            预览
-          </button>
-        </article>
+      {/* 下一步转化 — 三张转化卡（按设计图）：色块 icon + 标题 +
+          完整两行描述 + 卡片底部左侧的彩色按钮。 */}
+      <section className="aiSearchRunBottomBar" aria-label="下一步转化">
+        <h2 className="aiSearchRunBottomTitle">下一步转化</h2>
+        <div className="aiSearchRunBottomCards">
+          <article className="aiSearchRunBottomCard tone-blue">
+            <div className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
+              <span className="aiPoolIconText">CRM</span>
+            </div>
+            <div className="aiSearchRunBottomBody">
+              <p className="aiSearchRunBottomCardTitle">CRM 同步</p>
+              <p className="aiSearchRunBottomMeta">
+                <strong>{Math.max(leads.length - crmSyncedCount, 0)}</strong> 家客户待同步，字段已整理，可进入客户库。
+              </p>
+              <button
+                type="button"
+                className="aiSearchRunBottomCta tone-blue"
+                onClick={onOpenCrm}
+              >
+                确认同步
+              </button>
+            </div>
+          </article>
 
-        <article className="aiSearchRunBottomCard tone-purple">
-          <div className="aiPoolIcon aiPoolIconPurple" aria-hidden="true">
-            <Mail size={18} />
-          </div>
-          <div className="aiSearchRunBottomBody">
-            <p className="aiSearchRunBottomTitle">邮件触达</p>
-            <p className="aiSearchRunBottomMeta">
-              <strong>{actionableLeads.length}</strong> 封待确认
-            </p>
-          </div>
-          <button
-            type="button"
-            className="aiSearchRunBottomCta"
-            onClick={onOpenMail}
-            disabled={running || !hasActionableLeads}
-          >
-            预览
-          </button>
-        </article>
+          <article className="aiSearchRunBottomCard tone-green">
+            <div className="aiPoolIcon aiPoolIconGreen" aria-hidden="true">
+              <Mail size={20} />
+            </div>
+            <div className="aiSearchRunBottomBody">
+              <p className="aiSearchRunBottomCardTitle">邮件触达</p>
+              <p className="aiSearchRunBottomMeta">
+                <strong>{actionableLeads.length}</strong> 封邮件待确认，主题：中国 B2B 工厂产品推荐。
+              </p>
+              <button
+                type="button"
+                className="aiSearchRunBottomCta tone-green"
+                onClick={onOpenMail}
+                disabled={running || !hasActionableLeads}
+              >
+                预览邮件
+              </button>
+            </div>
+          </article>
 
-        <article className="aiSearchRunBottomCard tone-orange">
-          <div className="aiPoolIcon aiPoolIconOrange" aria-hidden="true">
-            <Bell size={18} />
-          </div>
-          <div className="aiSearchRunBottomBody">
-            <p className="aiSearchRunBottomTitle">跟进提醒</p>
-            <p className="aiSearchRunBottomMeta">
-              <strong>{pendingFollowupCount}</strong> 家需跟进
-            </p>
-          </div>
-          <button
-            type="button"
-            className="aiSearchRunBottomCta"
-            disabled
-            title="跟进提醒功能开发中"
-          >
-            查看
-          </button>
-        </article>
+          <article className="aiSearchRunBottomCard tone-orange">
+            <div className="aiPoolIcon aiPoolIconOrange" aria-hidden="true">
+              <Bell size={20} />
+            </div>
+            <div className="aiSearchRunBottomBody">
+              <p className="aiSearchRunBottomCardTitle">跟进提醒</p>
+              <p className="aiSearchRunBottomMeta">
+                <strong>{pendingFollowupCount}</strong> 家客户需跟进，最近提醒：3 天后。
+              </p>
+              <button
+                type="button"
+                className="aiSearchRunBottomCta tone-orange"
+                disabled
+                title="跟进提醒功能开发中"
+              >
+                查看跟进
+              </button>
+            </div>
+          </article>
+        </div>
       </section>
     </div>
   );

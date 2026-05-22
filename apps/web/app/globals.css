@@ -11777,56 +11777,85 @@ button.primary {
   font-variant-numeric: tabular-nums;
 }
 
-/* ----- Bottom action bar ----- */
-/* 2026-05 LeadHunt 2.0: replaces the legacy 3-card 转化 strip + the
-   stand-alone 健康度 row. A single horizontal bar grid'd with three
-   compact action cards plus a flexible health summary on the right.
+/* ----- Bottom action bar — 下一步转化 -----
+   2026-05 LeadHunt 2.0: matches the design's 3-card 转化 strip.
+   Section gets a small section title above the cards. Cards have a
+   tone-tinted background, 48px color icon block top-left, two-line
+   description, and a tone-colored solid button at the bottom-left.
    Anchored to the bottom of .aiSearchRunPool's grid so it never gets
    pushed by table content above. */
 .aiSearchRunBottomBar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aiSearchRunBottomTitle {
+  margin: 0;
+  color: var(--title);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.aiSearchRunBottomCards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
   align-items: stretch;
 }
 
 .aiSearchRunBottomCard {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 14px 18px;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   box-shadow: var(--shadow-card);
-  min-height: 60px;
+}
+
+.aiSearchRunBottomCard.tone-blue {
+  background: linear-gradient(180deg, var(--primary-light) 0%, var(--card) 70%);
+  border-color: var(--primary-border);
+}
+
+.aiSearchRunBottomCard.tone-green {
+  background: linear-gradient(180deg, var(--success-light) 0%, var(--card) 70%);
+  border-color: #c5ebd1;
+}
+
+.aiSearchRunBottomCard.tone-orange {
+  background: linear-gradient(180deg, var(--warning-light) 0%, var(--card) 70%);
+  border-color: #ffd6a8;
 }
 
 .aiSearchRunBottomCard .aiPoolIcon {
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
 }
 
 .aiSearchRunBottomBody {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 6px;
 }
 
-.aiSearchRunBottomTitle {
+.aiSearchRunBottomCardTitle {
   margin: 0;
   color: var(--title);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .aiSearchRunBottomMeta {
   margin: 0;
-  color: var(--secondary);
+  color: var(--body);
   font-size: 12px;
+  line-height: 1.55;
 }
 
 .aiSearchRunBottomMeta strong {
@@ -11837,23 +11866,44 @@ button.primary {
 }
 
 .aiSearchRunBottomCta {
-  padding: 6px 12px;
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 6px 14px;
   background: var(--primary);
   color: #fff;
   border: none;
   border-radius: 6px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
   transition: background 0.15s;
 }
 
-.aiSearchRunBottomCta:hover:not(:disabled) {
+.aiSearchRunBottomCta.tone-blue {
+  background: var(--primary);
+}
+
+.aiSearchRunBottomCta.tone-blue:hover:not(:disabled) {
   background: var(--primary-hover);
 }
 
+.aiSearchRunBottomCta.tone-green {
+  background: var(--success);
+}
+
+.aiSearchRunBottomCta.tone-green:hover:not(:disabled) {
+  background: #009924;
+}
+
+.aiSearchRunBottomCta.tone-orange {
+  background: var(--warning);
+}
+
+.aiSearchRunBottomCta.tone-orange:hover:not(:disabled) {
+  background: #e96e00;
+}
+
 .aiSearchRunBottomCta:disabled {
-  background: var(--secondary);
   opacity: 0.55;
   cursor: not-allowed;
 }
