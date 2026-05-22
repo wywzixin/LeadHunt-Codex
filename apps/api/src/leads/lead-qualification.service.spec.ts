@@ -3289,17 +3289,18 @@ describe("LeadQualificationService", () => {
         {
           title: "Berlin Telecom Service",
           url: "https://berlintelecom.de/services",
+          // Real disqualifier hit — "training center" appears in
+          // affirmative context (no negation cue), so the matcher
+          // counts it. The negation-aware test below covers the
+          // P2 case where a similar phrase is explicitly negated.
           snippet:
-            "Berlin Telecom Service distributes RRU and BBU equipment. We do not sell consumer mobile phones; full B2B telecom contractor scope.",
+            "Berlin Telecom Service distributes RRU and BBU equipment. Our training center hosts certification courses for installers.",
           source: "web"
         }
       ],
       {
         ...criteria,
         targetRegions: ["Germany"],
-        // Mimics buildIcpCriteria threading negativeKeywords into
-        // criteria.disqualifiers — our profile said "consumer mobile
-        // phones" is a no-go.
         disqualifiers: ["consumer mobile phones", "training center"]
       },
       "Germany"
@@ -3312,5 +3313,99 @@ describe("LeadQualificationService", () => {
         expect.stringContaining("Contains disqualifying terms")
       ])
     );
+  });
+
+  // 2026-05 Stage 2 follow-up (P2): negation-context aware disqualifier.
+  // The plain text.includes() match used to fire the -20 penalty on
+  // candidates that EXPLICITLY rejected the term in their own copy
+  // ("We do not sell consumer mobile phones"). The next four tests
+  // pin the new behavior: explicit negation cues short-circuit the
+  // match, but real negative pages still trip the penalty.
+  //
+  // We exercise scoreCandidate directly here instead of going through
+  // saveCandidates so the assertion is unambiguous: only the
+  // disqualifier-penalty path is under test, not the upstream
+  // normalize/dedupe filters that may drop a row entirely on its own
+  // grounds.
+
+  function scoreWithDisqualifier(
+    snippet: string,
+    disqualifiers: string[]
+  ) {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    return service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Berlin Telecom Service",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: snippet
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU"],
+        customerTypeKeywords: ["distributor", "system integrator"],
+        disqualifiers
+      }
+    );
+  }
+
+  it("does NOT fire disqualifier penalty when the term is in an explicit negation context", () => {
+    const score = scoreWithDisqualifier(
+      "Berlin Telecom Service distributes RRU and BBU equipment. We do not sell consumer mobile phones; full B2B telecom contractor scope.",
+      ["consumer mobile phones"]
+    );
+    expect(
+      score.risks.some((r) => r.startsWith("Contains disqualifying terms"))
+    ).toBe(false);
+  });
+
+  it("DOES fire disqualifier penalty when the term appears in a normal affirmative context", () => {
+    const score = scoreWithDisqualifier(
+      "Berlin Telecom Service is a wholesale distributor of RRU and BBU equipment AND consumer mobile phones for retail partners.",
+      ["consumer mobile phones"]
+    );
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Contains disqualifying terms")
+      ])
+    );
+  });
+
+  it("DOES fire disqualifier penalty when SOME match is negated but ANOTHER is affirmative", () => {
+    // Two occurrences of "consumer mobile phones": the first is
+    // governed by "do not sell" and is suppressed; the second is in a
+    // plain affirmative context and must trip the penalty.
+    const score = scoreWithDisqualifier(
+      "Berlin Telecom Service does not sell consumer mobile phones to end users. Wholesale partners can still buy consumer mobile phones in bulk through our distribution arm.",
+      ["consumer mobile phones"]
+    );
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Contains disqualifying terms")
+      ])
+    );
+  });
+
+  it("does NOT fire disqualifier penalty for 'without X' / 'except X' phrasings", () => {
+    const score = scoreWithDisqualifier(
+      "Berlin Telecom Service distributes RRU and BBU equipment without marketplace listings, except career events organized by partners.",
+      ["marketplace", "career"]
+    );
+    expect(
+      score.risks.some((r) => r.startsWith("Contains disqualifying terms"))
+    ).toBe(false);
   });
 });

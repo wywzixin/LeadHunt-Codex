@@ -425,7 +425,21 @@ export class LeadQualificationService {
     }
 
     const riskyTerms = [...defaultRiskTerms, ...(criteria.disqualifiers ?? [])].filter(Boolean);
-    const matchedRisks = riskyTerms.filter((term) => text.includes(term.toLowerCase()));
+    // 2026-05 Stage 2 follow-up (P2): negation-context aware match.
+    // Plain text.includes(term) used to fire on phrases like
+    //   "We do not sell consumer mobile phones"
+    //   "no jobs page"
+    //   "this site has no marketplace listings"
+    // — pushing the candidate into a -20 penalty even though the
+    // negative term was being explicitly rejected by the candidate's
+    // own copy. containsOutsideNegationContext walks every match and
+    // skips the ones that are governed by an immediately preceding
+    // negation cue ("do not", "don't", "no ", "without", "except",
+    // "exclude", "never", "instead of", etc.). True off-target text
+    // ("Job openings: Senior Sales") still trips the penalty.
+    const matchedRisks = riskyTerms.filter((term) =>
+      containsOutsideNegationContext(text, term)
+    );
     if (matchedRisks.length > 0) {
       score -= 20;
       risks.push(`Contains disqualifying terms: ${matchedRisks.slice(0, 4).join(", ")}`);
@@ -3161,6 +3175,60 @@ function dedupeContacts(contacts: NormalizedLeadCandidate["contacts"]) {
 
 function hasAny(text: string, terms: string[]) {
   return terms.some((term) => text.includes(term.toLowerCase()));
+}
+
+// 2026-05 Stage 2 follow-up (P2): negation-aware variant of
+// text.includes for the disqualifier penalty path. We walk every
+// occurrence of `term` in `text` and check if the run of words
+// immediately preceding it is one of the standard negation cues
+// ("do not", "don't", "no ", "without", "except", "exclude",
+// "instead of", "never", "doesn't", "isn't", "aren't", etc.). If a
+// match is governed by a negation cue, we skip it; if any match in
+// the text is NOT under a negation cue, we count it as a real hit.
+//
+// Heuristic, not full NLP — we only look back ~40 chars (a few words)
+// so multi-clause sentences are not over-suppressed. We DON'T anchor
+// the cue to the very end of the window — phrases like "do not sell
+// consumer mobile phones" put "do not" several words before the
+// disqualifier. As long as the cue is somewhere in that small
+// preceding window, we treat the match as negated.
+const negationCuePatterns: RegExp[] = [
+  /\b(do|does|did)\s+not\b/i,
+  /\b(don|doesn|didn|won|wouldn|isn|aren|wasn|weren|hasn|haven|hadn|cannot|couldn|shouldn|mustn|shan|can)['']?t\b/i,
+  /\bnever\b/i,
+  /\bno\s+(?!one|other)/i,
+  /\bnone\s+of\b/i,
+  /\bwithout\b/i,
+  /\bexclud(?:e|es|ed|ing)\b/i,
+  /\bexcept\b/i,
+  /\binstead\s+of\b/i,
+  /\brather\s+than\b/i,
+  /\bnot\s+(?:a\s+|the\s+)?\w*\s*$/i,
+  /\bopt(?:ed)?\s+out\s+of\b/i
+];
+
+function containsOutsideNegationContext(text: string, term: string) {
+  const needle = term.toLowerCase();
+  if (!needle) return false;
+  let from = 0;
+  while (from <= text.length) {
+    const idx = text.indexOf(needle, from);
+    if (idx === -1) {
+      return false;
+    }
+    // Scan a small window before `idx` for a negation cue. We look
+    // back 40 characters (≈ a short clause) so phrases like "do not
+    // sell consumer mobile phones" are caught even when the cue
+    // doesn't sit right next to the disqualifier.
+    const windowStart = Math.max(0, idx - 40);
+    const window = text.slice(windowStart, idx);
+    const isNegated = negationCuePatterns.some((pattern) => pattern.test(window));
+    if (!isNegated) {
+      return true;
+    }
+    from = idx + needle.length;
+  }
+  return false;
 }
 
 function hasTelecomContext(text: string) {
