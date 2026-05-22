@@ -2780,7 +2780,7 @@ function isRiskyDiscoveryPage(candidate: NormalizedLeadCandidate) {
       looksLikeKnowledgeContentPage(candidate) ||
       looksLikeArticlePath(path) ||
       looksLikeContentTitle(candidate.companyName) ||
-      hasAny(text, contentNoiseTerms)
+      hasContentNoiseSignal(text)
   );
 }
 
@@ -3593,7 +3593,7 @@ function classifyEvidenceLead(
   const isNewsOrContent =
     (domain ? isNewsMediaDomain(domain) : false) ||
     looksLikeArticlePath(path) ||
-    hasAny(text, newsContentTerms) ||
+    hasNewsContentSignal(text) ||
     pageType === "content_or_directory";
   const isExplicitNewsArticle =
     (domain ? isNewsMediaDomain(domain) : false) ||
@@ -3976,7 +3976,7 @@ function assessPageQuality(
     reasons.push("Includes direct contact details");
   }
 
-  const hasContentNoise = looksLikeArticlePath(path) || hasAny(text, contentNoiseTerms);
+  const hasContentNoise = looksLikeArticlePath(path) || hasContentNoiseSignal(text);
   if (hasContentNoise) {
     if (buyerServicePage) {
       negativeScore += looksLikeArticlePath(path) ? 6 : 0;
@@ -5565,16 +5565,56 @@ const governmentInformationTerms = [
   "regulatory authority"
 ];
 
-const newsContentTerms = [
+// 2026-05 P1 follow-up: news/content term split. Same pattern as
+// contentNoiseTerms — strong phrases unambiguously identify a news/
+// content page; weak single nouns ("news", "media") are kept because
+// they're real signals when paired but cannot fire alone.
+const newsContentStrongTerms = [
+  "press release",
+  "news article",
+  "reported by",
+  "market report",
+  "industry report",
+  "research report",
+  "white paper",
+  "the journalist",
+  "publishing platform"
+];
+
+const newsContentWeakTerms = [
   "news",
   "media",
   "article",
-  "press release",
   "blog",
   "reported",
   "journalist",
   "publisher"
 ];
+
+function hasNewsContentSignal(text: string): boolean {
+  let strong = 0;
+  let weak = 0;
+  const seen = new Set<string>();
+  for (const t of newsContentStrongTerms) {
+    if (text.includes(t) && !seen.has(t)) {
+      seen.add(t);
+      strong += 1;
+      if (strong >= 2) return true;
+    }
+  }
+  for (const t of newsContentWeakTerms) {
+    if (text.includes(t) && !seen.has(t)) {
+      seen.add(t);
+      weak += 1;
+    }
+  }
+  if (strong >= 1 && strong + weak >= 2) return true;
+  if (weak >= 3) return true;
+  return false;
+}
+
+// All callers migrated to hasNewsContentSignal — the legacy flat
+// newsContentTerms array has been removed.
 
 const projectNewsTerms = [
   "project",
@@ -5877,22 +5917,39 @@ const articlePathTerms = [
   "/forum"
 ];
 
-const contentNoiseTerms = [
-  "article",
-  "blog",
-  "news",
+// 2026-05 P1 follow-up: split content/news term lists into STRONG
+// and WEAK to stop nav-menu single-word false positives.
+//
+// The old flat-includes approach against contentNoiseTerms (and
+// newsContentTerms) hard-rejected real telecom/SI buyer pages just
+// because their nav menu contained "News" or "Media" links — see
+// Kuwait Telecom and Amanco SA in the e2e replay. The fix mirrors
+// the off-industry strong/weak split:
+//
+//   STRONG = unambiguous "this page IS a content/news page" phrases
+//     ("press release", "market report", "industry report",
+//     "research report", "news article", "white paper"...).
+//   WEAK = single nouns commonly found in nav menus and footers
+//     ("news", "media", "blog", "article", "category", "showroom").
+//
+// Detection fires only when (a) ≥1 strong hit AND total ≥2, or
+// (b) ≥2 strong hits, or (c) ≥3 weak hits (a true content site
+// usually mentions multiple of these in body copy, not just one
+// menu link).
+const contentNoiseStrongTerms = [
   "press release",
   "market report",
   "industry report",
   "research report",
-  "forecast",
   "market size",
   "market share",
+  "market forecast",
+  "market trends",
+  "global market",
   "top startups",
   "startup database",
   "company database",
   "mou targets",
-  "marketplace",
   "supplier directory",
   "yellow pages",
   "company directory",
@@ -5900,42 +5957,53 @@ const contentNoiseTerms = [
   "b2b marketplace",
   "manufacturers and suppliers",
   "wholesale suppliers",
-  "category",
-  "catalog",
   "technology indicator",
   "market indicator",
   "business strategies",
   "import export data",
   "shipment details",
-  "showroom",
-  "what is",
-  "how to",
-  "guide to",
   "case study",
   "white paper",
-  "state act",
-  "commission restricts",
-  "regulation",
-  "interim assessment",
-  "damages to telecommunication infrastructure",
-  "inventory management",
-  "software tools",
-  "management system",
-  "deployment challenges",
-  "forum",
-  "discussion board",
-  "types, challenges",
-  "tips",
   "application note",
   "product application",
+  "deployment challenges",
+  "discussion board",
+  "what is",
+  "what are",
+  "what does",
+  "how to",
   "how to buy",
-  "commodity",
-  "maintenance & repair",
-  "truck spare parts",
+  "guide to",
   "key component",
   "signal transmission",
   "lightning protection",
-  "what are",
+  "damages to telecommunication infrastructure",
+  "interim assessment",
+  "commission restricts",
+  "state act",
+  "types, challenges",
+  "truck spare parts",
+  "companies in the world",
+  "companies worldwide"
+];
+
+const contentNoiseWeakTerms = [
+  "article",
+  "blog",
+  "news",
+  "forecast",
+  "marketplace",
+  "category",
+  "catalog",
+  "showroom",
+  "regulation",
+  "inventory management",
+  "software tools",
+  "management system",
+  "forum",
+  "tips",
+  "commodity",
+  "maintenance & repair",
   "webinar",
   "event",
   "career",
@@ -5947,6 +6015,31 @@ const contentNoiseTerms = [
   "linkedin",
   "facebook"
 ];
+
+function hasContentNoiseSignal(text: string): boolean {
+  let strong = 0;
+  let weak = 0;
+  const seen = new Set<string>();
+  for (const t of contentNoiseStrongTerms) {
+    if (text.includes(t) && !seen.has(t)) {
+      seen.add(t);
+      strong += 1;
+      if (strong >= 2) return true;
+    }
+  }
+  for (const t of contentNoiseWeakTerms) {
+    if (text.includes(t) && !seen.has(t)) {
+      seen.add(t);
+      weak += 1;
+    }
+  }
+  if (strong >= 1 && strong + weak >= 2) return true;
+  if (weak >= 3) return true;
+  return false;
+}
+
+// All callers migrated to hasContentNoiseSignal — the legacy flat
+// contentNoiseTerms array has been removed.
 
 const contentTitleTerms = [
   "market report",

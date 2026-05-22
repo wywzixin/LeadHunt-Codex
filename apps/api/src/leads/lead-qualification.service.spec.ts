@@ -3477,6 +3477,222 @@ describe("LeadQualificationService", () => {
     );
   });
 
+  // 2026-05 P1 follow-up to off-industry: page-quality / content
+  // classifier was using flat text.includes() against
+  // contentNoiseTerms + newsContentTerms. Real telecom/SI buyer
+  // pages whose nav menu contained "News" / "Media" links got
+  // misclassified as content_or_directory and routed into
+  // content_evidence with a 49-cap. The next four tests pin the
+  // strong/weak refactor:
+  //  - real telecom/SI sites are NOT classified as content pages
+  //    just because of a single weak nav-menu word
+  //  - real news/article pages STILL get classified as content
+
+  it("does NOT classify a real telecom/SI buyer page as content just because the nav menu has a 'News' link (Kuwait Telecom scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Kuwait Telecom",
+        website: "https://kuwait-telecom.example.com",
+        sourceUrl: "https://kuwait-telecom.example.com/",
+        country: "KUWAIT",
+        inferredCountry: "KUWAIT",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+96522123456",
+            country: "KUWAIT",
+            sourceUrl: "https://kuwait-telecom.example.com/contact",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@kuwait-telecom.example.com",
+            sourceUrl: "https://kuwait-telecom.example.com/contact"
+          },
+          {
+            type: "phone" as const,
+            value: "+96522123456",
+            sourceUrl: "https://kuwait-telecom.example.com/contact"
+          }
+        ],
+        // Real telecom buyer-side body copy. The only "content" word
+        // here is the nav-menu link "News" at the very end. Under the
+        // old flat-includes rule that single weak term tripped
+        // contentNoiseTerms and the candidate got page-typed as
+        // content_or_directory + content_evidence (scoreCap 49).
+        summary:
+          "Kuwait Telecom is a network operator and telecom system integrator delivering IP networks, voice termination services, and managed telecom solutions for businesses, carriers, and the telecom industry. Industries served: Telecom, Banking, Retail, Media, Healthcare, Security. About Us Get A Quote News"
+      },
+      {
+        ...criteria,
+        targetRegions: ["Kuwait", "UAE", "Saudi Arabia"],
+        productKeywords: ["RRU", "BBU", "telecom equipment", "5G"],
+        customerTypeKeywords: ["operator", "system integrator"]
+      }
+    );
+
+    // The page-quality / news-content classifier must NOT have
+    // misclassified this as content. Both risk strings come from
+    // pageType-driven branches we want suppressed for nav-menu hits.
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "Search result looks like article, report, job, training, or media content"
+        )
+      ])
+    );
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "News, article, blog, media, report, or content page cannot enter the main customer list"
+        )
+      ])
+    );
+    expect(score.pageType).not.toBe("content_or_directory");
+    expect(score.leadType).not.toBe("content_evidence");
+  });
+
+  it("does NOT classify an HCIS-approved system integrator as content because its menu has 'Media' (Amanco SA scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Amanco",
+        website: "https://amanco.example.com",
+        sourceUrl: "https://amanco.example.com/about",
+        country: "SAUDI ARABIA",
+        inferredCountry: "SAUDI ARABIA",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+966114736100",
+            country: "SAUDI ARABIA",
+            sourceUrl: "https://amanco.example.com/contact",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@amanco.example.com",
+            sourceUrl: "https://amanco.example.com/contact"
+          },
+          {
+            type: "phone" as const,
+            value: "+966114736100",
+            sourceUrl: "https://amanco.example.com/contact"
+          }
+        ],
+        summary:
+          "Amanco is a Saudi Arabia HCIS Approved Security System Integrator and telecom contractor providing complete telecommunication and security solutions including PAGA, mass notification, fire alarm, and industrial communication systems. Latest News and Media coverage available."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia", "UAE", "Qatar"],
+        productKeywords: ["telecom equipment", "fire alarm", "PAGA"],
+        customerTypeKeywords: ["system integrator", "telecom contractor"]
+      }
+    );
+
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "Search result looks like article, report, job, training, or media content"
+        )
+      ])
+    );
+    expect(score.pageType).not.toBe("content_or_directory");
+    expect(score.leadType).not.toBe("content_evidence");
+  });
+
+  it("STILL classifies a real press-release / market-report URL as content (EE Times-style scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "EE Times",
+        website: "https://www.eetimes.com",
+        sourceUrl:
+          "https://www.eetimes.com/european-telecoms-eye-openran-to-replace-huawei-equipment/",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "medium",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+14155551111",
+            country: "UNITED STATES",
+            sourceUrl: "https://www.eetimes.com",
+            confidence: "medium"
+          }
+        ],
+        contacts: [],
+        // Multiple weak news/content terms in the body — under the
+        // new strong/weak rule, weak >= 3 fires hasNewsContentSignal.
+        // Keeps the rejection working without needing an explicit
+        // "press release" or "market report" phrase.
+        summary:
+          "EE Times — European telecoms eye OpenRAN to replace Huawei equipment. Read the full news article. Categories: news, blog, media, article."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU", "PLC programmer"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    // Real news/article page: should be flagged as content-like and
+    // not enter the main customer list. Either the
+    // content_or_directory pageType OR the riskyDiscoveryPage cap
+    // is sufficient to keep it out.
+    expect(score.score).toBeLessThanOrEqual(58);
+    expect(score.status).not.toBe("qualified");
+  });
+
+  it("STILL rejects market-research style pages via hardContentNoise (Future Market Insights scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Future Market Insights",
+        website: "https://www.futuremarketinsights.example.com",
+        sourceUrl:
+          "https://www.futuremarketinsights.example.com/reports/5g-ran-market",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "medium",
+        countryConflict: false,
+        contacts: [],
+        // "market report"/"industry report"/"research report" are
+        // hardRejectContentTerms — they make hardContentNoise=true
+        // and the page is page-typed as content_or_directory.
+        summary:
+          "Future Market Insights publishes the latest market report, industry report, and research report on the 5G RAN market with detailed market size, market share, and market forecast figures."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU"],
+        customerTypeKeywords: ["operator", "system integrator"]
+      }
+    );
+
+    // Market-research page must stay out of qualified.
+    expect(score.score).toBeLessThanOrEqual(58);
+    expect(score.status).not.toBe("qualified");
+    expect(score.pageType).toBe("content_or_directory");
+  });
+
   it("threads productProfileAnalysis.negativeKeywords + customerProfileAnalysis.disqualifiers into the disqualifying-terms penalty", async () => {
     // 2026-05 Stage 2 follow-up first cut (item A): disqualifiers
     // pulled from the persisted profile analyses. We assert via
