@@ -2498,14 +2498,15 @@ function AiWorkerConversation({
           <table className="aiPoolTable">
             <thead>
               <tr>
-                <th>公司名称</th>
-                <th>国家/地区</th>
-                <th>类型</th>
-                <th>推荐指数</th>
-                <th>联系方式</th>
-                <th>官网</th>
-                <th>状态</th>
-                <th>操作</th>
+                <th className="col-company">公司名称</th>
+                <th className="col-country">国家/地区</th>
+                <th className="col-type">类型</th>
+                <th className="col-score">推荐指数</th>
+                <th className="col-email">邮箱</th>
+                <th className="col-phone">电话</th>
+                <th className="col-website">官网</th>
+                <th className="col-status">状态</th>
+                <th className="col-action">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -2524,24 +2525,26 @@ function AiWorkerConversation({
                         {isFresh ? <span className="aiSearchRunFreshBadge">新增</span> : null}
                         {lead.companyName}
                       </td>
-                      <td>{lead.country}</td>
-                      <td>{lead.tag}</td>
-                      <td>
+                      <td className="col-country">{lead.country}</td>
+                      <td className="col-type">{lead.tag}</td>
+                      <td className="col-score">
                         <span className="stars">{renderStars(lead.score / 20)}</span>
                         <span className="aiSearchRunScore">{lead.score}</span>
                       </td>
-                      <td>
-                        <span className="aiSearchRunContactLine">
+                      <td className="col-email">
+                        <span className="aiSearchRunContactChip">
                           邮箱 <b>{emailCount}</b>
                         </span>
-                        <span className="aiSearchRunContactLine">
+                      </td>
+                      <td className="col-phone">
+                        <span className="aiSearchRunContactChip">
                           电话 <b>{phoneCount}</b>
                         </span>
                       </td>
                       <td className="col-website" title={lead.website}>
                         {lead.website !== "—" ? lead.website : "-"}
                       </td>
-                      <td>
+                      <td className="col-status">
                         <span className={`aiPoolStatusPill ${lead.raw.crmLead ? "synced" : "pending"}`}>
                           {lead.raw.crmLead ? "已加入CRM" : "待加入CRM"}
                         </span>
@@ -2563,7 +2566,7 @@ function AiWorkerConversation({
                 })
               ) : (
                 <tr>
-                  <td className="leadEmptyCell" colSpan={8}>
+                  <td className="leadEmptyCell" colSpan={9}>
                     {searching
                       ? "正在搜索并清洗候选客户..."
                       : "暂无候选客户。任务创建后会自动执行本轮全部搜索指令。"}

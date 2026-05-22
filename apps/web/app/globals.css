@@ -11770,16 +11770,59 @@ button.primary {
   font-variant-numeric: tabular-nums;
 }
 
-.aiSearchRunContactLine {
-  display: block;
-  font-size: 12px;
+/* Inline contact chip — 邮箱 N / 电话 N */
+.aiSearchRunContactChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
   color: var(--secondary);
-}
-
-.aiSearchRunContactLine b {
-  color: var(--title);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
+
+.aiSearchRunContactChip b {
+  color: var(--title);
+  font-weight: 700;
+}
+
+/* Compact table rows + hover for the search-in-progress page only.
+   Other pool views keep their roomier defaults. */
+.aiSearchRunPool .aiPoolTable thead th {
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.aiSearchRunPool .aiPoolTable tbody td {
+  padding: 8px 10px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.aiSearchRunPool .aiPoolTable tbody tr {
+  transition: background 0.12s ease;
+}
+
+.aiSearchRunPool .aiPoolTable tbody tr:hover {
+  background: var(--primary-light);
+}
+
+/* Per-column widths so the wide columns (公司名称 / 官网) get the
+   space and the narrow ones (国家、邮箱、电话) collapse to fit. */
+.aiSearchRunPool .aiPoolTable .col-company { min-width: 200px; }
+.aiSearchRunPool .aiPoolTable .col-country { width: 110px; }
+.aiSearchRunPool .aiPoolTable .col-type { width: 130px; }
+.aiSearchRunPool .aiPoolTable .col-score { width: 130px; }
+.aiSearchRunPool .aiPoolTable .col-email,
+.aiSearchRunPool .aiPoolTable .col-phone { width: 80px; }
+.aiSearchRunPool .aiPoolTable .col-website { min-width: 160px; color: var(--primary); }
+.aiSearchRunPool .aiPoolTable .col-status { width: 110px; }
+.aiSearchRunPool .aiPoolTable .col-action { width: 110px; }
 
 /* ----- Bottom action bar — 下一步转化 -----
    2026-05 LeadHunt 2.0: matches the design's 3-card 转化 strip.
