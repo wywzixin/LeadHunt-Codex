@@ -592,7 +592,22 @@ export function AiWorkerClient() {
     // Fire-and-forget the workflow trigger. The endpoint blocks until
     // the LangGraph batch finishes, so the polling effect will keep
     // updating the page once currentTask flips to running.
-    void apiRequest(`/api/lead-tasks/${taskId}/search`, {
+    type SearchTriggerResponse = {
+      ok?: boolean;
+      executedQueries?: number;
+      appendedQueries?: number;
+      // 2026-05 Stage 2 follow-up: reason why a continuation append
+      // produced (or didn't produce) new queries. Surfaced to the
+      // user when N=0 so the click doesn't feel silent.
+      appendReason?:
+        | "appended"
+        | "pending_remaining"
+        | "missing_payload"
+        | "ai_unavailable"
+        | "ai_error"
+        | "no_new_queries";
+    };
+    void apiRequest<SearchTriggerResponse>(`/api/lead-tasks/${taskId}/search`, {
       method: "POST",
       // 2026-05 Stage 2 follow-up: appendIfEmpty=true tells the
       // backend to generate and insert a new batch of pending
@@ -600,13 +615,38 @@ export function AiWorkerClient() {
       // it, /search on a finished task is a no-op (returns 201 with
       // executedQueries=0) and "继续搜索 30 条" looks broken.
       body: JSON.stringify({ limit: 30, appendIfEmpty: true })
-    }).catch((requestError) => {
-      // We don't fail the page on a search-trigger error — the polling
-      // loop will surface failed steps as they arrive. Log to status
-      // so the user sees the upstream cause.
-      setError(errorMessage(requestError));
-      setStatus("发起搜索失败，可在状态恢复后重试。");
-    });
+    })
+      .then((response) => {
+        // 2026-05 Stage 2 follow-up: surface a concrete reason when
+        // the backend couldn't actually append — without this the
+        // user sees the page flip back to a finished pool and has no
+        // idea why "继续搜索 30 条" produced nothing.
+        if (response?.appendReason && response.appendReason !== "appended") {
+          const message =
+            {
+              pending_remaining:
+                "上一批 query 还在执行中，正在继续消费，无需再追加。",
+              missing_payload:
+                "该任务缺少产品/客户画像数据，无法继续生成新一批搜索指令。",
+              ai_unavailable: "AI 规划服务暂不可用，未生成新的搜索指令。",
+              ai_error: "生成新一批搜索指令失败，可稍后重试。",
+              no_new_queries:
+                "未生成新的搜索指令；可调整搜索方向或更换关键词后重试。"
+            }[response.appendReason] ?? "未生成新的搜索指令。";
+          setStatus(message);
+          // Release the optimistic searching flag so the page doesn't
+          // sit on "正在等待后端 LLM 规划..." forever.
+          setSearching(false);
+        }
+      })
+      .catch((requestError) => {
+        // We don't fail the page on a search-trigger error — the polling
+        // loop will surface failed steps as they arrive. Log to status
+        // so the user sees the upstream cause.
+        setError(errorMessage(requestError));
+        setStatus("发起搜索失败，可在状态恢复后重试。");
+        setSearching(false);
+      });
 
     // Note: we deliberately do NOT call refreshTask + applyTaskProgress
     // here. If we did, applyTaskProgress would race with the backend —

@@ -79,6 +79,18 @@ type LeadTaskSummaryRow = {
   pending_email_count: number | bigint | null;
 };
 
+// 2026-05 Stage 2 follow-up: structured reasons for why a continuation
+// search-append produced (or didn't produce) new queries. Surfaced on
+// the /search response so the frontend can show "未生成新的搜索指令"
+// instead of pretending the click did nothing.
+type ContinuationAppendReason =
+  | "appended"
+  | "pending_remaining"
+  | "missing_payload"
+  | "ai_unavailable"
+  | "ai_error"
+  | "no_new_queries";
+
 type PlannedSearchQuery = {
   provider: string;
   operatorSource?: string | null;
@@ -1577,10 +1589,13 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     // brave_search node, polling resumes) leave it false so they keep
     // the existing "drain pending queue" semantics.
     let appendedCount = 0;
+    let appendReason: ContinuationAppendReason | undefined;
     if (input.appendIfEmpty) {
-      appendedCount = await this.appendContinuationSearchQueriesForTask(userId, taskId, {
+      const result = await this.appendContinuationSearchQueriesForTask(userId, taskId, {
         limit: input.limit ?? DEFAULT_SEARCH_QUERY_COUNT
       });
+      appendedCount = result.appendedCount;
+      appendReason = result.reason;
     }
 
     const graphRun = this.createSearchToEmailGraphHandlers(userId, taskId, input);
@@ -1604,7 +1619,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     if (input.appendIfEmpty) {
       return (
         searchResult
-          ? { ...searchResult, appendedQueries: appendedCount }
+          ? { ...searchResult, appendedQueries: appendedCount, appendReason }
           : {
               ok: false,
               executedQueries: 0,
@@ -1612,6 +1627,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
               createdCandidates: 0,
               skippedCandidates: 0,
               appendedQueries: appendedCount,
+              appendReason,
               errors: [
                 { queryId: taskId, message: workflow.error ?? "Search workflow did not run" }
               ],
@@ -3182,6 +3198,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       country: string | null;
       strategyType: string | null;
     }>;
+    // 2026-05 Stage 2 follow-up: cap on planned queries this slow
+    // planning pass is allowed to produce. Initial task creation
+    // sticks to DEFAULT_SEARCH_QUERY_COUNT (20). The continuation
+    // path passes 30 so "继续搜索 30 条" matches its label.
+    desiredQueryCount?: number;
   }): Promise<{
     searchQueries: PlannedSearchQuery[];
     keywordPool?: {
@@ -3208,6 +3229,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     let gptRefillAttempts = 0;
     let gptRefillAcceptedCount = 0;
     let rejectedAiQueries: Array<{ query: string; country: string; reason: string }> = [];
+
+    // 2026-05 Stage 2 follow-up: caller-provided cap on the planned
+    // queries (continuation runs ask for 30; initial creation keeps
+    // DEFAULT_SEARCH_QUERY_COUNT=20). Used as the slice cap and as
+    // the refill target so refill attempts stop at the right size.
+    const desiredCount = Math.max(1, Math.floor(input.desiredQueryCount ?? DEFAULT_SEARCH_QUERY_COUNT));
 
     if (!this.leadHuntAiService) {
       return {
@@ -3278,18 +3305,18 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         searchTargetMarkets,
         channelCustomersRequested
       );
-      let aiQueries = limitPlannedSearchQueries(normalization.queries);
+      let aiQueries = limitPlannedSearchQueries(normalization.queries, desiredCount);
       rejectedAiQueries = normalization.rejected;
 
       while (
         aiQueries.length > 0 &&
-        aiQueries.length < DEFAULT_SEARCH_QUERY_COUNT &&
+        aiQueries.length < desiredCount &&
         gptRefillAttempts < SEARCH_STRATEGY_MAX_REFILL_ATTEMPTS
       ) {
         const queryCountBeforeRefill = aiQueries.length;
         gptRefillAttempts += 1;
         try {
-          const requiredAdditionalQueries = DEFAULT_SEARCH_QUERY_COUNT - aiQueries.length;
+          const requiredAdditionalQueries = desiredCount - aiQueries.length;
           const refillPlan = await withTimeout(
             this.leadHuntAiService.generateSearchStrategy({
               ...searchStrategyInput,
@@ -3313,12 +3340,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           normalization = normalizeAiSearchPlan(
             refillPlan,
             keywordGroups,
-            DEFAULT_SEARCH_QUERY_COUNT,
+            desiredCount,
             searchTargetMarkets,
             channelCustomersRequested,
             aiQueries
           );
-          aiQueries = limitPlannedSearchQueries(normalization.queries);
+          aiQueries = limitPlannedSearchQueries(normalization.queries, desiredCount);
           gptRefillAcceptedCount += Math.max(0, aiQueries.length - queryCountBeforeRefill);
           rejectedAiQueries = uniqueRejectedAiQueries([
             ...rejectedAiQueries,
@@ -3336,9 +3363,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       aiQueryCount = aiQueries.filter(
         (query) => query.templateId === "gpt55_search_strategy"
       ).length;
-      if (aiQueries.length > 0 && aiQueries.length < DEFAULT_SEARCH_QUERY_COUNT) {
+      if (aiQueries.length > 0 && aiQueries.length < desiredCount) {
         fallbackReasons.push(
-          `GPT search plan incomplete: ${aiQueries.length}/${DEFAULT_SEARCH_QUERY_COUNT} executable queries accepted. No deterministic fallback queries were added.`
+          `GPT search plan incomplete: ${aiQueries.length}/${desiredCount} executable queries accepted. No deterministic fallback queries were added.`
         );
       }
       searchQueries = aiQueries;
@@ -3675,7 +3702,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       query: string;
       country: string | null;
       strategyType: string | null;
-    }> = []
+    }> = [],
+    // 2026-05 Stage 2 follow-up: caller-controlled cap. Initial
+    // creation passes nothing (defaults to 20). The continuation
+    // path passes 30 so "继续搜索 30 条" matches its label.
+    desiredQueryCount?: number
   ): Promise<{
     slowResult: Awaited<ReturnType<AgentWorkflowService["runSlowPlanning"]>>;
     appendedCount: number;
@@ -3690,7 +3721,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         channelCustomersRequested: fastResult.channelCustomersRequested
       },
       targetMarkets,
-      priorAcceptedQueries
+      priorAcceptedQueries,
+      desiredQueryCount
     });
 
     if (!slowResult.searchQueries.length) {
@@ -3741,11 +3773,23 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   // Returns the number of new queries actually inserted (0 when the
   // task still has pending/running work, or when GPT returned only
   // duplicates).
+  // 2026-05 Stage 2 follow-up: "继续搜索 30 条" path. Appends a fresh
+  // batch of pending search_queries to a task that has already drained
+  // its existing queue. Reuses the slow planning pipeline + dedupes
+  // against existing queries so we don't re-issue the same Brave call
+  // and waste credits. Pre-existing candidates / approved status /
+  // CRM rows are not touched — this only adds new pending rows.
+  //
+  // Returns the count of new queries inserted plus a structured reason
+  // (none / pending_remaining / missing_payload / ai_unavailable /
+  // ai_error / no_new_queries / appended). The caller surfaces the
+  // reason on the response so the frontend can show "未生成新的搜索
+  // 指令" instead of pretending nothing happened.
   private async appendContinuationSearchQueriesForTask(
     userId: string,
     taskId: string,
     input: { limit: number }
-  ): Promise<number> {
+  ): Promise<{ appendedCount: number; reason: ContinuationAppendReason }> {
     const task = await this.prisma.leadTask.findFirst({
       where: { id: taskId, userId },
       select: { id: true, inputPayload: true, targetCount: true }
@@ -3764,11 +3808,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       }
     });
     if (pendingCount > 0) {
-      return 0;
+      return { appendedCount: 0, reason: "pending_remaining" };
     }
 
     if (!this.leadHuntAiService) {
-      return 0;
+      await this.markContinuationPlanStepCompleted(taskId, 0, "ai_unavailable");
+      return { appendedCount: 0, reason: "ai_unavailable" };
     }
 
     const payload = toPlainObject(task.inputPayload);
@@ -3782,7 +3827,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     if (!productProfileAnalysis || !customerProfileAnalysis || !keywordGroups) {
       // Task was created before fast planning persisted these fields;
       // we can't safely re-run slow planning without them.
-      return 0;
+      await this.markContinuationPlanStepCompleted(taskId, 0, "missing_payload");
+      return { appendedCount: 0, reason: "missing_payload" };
     }
     const aiKeywordExpansion = (payload.aiKeywordExpansion ?? null) as
       | KeywordExpansionResult
@@ -3827,23 +3873,54 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         taskId,
         fastResult,
         targetMarkets,
-        priorAcceptedQueries
+        priorAcceptedQueries,
+        input.limit
       );
       // Mark task as running again so the polling effect picks the new
       // work up. updateTaskStatusFromWorkflow runs after the worker
       // pool finishes and will move it to paused/completed/failed.
       if (appendedCount > 0) {
         await this.touchRunningTask(taskId);
+        await this.markContinuationPlanStepCompleted(taskId, appendedCount, "appended");
+        return { appendedCount, reason: "appended" };
       }
-      return appendedCount;
+      // GPT returned only duplicates of priorAcceptedQueries — no new
+      // pending rows landed.
+      await this.markContinuationPlanStepCompleted(taskId, 0, "no_new_queries");
+      return { appendedCount: 0, reason: "no_new_queries" };
     } catch (error) {
       // GPT timeout / rate-limit shouldn't fail the whole /search call —
       // worker pool will simply find no pending queries and the route
       // returns executedQueries=0 with appendedQueries=0 so the
       // frontend can surface "no new queries generated".
-      // Caller already runs the search graph after this returns.
       void error;
-      return 0;
+      await this.markContinuationPlanStepCompleted(taskId, 0, "ai_error");
+      return { appendedCount: 0, reason: "ai_error" };
+    }
+  }
+
+  // 2026-05 Stage 2 follow-up: continuation runs reuse runSlowPlanning,
+  // which marks plan_search_queries as `running`. Without an explicit
+  // closure, the agent_steps row stays "running" even though the task
+  // moved to paused/completed/failed afterwards. The frontend has a
+  // terminal-state gate that papers over this in the UI, but the DB
+  // is still dirty. Fold both success and failure paths back to
+  // `completed` with a note of why so traces stay accurate.
+  private async markContinuationPlanStepCompleted(
+    taskId: string,
+    appendedCount: number,
+    reason: ContinuationAppendReason
+  ) {
+    try {
+      await this.markStepCompleted(taskId, "plan_search_queries", {
+        continuation: true,
+        appendedCount,
+        reason
+      });
+    } catch {
+      // Step may not be in `running` state at all (e.g. AI service
+      // unavailable path never marked it). markStepCompleted is
+      // idempotent in those cases — swallow any spurious errors.
     }
   }
 
@@ -3915,8 +3992,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   }
 }
 
-function limitPlannedSearchQueries(queries: PlannedSearchQuery[]) {
-  return queries.slice(0, DEFAULT_SEARCH_QUERY_COUNT);
+function limitPlannedSearchQueries(
+  queries: PlannedSearchQuery[],
+  cap: number = DEFAULT_SEARCH_QUERY_COUNT
+) {
+  return queries.slice(0, Math.max(1, Math.floor(cap)));
 }
 
 async function withTimeout<T>(

@@ -2487,14 +2487,17 @@ describe("AgentWorkflowService", () => {
           appendedCount: 12
         });
 
-      const appended = await (service as any).appendContinuationSearchQueriesForTask(
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
         "user-1",
         "task-1",
         { limit: 30 }
       );
 
       expect(runSlowSpy).toHaveBeenCalledTimes(1);
-      expect(appended).toBe(12);
+      // 2026-05 Stage 2 follow-up: limit propagates as desiredQueryCount.
+      expect(runSlowSpy.mock.calls[0]?.[3]).toBeDefined();
+      expect(runSlowSpy.mock.calls[0]?.[4]).toBe(30);
+      expect(result).toEqual({ appendedCount: 12, reason: "appended" });
       // Task gets touched back to running so the polling effect resumes.
       expect(prisma.leadTask.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: "task-1" } })
@@ -2513,18 +2516,24 @@ describe("AgentWorkflowService", () => {
         ai as any
       );
 
-      const appended = await (service as any).appendContinuationSearchQueriesForTask(
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
         "user-1",
         "task-1",
         { limit: 30 }
       );
 
-      expect(appended).toBe(0);
+      expect(result).toEqual({ appendedCount: 0, reason: "pending_remaining" });
       expect(ai.generateSearchStrategy).not.toHaveBeenCalled();
       expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
     });
 
-    it("returns 0 when GPT errors out instead of failing the whole call", async () => {
+    it("returns 0 with reason no_new_queries when GPT throws inside slow planning", async () => {
+      // runSlowPlanning catches its own GPT errors and pushes them to
+      // fallbackReasons, returning searchQueries=[]. So from the
+      // append orchestrator's perspective the failure surfaces as
+      // "no new queries" rather than "ai_error". The "ai_error"
+      // reason is reserved for cases where runSlowPlanningAndAppend
+      // itself throws (DB error, etc.).
       const prisma = buildContinuationPrismaMock();
       const ai = createLeadHuntAiMock(async () => {
         throw new Error("gpt timeout");
@@ -2537,14 +2546,68 @@ describe("AgentWorkflowService", () => {
         ai as any
       );
 
-      const appended = await (service as any).appendContinuationSearchQueriesForTask(
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
         "user-1",
         "task-1",
         { limit: 30 }
       );
 
-      expect(appended).toBe(0);
+      expect(result).toEqual({ appendedCount: 0, reason: "no_new_queries" });
       expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
+    });
+
+    it("returns 0 with reason ai_error when the slow-planning orchestrator throws", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      vi.spyOn(service as any, "runSlowPlanningAndAppendGptQueries").mockRejectedValue(
+        new Error("DB write failed")
+      );
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(result).toEqual({ appendedCount: 0, reason: "ai_error" });
+      expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
+    });
+
+    it("returns 0 with reason no_new_queries when slow planning produces only duplicates", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async (input) => ({
+        queries: simpleAiQueriesForMarkets(input.targetMarkets)
+      }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      vi.spyOn(service as any, "runSlowPlanningAndAppendGptQueries").mockResolvedValue({
+        slowResult: { searchQueries: [], fallbackReasons: [] },
+        appendedCount: 0
+      });
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(result).toEqual({ appendedCount: 0, reason: "no_new_queries" });
+      // Task is NOT touched back to running when nothing was appended.
+      expect(prisma.leadTask.update).not.toHaveBeenCalled();
     });
 
     it("rejects when the task does not belong to the user", async () => {
@@ -2564,6 +2627,75 @@ describe("AgentWorkflowService", () => {
           limit: 30
         })
       ).rejects.toThrow("Lead task not found");
+    });
+
+    // 2026-05 Stage 2 follow-up: when the AI returns more than the
+    // continuation limit (e.g. 35 queries), runSlowPlanning's slice
+    // cap must trim it before runSlowPlanningAndAppendGptQueries
+    // dedupes + inserts. Verifies the desiredQueryCount=30 path.
+    it("inserts at most `limit` queries when slow planning returns more than that", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      // Spy runSlowPlanning so we can directly observe whether the
+      // desiredQueryCount param flows through, and so the test
+      // doesn't depend on GPT mock + normalize pass-through.
+      const runSlowSpy = vi.spyOn(service as any, "runSlowPlanning");
+
+      // We still want runSlowPlanningAndAppendGptQueries' real dedupe
+      // + createMany path to fire, so let runSlowPlanning resolve
+      // with a fake slice that respects the cap. The actual real
+      // implementation would also slice via limitPlannedSearchQueries.
+      runSlowSpy.mockImplementation(async (input: any) => {
+        const cap = input.desiredQueryCount ?? 20;
+        // Pretend GPT generated 35 unique queries; respect the cap.
+        const queries = Array.from({ length: 35 }, (_, i) => ({
+          provider: "brave",
+          operatorSource: "brave_official",
+          executionStatus: "pending",
+          operatorName: `op-${i}`,
+          strategyTemplate: "lane-K-K2",
+          query: `continuation candidate ${i + 1}`,
+          keywordGroups: input.fastResult.keywordGroups,
+          country: "Germany",
+          effectivenessScore: 0.5
+        })).slice(0, cap);
+        return {
+          searchQueries: queries,
+          fallbackReasons: [],
+          aiQueryCount: queries.length,
+          gptRefillAttempts: 0,
+          gptRefillAcceptedCount: 0,
+          rejectedAiQueries: []
+        } as any;
+      });
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      // desiredQueryCount must propagate from input.limit.
+      expect(runSlowSpy).toHaveBeenCalledTimes(1);
+      expect((runSlowSpy.mock.calls[0]?.[0] as any)?.desiredQueryCount).toBe(30);
+
+      expect(result.reason).toBe("appended");
+      expect(result.appendedCount).toBe(30);
+      const insertedRows = prisma.searchQuery.createMany.mock.calls[0]?.[0]?.data ?? [];
+      expect(insertedRows.length).toBe(30);
+      expect(
+        (insertedRows as Array<{ executionStatus: string; taskId: string }>).every(
+          (row) => row.executionStatus === "pending" && row.taskId === "task-1"
+        )
+      ).toBe(true);
     });
   });
 });
