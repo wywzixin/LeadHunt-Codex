@@ -11760,7 +11760,7 @@ button.primary {
    pushed by table content above. */
 .aiSearchRunBottomBar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 1.4fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   align-items: stretch;
 }
@@ -11833,51 +11833,6 @@ button.primary {
   cursor: not-allowed;
 }
 
-.aiSearchRunBottomHealth {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  background: var(--success-light);
-  border: 1px solid #b8eccb;
-  border-radius: 10px;
-  min-height: 60px;
-}
-
-.aiSearchRunBottomHealthIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: var(--success);
-  color: #fff;
-}
-
-.aiSearchRunBottomHealth p {
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  color: var(--body);
-  font-size: 12px;
-  line-height: 1.4;
-  min-width: 0;
-}
-
-.aiSearchRunBottomHealthLabel {
-  color: var(--title);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.aiSearchRunBottomHealth strong {
-  color: var(--success);
-  font-weight: 700;
-}
-
 /* aiPool status pill helper for the table */
 .aiPoolStatusPill {
   display: inline-block;
@@ -11926,14 +11881,6 @@ button.primary {
     font-size: 11px;
   }
   .aiSearchRunPool .aiSearchRunStepState {
-    display: none;
-  }
-  /* Drop the health summary on the right of the bottom bar so the
-     three action cards have more room. */
-  .aiSearchRunPool .aiSearchRunBottomBar {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-  .aiSearchRunPool .aiSearchRunBottomHealth {
     display: none;
   }
 }

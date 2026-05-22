@@ -2600,9 +2600,9 @@ function AiWorkerConversation({
         </footer>
       </section>
 
-      {/* 底部紧凑操作栏 — 把转化三联卡和健康度合并成一行，让客户表
-          稳定占据 1fr，少数据时不显得空、多数据时不会被挤压。 */}
-      <section className="aiSearchRunBottomBar" aria-label="下一步操作 / 客户池健康度">
+      {/* 底部紧凑操作栏 — 三张转化卡。健康度行已删除（放底部太抢戏，
+          后续可以挪进表格 footer）。 */}
+      <section className="aiSearchRunBottomBar" aria-label="下一步操作">
         <article className="aiSearchRunBottomCard tone-blue">
           <div className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
             <span className="aiPoolIconText">CRM</span>
@@ -2657,22 +2657,6 @@ function AiWorkerConversation({
             查看
           </button>
         </article>
-
-        <div className="aiSearchRunBottomHealth" aria-label="客户池健康度">
-          <span className="aiSearchRunBottomHealthIcon" aria-hidden="true">
-            <CheckCircle2 size={16} />
-          </span>
-          <p>
-            <span className="aiSearchRunBottomHealthLabel">获客池健康度</span>
-            <span>
-              有效客户率 <strong>{percent(actionableLeads.length, Math.max(leads.length, 1))}</strong>
-              {" · "}
-              本批 query 重复率 <strong>
-                {queryCount ? `${Math.max(0, Math.round((1 - executedCount / queryCount) * 100))}%` : "—"}
-              </strong>
-            </span>
-          </p>
-        </div>
       </section>
     </div>
   );
