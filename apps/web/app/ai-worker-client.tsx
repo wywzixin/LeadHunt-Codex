@@ -1688,19 +1688,50 @@ function AiWorkerPool({
 
   const allChecked = rows.length > 0 && rows.every((row) => selectedIds.has(row.id));
 
+  // 2026-05 Stage 2: derived helper — only candidates not yet in CRM
+  // are valid bulk-approve targets. Used to filter the current
+  // selection so a user can't re-approve already-synced rows.
+  const isPendingCrmCandidate = (lead: DisplayLead) => {
+    const status = lead.raw.status ?? "";
+    const inCrm =
+      Boolean(lead.raw.crmLead) ||
+      status === "approved" ||
+      status === "contacted" ||
+      status === "email_sent";
+    return !inCrm;
+  };
+
   // Drop selection ids that no longer exist in the candidate list (e.g.
-  // after polling pulls a refreshed task) so the bulk bar count stays
-  // honest.
+  // after polling pulls a refreshed task) AND drop ids that have moved
+  // out of the pending-CRM bucket — the bulk-approve button should
+  // never claim "已选择 N 家" when those N have already been approved.
   useEffect(() => {
     setSelectedIds((current) => {
-      const ids = new Set(leads.map((lead) => lead.id));
+      const stillPending = new Set(
+        leads.filter(isPendingCrmCandidate).map((lead) => lead.id)
+      );
       const next = new Set<string>();
       current.forEach((id) => {
-        if (ids.has(id)) next.add(id);
+        if (stillPending.has(id)) next.add(id);
       });
       return next.size === current.size ? current : next;
     });
   }, [leads]);
+
+  // How many of the currently selected ids are still pending CRM. The
+  // bulk-approve button uses this directly so it can't fire on a
+  // selection that's already been synced (race window: between click
+  // and the cleanup effect ticking).
+  const selectedPendingCount = useMemo(() => {
+    const pendingIds = new Set(
+      leads.filter(isPendingCrmCandidate).map((lead) => lead.id)
+    );
+    let count = 0;
+    selectedIds.forEach((id) => {
+      if (pendingIds.has(id)) count += 1;
+    });
+    return count;
+  }, [leads, selectedIds]);
 
   // Snap pageNumber back into range whenever the filtered set shrinks.
   useEffect(() => {
@@ -1786,7 +1817,7 @@ function AiWorkerPool({
               type="button"
               className="aiPoolGhostBtn"
               disabled
-              title="批量加入 CRM 功能开发中"
+              title="批量加入 CRM 请在下方表格勾选客户后从批量操作栏触发"
             >
               <Database size={14} aria-hidden="true" />
               批量加入 CRM
@@ -1827,7 +1858,13 @@ function AiWorkerPool({
           <input
             type="search"
             value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
+            onChange={(event) => {
+              // 2026-05 Stage 2: snap back to page 1 immediately so a
+              // user typing on page 3 doesn't see an empty page flash
+              // before the effect-based clamp kicks in.
+              setSearchInput(event.target.value);
+              setPageNumber(1);
+            }}
             placeholder="搜索公司、官网、邮箱、国家"
           />
         </label>
@@ -1837,7 +1874,15 @@ function AiWorkerPool({
             <ChevronDown size={14} aria-hidden="true" />
           </button>
         ))}
-        <button type="button" className="aiPoolFilterClear">
+        <button
+          type="button"
+          className="aiPoolFilterClear"
+          onClick={() => {
+            setSearchInput("");
+            setPageNumber(1);
+          }}
+          disabled={!searchInput}
+        >
           清空筛选
         </button>
       </section>
@@ -1891,15 +1936,48 @@ function AiWorkerPool({
               aria-label="全选"
             />
             已选择 <strong>{selectedIds.size}</strong> 家客户
+            {selectedPendingCount < selectedIds.size ? (
+              <span
+                className="aiPoolBulkSelectAllNote"
+                title="已加入 CRM 的客户不会重复同步"
+              >
+                （其中 {selectedPendingCount} 家可加入 CRM）
+              </span>
+            ) : null}
           </label>
           <button
             type="button"
             className="aiPoolBulkAction primary"
-            disabled={approving}
-            onClick={() => onBulkApprove(Array.from(selectedIds))}
+            disabled={approving || selectedPendingCount === 0}
+            title={
+              selectedPendingCount === 0
+                ? "已选客户都已加入 CRM，无需重复同步"
+                : undefined
+            }
+            onClick={() => {
+              const pendingIds = new Set(
+                leads.filter(isPendingCrmCandidate).map((lead) => lead.id)
+              );
+              const targetIds = Array.from(selectedIds).filter((id) =>
+                pendingIds.has(id)
+              );
+              if (targetIds.length === 0) return;
+              onBulkApprove(targetIds);
+              // Optimistically clear selection — refreshTask will land
+              // and the cleanup effect would clear it shortly anyway,
+              // but doing it eagerly avoids a half-second window where
+              // the bulk bar still reads "已选 N 家".
+              setSelectedIds(new Set());
+            }}
           >
             <Database size={13} aria-hidden="true" />
-            {approving ? "加入中..." : "加入 CRM"}
+            {approving
+              ? "加入中..."
+              : selectedPendingCount === 0
+                ? "已加入 CRM"
+                : selectedPendingCount < selectedIds.size
+                  ? `加入 CRM（${selectedPendingCount}）`
+                  : "加入 CRM"}
           </button>
           <button
             type="button"
