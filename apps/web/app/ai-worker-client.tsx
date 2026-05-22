@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowRight,
   Bell,
   Building2,
   CheckCircle2,
@@ -1059,17 +1058,6 @@ type WorkbenchPoolCard = {
   tone: "blue" | "green" | "orange";
 };
 
-type WorkbenchTodoItem = {
-  id: string;
-  icon: typeof Database;
-  title: string;
-  /** Numeric count, or "—" when the corresponding API isn't wired yet. */
-  count: number | string;
-  description: string;
-  cta: string;
-  tone: "blue" | "purple" | "orange";
-};
-
 function AiWorkerWorkbench({
   prompt,
   onPromptChange,
@@ -1316,39 +1304,6 @@ function AiWorkerWorkbench({
         }
       ];
 
-  // Todo cards. The corresponding aggregate APIs aren't shipped yet, so
-  // we render `—` until they exist instead of a hardcoded number that
-  // will look stale forever.
-  const todos: WorkbenchTodoItem[] = [
-    {
-      id: "crm",
-      icon: Database,
-      title: "加入 CRM",
-      count: "—",
-      description: "家客户待同步",
-      cta: "去处理",
-      tone: "blue"
-    },
-    {
-      id: "mail",
-      icon: Mail,
-      title: "邮件确认",
-      count: "—",
-      description: "封邮件待确认",
-      cta: "预览邮件",
-      tone: "purple"
-    },
-    {
-      id: "followup",
-      icon: Bell,
-      title: "跟进提醒",
-      count: "—",
-      description: "家客户需跟进",
-      cta: "查看跟进",
-      tone: "orange"
-    }
-  ];
-
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!prompt.trim() || submitting) return;
@@ -1467,92 +1422,6 @@ function AiWorkerWorkbench({
           ))}
         </div>
       </section>
-
-      {/* Todos + history */}
-      <section className="aiWorkbenchSplit">
-        <div className="aiWorkbenchTodos" aria-label="下一步待办">
-          <h2 className="aiWorkbenchSectionTitle">下一步待办</h2>
-          <div className="aiWorkbenchTodoGrid">
-            {todos.map((todo) => (
-              <article className={`aiWorkbenchTodo tone-${todo.tone}`} key={todo.id}>
-                <span className="aiWorkbenchTodoIcon" aria-hidden="true">
-                  <todo.icon size={18} />
-                </span>
-                <div className="aiWorkbenchTodoBody">
-                  <p className="aiWorkbenchTodoTitle">{todo.title}</p>
-                  <p className="aiWorkbenchTodoMeta">
-                    <strong>{todo.count}</strong> {todo.description}
-                  </p>
-                </div>
-                <button type="button" className="aiWorkbenchTodoCta">
-                  {todo.cta}
-                </button>
-              </article>
-            ))}
-          </div>
-        </div>
-
-        <div className="aiWorkbenchHistory" aria-label="历史搜索记录">
-          <header className="aiWorkbenchSectionHeader">
-            <h2 className="aiWorkbenchSectionTitle">历史搜索记录</h2>
-            <a className="aiWorkbenchSectionLink" href="#all">
-              查看全部 {taskHistory.length}
-              <ArrowRight size={13} aria-hidden="true" />
-            </a>
-          </header>
-          <ul className="aiWorkbenchHistoryList">
-            {historyLoading && taskHistory.length === 0 ? (
-              <li className="aiWorkbenchHistoryEmpty">加载中...</li>
-            ) : taskHistory.length === 0 ? (
-              <li className="aiWorkbenchHistoryEmpty">暂无历史搜索</li>
-            ) : (
-              taskHistory.slice(0, 6).map((task) => {
-                const status = mapTaskStatusToPool(task.status);
-                return (
-                  <li key={task.id}>
-                    <button
-                      type="button"
-                      className="aiWorkbenchHistoryItem"
-                      onClick={() => onSelectHistoryTask(task.id)}
-                    >
-                      <span className="aiWorkbenchHistoryDate">
-                        {formatHistoryDate(task.updatedAt)}
-                      </span>
-                      <span className="aiWorkbenchHistoryTitle">{task.title}</span>
-                      <span className={`aiWorkbenchHistoryStatus state-${status.kind}`}>
-                        {status.label}
-                      </span>
-                    </button>
-                  </li>
-                );
-              })
-            )}
-          </ul>
-        </div>
-      </section>
-
-      {/* Bottom AI input bar */}
-      <footer className="aiWorkbenchFooter">
-        <form
-          className="aiWorkbenchFooterForm"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!prompt.trim() || submitting) return;
-            onSubmit();
-          }}
-        >
-          <input
-            type="text"
-            value={prompt}
-            onChange={(event) => onPromptChange(event.target.value)}
-            placeholder="告诉 AI：继续搜索 / 新建客户池 / 加入 CRM / 生成邮件 / 查看今日新增客户"
-            aria-label="AI 指令输入"
-          />
-          <button type="submit" className="aiWorkbenchFooterSend" disabled={submitting}>
-            <Send size={16} aria-hidden="true" />
-          </button>
-        </form>
-      </footer>
     </div>
   );
 }

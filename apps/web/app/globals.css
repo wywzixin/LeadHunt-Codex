@@ -9734,13 +9734,15 @@ button.primary {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 22px 32px 96px;
+  /* 2026-05 LeadHunt 2.0: with todos / history / footer-input removed,
+     the workbench fits in one viewport at desktop widths (>=1280×800).
+     We deliberately hide overflow so the page never shows a vertical
+     scrollbar — looks cleaner and matches the user's explicit request.
+     Bottom padding is small because there's no sticky footer to clear. */
+  padding: 22px 32px 24px;
   background: var(--bg);
-  /* 2026-05 LeadHunt 2.0: workbench is a long scrollable view inside
-     the AppShell's overflow:hidden aiWorkerMain. We own our own
-     scroll context here so the AppShell layout grid stays intact. */
   height: 100%;
-  overflow-y: auto;
+  overflow-y: hidden;
 }
 
 /* Same flex-shrink defense as .aiPool: prevent flex column from
@@ -10177,260 +10179,14 @@ button.primary {
   color: var(--primary);
 }
 
-/* ----- Split: todos + history ----- */
-.aiWorkbenchSplit {
-  display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
-  gap: 20px;
-}
 
-.aiWorkbenchTodos,
-.aiWorkbenchHistory {
-  display: flex;
-  flex-direction: column;
-}
-
-.aiWorkbenchTodos > .aiWorkbenchSectionTitle,
-.aiWorkbenchHistory > .aiWorkbenchSectionHeader {
-  margin-bottom: 14px;
-}
-
-.aiWorkbenchTodoGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.aiWorkbenchTodo {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 14px 14px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: var(--shadow-card);
-}
-
-.aiWorkbenchTodoIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  flex-shrink: 0;
-}
-
-.aiWorkbenchTodo.tone-blue .aiWorkbenchTodoIcon {
-  background: var(--kpi-blue-bg);
-  color: var(--kpi-blue-fg);
-}
-
-.aiWorkbenchTodo.tone-purple .aiWorkbenchTodoIcon {
-  background: var(--kpi-purple-bg);
-  color: var(--kpi-purple-fg);
-}
-
-.aiWorkbenchTodo.tone-orange .aiWorkbenchTodoIcon {
-  background: var(--kpi-orange-bg);
-  color: var(--kpi-orange-fg);
-}
-
-.aiWorkbenchTodoBody {
-  flex: 1;
-  min-width: 0;
-}
-
-.aiWorkbenchTodoTitle {
-  margin: 0 0 4px;
-  color: var(--title);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.aiWorkbenchTodoMeta {
-  margin: 0;
-  color: var(--secondary);
-  font-size: 12px;
-}
-
-.aiWorkbenchTodoMeta strong {
-  color: var(--title);
-  font-size: 14px;
-  margin-right: 2px;
-}
-
-.aiWorkbenchTodoCta {
-  padding: 6px 12px;
-  background: var(--bg);
-  color: var(--primary);
-  border: 1px solid var(--primary-border);
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.aiWorkbenchTodoCta:hover {
-  background: var(--primary-light);
-}
-
-.aiWorkbenchHistoryList {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow: hidden;
-}
-
-.aiWorkbenchHistoryEmpty {
-  padding: 16px;
-  color: var(--secondary);
-  font-size: 13px;
-  text-align: center;
-}
-
-.aiWorkbenchHistoryItem {
-  width: 100%;
-  display: grid;
-  grid-template-columns: 60px 1fr auto;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--divider);
-  color: var(--body);
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.aiWorkbenchHistoryList li:last-child .aiWorkbenchHistoryItem {
-  border-bottom: none;
-}
-
-.aiWorkbenchHistoryItem:hover {
-  background: var(--bg);
-}
-
-.aiWorkbenchHistoryDate {
-  color: var(--secondary);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.aiWorkbenchHistoryTitle {
-  color: var(--title);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.aiWorkbenchHistoryStatus {
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 11px;
-}
-
-.aiWorkbenchHistoryStatus.state-active {
-  background: var(--primary-light);
-  color: var(--primary);
-}
-
-.aiWorkbenchHistoryStatus.state-completed {
-  background: var(--success-light);
-  color: var(--success);
-}
-
-.aiWorkbenchHistoryStatus.state-pending {
-  background: var(--warning-light);
-  color: var(--warning);
-}
-
-/* ----- Footer AI input bar ----- */
-.aiWorkbenchFooter {
-  /* 2026-05 LeadHunt 2.0: not sticky. The workbench is a scrollable
-     container; making this sticky causes the footer to overlap the
-     todos/history sections and crop their headings. The footer now
-     sits in normal flow at the bottom of the workbench so users
-     scroll all the way down to reach the AI input — same as the pool
-     detail page. */
-  margin: 12px -32px 0;
-  padding: 14px 32px 0;
-  background: var(--bg);
-  z-index: 5;
-}
-
-.aiWorkbenchFooterForm {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow-card);
-}
-
-.aiWorkbenchFooterForm input {
-  flex: 1;
-  border: none;
-  background: transparent;
-  font-size: 13px;
-  color: var(--title);
-  font-family: inherit;
-}
-
-.aiWorkbenchFooterForm input:focus {
-  outline: none;
-}
-
-.aiWorkbenchFooterForm input::placeholder {
-  color: var(--secondary);
-}
-
-.aiWorkbenchFooterSend {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  background: var(--primary);
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.aiWorkbenchFooterSend:hover:not(:disabled) {
-  background: var(--primary-hover);
-}
-
-.aiWorkbenchFooterSend:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-/* ----- Responsive: at narrow widths, KPIs and pools stack into 2 rows ----- */
+/* ----- Responsive: at narrow widths, KPIs and pools stack into fewer cols ----- */
 @media (max-width: 1280px) {
   .aiWorkbenchKpis {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .aiWorkbenchPoolGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .aiWorkbenchSplit {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .aiWorkbenchTodoGrid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
