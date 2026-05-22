@@ -9060,6 +9060,12 @@ button.primary {
 
 /* AI worker landing view (embedded in AppShell) */
 .appMain.aiWorkerMain {
+  /* 2026-05 LeadHunt 2.0: complete the height chain so the workbench /
+     pool / conversation children can ask for height: 100% safely.
+     min-height: 0 lets the inner grid 1fr row shrink past content
+     height when needed. */
+  height: 100%;
+  min-height: 0;
   padding: 0;
   overflow: hidden;
 }
@@ -9068,6 +9074,7 @@ button.primary {
   width: 100%;
   max-width: none;
   height: 100%;
+  min-height: 0;
   margin: 0;
   display: flex;
 }
@@ -9731,25 +9738,21 @@ button.primary {
   --pool-green-bg: linear-gradient(135deg, #e8fff0 0%, #ffffff 60%);
   --pool-orange-bg: linear-gradient(135deg, #fff7e8 0%, #ffffff 60%);
 
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  /* 2026-05 LeadHunt 2.0: with todos / history / footer-input removed,
-     the workbench fits in one viewport at desktop widths (>=1280×800).
-     We deliberately hide overflow so the page never shows a vertical
-     scrollbar — looks cleaner and matches the user's explicit request.
-     Bottom padding is small because there's no sticky footer to clear. */
-  padding: 22px 32px 24px;
+  /* 2026-05 LeadHunt 2.0: page skeleton uses CSS Grid so the last
+     row (recent pools) absorbs whatever vertical space is left after
+     the greeting / KPI / search-card stack. No height: calc() chains. */
+  display: grid;
+  grid-template-rows:
+    auto    /* 问候 + tracking pill */
+    auto    /* 5 KPI cards */
+    auto    /* 主搜索 + 快捷指令 */
+    1fr;    /* 最近客户池 — 吃掉剩余空间 */
+  gap: 20px;
+  padding: 28px 32px 32px;
   background: var(--bg);
   height: 100%;
-  overflow-y: hidden;
-}
-
-/* Same flex-shrink defense as .aiPool: prevent flex column from
-   compressing tall children (e.g. todo grid, history list) when the
-   content is taller than the visible area. */
-.aiWorkbench > * {
-  flex-shrink: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .aiWorkbenchSectionTitle {
@@ -10037,17 +10040,25 @@ button.primary {
 
 /* ----- Pool cards ----- */
 .aiWorkbenchPools {
+  /* 2026-05 LeadHunt 2.0: lives in the 1fr row of the workbench grid.
+     min-height: 0 lets it shrink past content height; flex column with
+     a 1fr child stretches the card grid to fill remaining space. */
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
 .aiWorkbenchPoolGrid {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
 }
 
 .aiWorkbenchPoolCard {
+  height: 100%;
+  min-height: 220px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -10180,15 +10191,12 @@ button.primary {
 }
 
 
-/* ----- Responsive: at narrow widths, KPIs and pools stack into fewer cols ----- */
-@media (max-width: 1280px) {
-  .aiWorkbenchKpis {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-  .aiWorkbenchPoolGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
+/* 2026-05 LeadHunt 2.0: no narrow-viewport breakpoint for the
+   workbench. Below 1280px the leadApp shell already enforces a
+   1232px min-width and turns on horizontal scroll, so KPIs and pool
+   cards keep their desktop column counts and just get squeezed
+   horizontally. Stacking them into more rows would make .aiWorkbench
+   taller than 1fr can absorb and trigger overflow clipping. */
 
 
 /* ===========================================================================
