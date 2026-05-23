@@ -2131,14 +2131,13 @@ function AiWorkerPool({
                     aria-label="全选当前页"
                   />
                 </th>
-                <th>公司名称</th>
+                <th className="col-company">公司名称</th>
                 <th>国家/地区</th>
                 <th>客户类型</th>
                 <th className="col-score">推荐指数</th>
-                <th>联系方式</th>
-                <th>电话</th>
-                <th>官网</th>
-                <th>来源批次</th>
+                <th className="col-email">邮箱</th>
+                <th className="col-phone">电话</th>
+                <th className="col-website">官网</th>
                 <th>CRM 状态</th>
                 <th>邮件状态</th>
                 <th>最近动作</th>
@@ -2204,9 +2203,6 @@ function AiWorkerPool({
                     <span className="aiPoolWebsite">{row.websiteShort}</span>
                   </td>
                   <td>
-                    <span className="aiPoolSourceBadge">{row.sourceBatch}</span>
-                  </td>
-                  <td>
                     <span className={`aiPoolCrmBadge state-${row.crmStatus}`}>
                       {row.crmStatusLabel}
                     </span>
@@ -2231,7 +2227,7 @@ function AiWorkerPool({
               ))
               ) : (
                 <tr>
-                  <td className="leadEmptyCell" colSpan={13}>
+                  <td className="leadEmptyCell" colSpan={12}>
                     {searchInput
                       ? "没有匹配当前搜索条件的候选客户。"
                       : "暂无候选客户。回到搜索页继续搜索 30 条来扩充客户池。"}

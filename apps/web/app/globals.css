@@ -10966,12 +10966,13 @@ button.primary {
 
 .aiPoolTable {
   width: 100%;
-  /* 2026-05 LeadHunt 2.0: 13-column candidate table needs ~1080px to
-     read comfortably. Pair with .aiPoolTableScroll { overflow-x: auto }
-     so the table scrolls horizontally inside its wrapper while the
-     page header / KPIs / filter bar above remain fluid (per competitor
-     research — saas.upkuajing.com pattern). */
-  min-width: 1080px;
+  /* 2026-05 LeadHunt 2.0: 12-column candidate table needs ~1000px to
+     read comfortably (was 13 cols / 1080px before the 来源批次 column
+     was dropped per user feedback). Pair with .aiPoolTableScroll
+     { overflow-x: auto } so the table scrolls horizontally inside its
+     wrapper while the page header / KPIs / filter bar above remain
+     fluid (per competitor research — saas.upkuajing.com pattern). */
+  min-width: 1000px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -11026,8 +11027,11 @@ button.primary {
   /* 2026-05 lead-table polish: company column was unbounded so a long
      company name pushed the rest of the table sideways. Cap width and
      ellipsis the inner span so the row stays tidy and the full name
-     surfaces via the row title. */
-  max-width: 220px;
+     surfaces via the row title. Tightened to 180px after user
+     feedback on long names like "Qatar Multitech Trading & Contracting
+     W.L.L." or "ATS Advanced Technical Solutions LLC". */
+  width: 180px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
