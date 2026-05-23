@@ -165,6 +165,11 @@ type SearchQuery = {
   resultCount?: number | null;
   qualifiedCount?: number | null;
   effectivenessScore?: number | null;
+  // 2026-05 polish: ISO timestamp from Prisma. The search-run page
+  // uses the earliest createdAt among the latest batch's pending /
+  // running queries to compute "this batch started at T", then
+  // filters the new-lead table to candidates created on or after T.
+  createdAt?: string;
   searchResults?: SearchResult[];
 };
 
@@ -218,6 +223,11 @@ type LeadCandidate = {
   countryConflict?: boolean | null;
   sourceUrl?: string | null;
   status?: string;
+  // 2026-05 polish: ISO timestamp from Prisma. Used by the search-run
+  // page to filter the "新增客户" table down to leads that landed
+  // during the *current* batch (not leftovers from a prior batch on
+  // the same task pool).
+  createdAt?: string;
   contacts?: LeadContact[];
   icpScore?: IcpScore | null;
   outreachDrafts?: OutreachDraftState[];
@@ -2479,11 +2489,60 @@ function AiWorkerConversation({
     hasError: Boolean(error)
   });
   const [leadPage, setLeadPage] = useState(1);
-  const leadPageCount = Math.max(1, Math.ceil(leads.length / leadPageSize));
+  // 2026-05 polish: search-run "新增客户" table must show only leads
+  // that landed in the *current* batch — not leftovers from a prior
+  // batch on the same task pool. Without this, clicking 继续搜索 on a
+  // finished task showed "0/20 query 已执行" alongside 7 stale rows
+  // from the previous run.
+  //
+  // Batch boundary heuristic: while a batch is active (any pending /
+  // running query exists), find the earliest createdAt among those
+  // un-completed queries — that's the moment this batch was inserted
+  // by the continuation endpoint. Filter leads to ones whose own
+  // createdAt is >= that boundary. When the task is idle (nothing
+  // pending or running), there's no "current batch" so we fall back
+  // to the full lead list.
+  const currentBatchStart = useMemo(() => {
+    const queries = currentTask?.searchQueries ?? [];
+    const inFlight = queries.filter((query) => {
+      const s = query.executionStatus;
+      return s === "pending" || s === "running";
+    });
+    if (inFlight.length === 0) return null;
+    let earliest: number | null = null;
+    for (const q of inFlight) {
+      if (!q.createdAt) continue;
+      const t = new Date(q.createdAt).getTime();
+      if (!Number.isFinite(t)) continue;
+      if (earliest === null || t < earliest) earliest = t;
+    }
+    return earliest;
+  }, [currentTask?.searchQueries]);
+
+  const currentBatchLeads = useMemo(() => {
+    // While the user has just clicked 继续搜索 but the backend hasn't
+    // appended pending queries yet, currentBatchStart is null even
+    // though the user expects "this batch" to be empty. Treat the
+    // optimistic searching flag as "batch starting now" and hide all
+    // stale leads from the prior batch.
+    if (currentBatchStart === null && searching) {
+      return [];
+    }
+    if (currentBatchStart === null) return leads;
+    return leads.filter((lead) => {
+      const createdRaw = lead.raw.createdAt;
+      if (!createdRaw) return false;
+      const t = new Date(createdRaw).getTime();
+      if (!Number.isFinite(t)) return false;
+      return t >= currentBatchStart;
+    });
+  }, [leads, currentBatchStart, searching]);
+
+  const leadPageCount = Math.max(1, Math.ceil(currentBatchLeads.length / leadPageSize));
   const leadStartIndex = (leadPage - 1) * leadPageSize;
-  const pagedLeads = leads.slice(leadStartIndex, leadStartIndex + leadPageSize);
-  const leadRangeStart = leads.length ? leadStartIndex + 1 : 0;
-  const leadRangeEnd = Math.min(leadStartIndex + leadPageSize, leads.length);
+  const pagedLeads = currentBatchLeads.slice(leadStartIndex, leadStartIndex + leadPageSize);
+  const leadRangeStart = currentBatchLeads.length ? leadStartIndex + 1 : 0;
+  const leadRangeEnd = Math.min(leadStartIndex + leadPageSize, currentBatchLeads.length);
 
   useEffect(() => {
     if (leadPage > leadPageCount) {
@@ -2738,8 +2797,8 @@ function AiWorkerConversation({
           </span>
           <div className="aiPoolKpiBody">
             <span className="aiPoolKpiLabel">本批新增</span>
-            <strong className="aiPoolKpiValue">{leads.length}</strong>
-            <span className="aiPoolKpiDelta">{`较上周 +${leads.length}`}</span>
+            <strong className="aiPoolKpiValue">{currentBatchLeads.length}</strong>
+            <span className="aiPoolKpiDelta">{`较上周 +${currentBatchLeads.length}`}</span>
           </div>
         </article>
         <article className="aiPoolKpi tone-orange">
@@ -2769,13 +2828,7 @@ function AiWorkerConversation({
         <header className="aiSearchRunHead">
           <div className="aiSearchRunHeadLeft">
             <h2>持续搜索批次</h2>
-            {isRunActive ? (
-              <p>
-                {`正在执行：已完成 ${executedCount}/${queryCount || "—"} 条 query${
-                  failedQueryCount ? `，失败 ${failedQueryCount} 条` : ""
-                }`}
-              </p>
-            ) : isRunComplete && (failedQueryCount > 0 || strandedQueryCount > 0) ? (
+            {isRunActive ? null : isRunComplete && (failedQueryCount > 0 || strandedQueryCount > 0) ? (
               <p>
                 {(() => {
                   const parts: string[] = [`${executedCount} 条成功`];
@@ -2863,7 +2916,7 @@ function AiWorkerConversation({
             ) : null}
 
             <p className="aiSearchRunStat">
-              本批新增 <strong>{leads.length}</strong> 家客户
+              本批新增 <strong>{currentBatchLeads.length}</strong> 家客户
               {failedQueryCount > 0
                 ? `，${failedQueryCount} 条 query 失败已忽略`
                 : ""}
@@ -2972,7 +3025,7 @@ function AiWorkerConversation({
               </tr>
             </thead>
             <tbody>
-              {leads.length ? (
+              {currentBatchLeads.length ? (
                 pagedLeads.map((lead) => {
                   const emails = pickFirstContactValue(lead.raw.contacts, "email");
                   const phones = pickFirstContactValue(lead.raw.contacts, "phone");
@@ -3058,9 +3111,11 @@ function AiWorkerConversation({
               ) : (
                 <tr>
                   <td className="leadEmptyCell" colSpan={9}>
-                    {searching
-                      ? "正在搜索并清洗候选客户..."
-                      : "暂无候选客户。任务创建后会自动执行本轮全部搜索指令。"}
+                    {searching || currentBatchStart !== null
+                      ? "正在搜索并清洗本批候选客户..."
+                      : leads.length > 0
+                        ? "本批暂无新候选客户，旧批次结果已沉淀到客户池。"
+                        : "暂无候选客户。任务创建后会自动执行本轮全部搜索指令。"}
                   </td>
                 </tr>
               )}
@@ -3069,7 +3124,7 @@ function AiWorkerConversation({
         </div>
         <footer className="aiPoolTableFooter">
           <p className="aiPoolTableFootHint">
-            显示 {leadRangeStart}-{leadRangeEnd} / {leads.length}
+            显示 {leadRangeStart}-{leadRangeEnd} / {currentBatchLeads.length}
             <span className="aiPoolTableFootSep">·</span>
             主客户 {actionableLeads.length} 条，ICP 75+ {qualifiedCount} 条
           </p>
@@ -3078,7 +3133,7 @@ function AiWorkerConversation({
             <button
               type="button"
               onClick={() => changeLeadPage(leadPage - 1)}
-              disabled={leadPage <= 1 || !leads.length}
+              disabled={leadPage <= 1 || !currentBatchLeads.length}
             >
               上一页
             </button>
@@ -3088,7 +3143,7 @@ function AiWorkerConversation({
             <button
               type="button"
               onClick={() => changeLeadPage(leadPage + 1)}
-              disabled={leadPage >= leadPageCount || !leads.length}
+              disabled={leadPage >= leadPageCount || !currentBatchLeads.length}
             >
               下一页
             </button>
