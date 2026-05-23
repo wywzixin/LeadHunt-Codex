@@ -2454,9 +2454,25 @@ function AiWorkerConversation({
   onContinueSearch
 }: ConversationProps) {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount =
-    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
-    0;
+  // 2026-05 polish: progress numerator must include running queries,
+  // not just completed. The Brave step lands candidates in the DB
+  // (and the new-lead table starts to fill) BEFORE the worker pool
+  // marks the query "completed" — that final flip happens after
+  // qualification, dedupe, and lead writing finish. Counting only
+  // completed queries makes the progress bar sit at 0/20 while
+  // candidates are already showing up, which the user reads as
+  // "nothing is happening" or "data appeared from thin air".
+  //
+  // Sub-counters keep their literal meaning for the explainer line
+  // under the progress bar so the user can see what's actually
+  // finished versus what's mid-qualification.
+  const completedQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "completed").length ?? 0;
+  const runningQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "running").length ?? 0;
+  // executedCount = "已执行" — every query that's in flight or done.
+  // Pending queries are the only thing left out. failedQueryCount is
+  // computed below via useMemo and folded in at usage sites.
   const actionableLeads = leads.filter(isActionableDisplayLead);
   const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
   const hasActionableLeads = actionableLeads.length > 0;
@@ -2617,6 +2633,14 @@ function AiWorkerConversation({
   // Stranded query count for the failure subline. Only meaningful in
   // terminal state — during active runs these are just queued work.
   const strandedQueryCount = isTerminalTask ? pendingQueryCount : 0;
+  // 2026-05 polish: progress = completed + failed + running (everything
+  // that's been picked up). Running queries are mid-flight — Brave has
+  // returned, candidates are being saved — so users should see them as
+  // "already executed", not "stuck at zero". This is computed here
+  // (after failedQueryCount is declared) so any earlier helpers that
+  // used the old completed-only meaning have already been updated to
+  // reference completedQueryCount explicitly.
+  const executedCount = completedQueryCount + failedQueryCount + runningQueryCount;
   // Rough ETA: each remaining query typically takes ~15s in the polling
   // backend. Floor at 1 minute so we don't say "0 minutes" while there
   // are still queries pending. When everything is done it's hidden.
@@ -2796,7 +2820,7 @@ function AiWorkerConversation({
             <TrendingUp size={20} />
           </span>
           <div className="aiPoolKpiBody">
-            <span className="aiPoolKpiLabel">本批新增</span>
+            <span className="aiPoolKpiLabel">{isRunActive ? "已发现" : "本批新增"}</span>
             <strong className="aiPoolKpiValue">{currentBatchLeads.length}</strong>
             <span className="aiPoolKpiDelta">{`较上周 +${currentBatchLeads.length}`}</span>
           </div>
@@ -2831,7 +2855,7 @@ function AiWorkerConversation({
             {isRunActive ? null : isRunComplete && (failedQueryCount > 0 || strandedQueryCount > 0) ? (
               <p>
                 {(() => {
-                  const parts: string[] = [`${executedCount} 条成功`];
+                  const parts: string[] = [`${completedQueryCount} 条成功`];
                   if (failedQueryCount > 0) parts.push(`${failedQueryCount} 条失败`);
                   if (strandedQueryCount > 0) parts.push(`${strandedQueryCount} 条未完成`);
                   return `本批已停止：${parts.join("，")}`;
@@ -2887,7 +2911,11 @@ function AiWorkerConversation({
               ) : null}
             </div>
 
-            {/* Progress bar + inline "N / M query 已执行" label on the right. */}
+            {/* Progress bar + inline "N / M query 已执行" label on the right.
+                2026-05 polish: numerator includes running queries —
+                see executedCount comment. The explainer subline below
+                the bar tells the user "N done, M cleaning candidates"
+                so the literal completion count isn't lost. */}
             <div className="aiSearchRunProgressRow">
               <div className="aiSearchRunProgressBar" aria-hidden="true">
                 <div
@@ -2902,6 +2930,15 @@ function AiWorkerConversation({
                 <span>/ {queryCount || "—"} query 已执行</span>
               </p>
             </div>
+            {isRunActive && executedCount > 0 ? (
+              <p className="aiSearchRunProgressBreakdown">
+                其中 <b>{completedQueryCount}</b> 条已完成
+                {runningQueryCount > 0
+                  ? `，${runningQueryCount} 条正在清洗候选客户`
+                  : ""}
+                {failedQueryCount > 0 ? `，${failedQueryCount} 条失败` : ""}
+              </p>
+            ) : null}
 
             {currentRunningQuery ? (
               <div className="aiSearchRunCurrent">
@@ -2915,8 +2952,16 @@ function AiWorkerConversation({
               </div>
             ) : null}
 
+            {/* Lead counter underneath. While the batch is still in
+                flight we say "已发现 N 家候选客户" — it's literally
+                what's been written to the DB but not yet confirmed
+                via query.executionStatus = completed. Once everything
+                settles we switch back to "本批新增" so the post-run
+                summary still reads naturally. */}
             <p className="aiSearchRunStat">
-              本批新增 <strong>{currentBatchLeads.length}</strong> 家客户
+              {isRunActive ? "已发现" : "本批新增"}{" "}
+              <strong>{currentBatchLeads.length}</strong> 家
+              {isRunActive ? "候选客户" : "客户"}
               {failedQueryCount > 0
                 ? `，${failedQueryCount} 条 query 失败已忽略`
                 : ""}
@@ -3467,9 +3512,17 @@ function buildActivityLogs({
   hasError: boolean;
 }): ActivityLog[] {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount =
-    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
-    0;
+  // 2026-05 polish: same as the conversation view — count completed +
+  // failed + running so the "数据搜索中 — 正在执行 N/M" log line moves
+  // as soon as Brave work begins, instead of waiting for the worker
+  // pool to flip executionStatus to "completed" after qualification.
+  const completedQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "completed").length ?? 0;
+  const failedQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "failed").length ?? 0;
+  const runningQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "running").length ?? 0;
+  const executedCount = completedQueryCount + failedQueryCount + runningQueryCount;
   const actionableLeads = leads.filter(isActionableDisplayLead);
   const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
   const hasTask = Boolean(currentTask);

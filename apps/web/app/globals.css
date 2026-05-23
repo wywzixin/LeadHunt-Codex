@@ -11582,6 +11582,22 @@ button.primary {
   font-variant-numeric: tabular-nums;
 }
 
+/* 2026-05 polish: small explainer line under the progress bar that
+   breaks the executed count back into completed vs. running. The
+   numerator above counts both so the bar moves as soon as Brave
+   work starts; this line preserves the literal "N done" number. */
+.aiSearchRunProgressBreakdown {
+  margin: 4px 0 0;
+  color: var(--secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.aiSearchRunProgressBreakdown b {
+  color: var(--title);
+  font-weight: 700;
+}
+
 /* Current query gray box — caps at ~3/5 of the run card so it ends
    roughly under the "清洗候选" pill, matching the design. */
 .aiSearchRunCurrent {
