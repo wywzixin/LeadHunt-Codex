@@ -3613,35 +3613,40 @@ describe("LeadQualificationService", () => {
     expect(score.leadType).not.toBe("content_evidence");
   });
 
-  it("STILL classifies a real press-release / market-report URL as content (EE Times-style scenario)", () => {
+  it("STILL classifies a real news/article URL as content even when the candidate country IS in target (EE Times-style scenario)", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const score = service.scoreCandidate(
       {
         taskId: "task-1",
-        companyName: "EE Times",
-        website: "https://www.eetimes.com",
+        companyName: "EE Times Germany",
+        website: "https://www.eetimes.example.de",
         sourceUrl:
-          "https://www.eetimes.com/european-telecoms-eye-openran-to-replace-huawei-equipment/",
-        country: "UNITED STATES",
-        inferredCountry: "UNITED STATES",
-        countryConfidence: "medium",
+          "https://www.eetimes.example.de/european-telecoms-eye-openran-to-replace-huawei-equipment/",
+        // Country deliberately set to IN-TARGET so the assertion is
+        // not contaminated by verified off-target hard reject. If the
+        // page-quality / news classifier were broken, a Germany news
+        // page would slip through into review/qualified.
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
         countryConflict: false,
         countryEvidence: [
           {
             type: "phone",
-            value: "+14155551111",
-            country: "UNITED STATES",
-            sourceUrl: "https://www.eetimes.com",
-            confidence: "medium"
+            value: "+4930123456",
+            country: "GERMANY",
+            sourceUrl: "https://www.eetimes.example.de",
+            confidence: "high"
           }
         ],
         contacts: [],
         // Multiple weak news/content terms in the body — under the
         // new strong/weak rule, weak >= 3 fires hasNewsContentSignal.
-        // Keeps the rejection working without needing an explicit
-        // "press release" or "market report" phrase.
+        // Plus an explicit URL slug that looksLikeArticlePath would
+        // also pick up via the /20\d{2}/ pattern... but the slug
+        // here uses kebab-case headline. Rely on weak >= 3 alone.
         summary:
-          "EE Times — European telecoms eye OpenRAN to replace Huawei equipment. Read the full news article. Categories: news, blog, media, article."
+          "EE Times Germany — European telecoms eye OpenRAN to replace Huawei equipment. Read the full news article. Categories: news, blog, media, article. Author: a journalist."
       },
       {
         ...criteria,
@@ -3651,11 +3656,18 @@ describe("LeadQualificationService", () => {
       }
     );
 
-    // Real news/article page: should be flagged as content-like and
-    // not enter the main customer list. Either the
-    // content_or_directory pageType OR the riskyDiscoveryPage cap
-    // is sufficient to keep it out.
-    expect(score.score).toBeLessThanOrEqual(58);
+    // Strong assertion: page must be classified as content_or_directory
+    // AND content_evidence risks must be present. Country is IN-target,
+    // so this isolates the page-quality / news classifier behaviour.
+    expect(score.pageType).toBe("content_or_directory");
+    expect(score.leadType).toBe("content_evidence");
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "News, article, blog, media, report, or content page cannot enter the main customer list"
+        )
+      ])
+    );
     expect(score.status).not.toBe("qualified");
   });
 
