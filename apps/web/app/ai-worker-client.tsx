@@ -2924,7 +2924,7 @@ function AiWorkerConversation({
             <ol className="aiSearchRunLogList">
               {activityLogs.slice(0, 4).map((log, index) => (
                 <li
-                  className={`aiSearchRunLogItem state-${log.state}`}
+                  className={`aiSearchRunLogItem state-${log.state} palette-${index}`}
                   key={`${log.title}-${index}`}
                 >
                   <span className="aiSearchRunLogTime">{formatLogTime(index, Math.min(activityLogs.length, 4))}</span>
@@ -2936,7 +2936,7 @@ function AiWorkerConversation({
                 </li>
               ))}
               {activityLogs.length === 0 ? (
-                <li className="aiSearchRunLogItem state-pending">
+                <li className="aiSearchRunLogItem state-pending palette-0">
                   <span className="aiSearchRunLogTime">--:--</span>
                   <span className="aiSearchRunLogBullet" aria-hidden="true" />
                   <span className="aiSearchRunLogText">

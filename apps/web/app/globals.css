@@ -11842,7 +11842,33 @@ button.primary {
   font-size: 12px;
   color: var(--body);
   position: relative;
+  /* 2026-05 polish: each step gets its own brand color via the
+     --logTone variable below. Default falls back to primary. The
+     palette overrides set this per-row index so the timeline reads
+     as 6 distinct steps (per design) instead of one uniform green
+     wash when all rows are in state-done. */
+  --logTone: var(--secondary);
+  --logToneSoft: var(--border);
 }
+
+/* 2026-05 polish: per-step palette (matches ui/ai-search.png).
+   Each row position gets a unique tone:
+     0  LLM思考中       teal-blue   #20a4d8
+     1  技能挑选中      purple      #7c3aed
+     2  任务规划中      green       #1aaf69
+     3  数据搜索中      orange      #fa7f01
+     4  数据搜索完成    cyan        #06b6c4
+     5  检索结果分析    indigo      #4054ff
+   The same color drives the bullet, the timestamp text, and the
+   connector tint when the step is in a *colored* state (done / active
+   / failed). Pending rows stay gray regardless of palette so the
+   user can still read what's done vs what's queued. */
+.aiSearchRunLogItem.palette-0 { --logTone: #20a4d8; --logToneSoft: #c8ebf5; }
+.aiSearchRunLogItem.palette-1 { --logTone: #7c3aed; --logToneSoft: #e0d5fb; }
+.aiSearchRunLogItem.palette-2 { --logTone: #1aaf69; --logToneSoft: #c8ecd8; }
+.aiSearchRunLogItem.palette-3 { --logTone: #fa7f01; --logToneSoft: #fde2c7; }
+.aiSearchRunLogItem.palette-4 { --logTone: #06b6c4; --logToneSoft: #c8eef2; }
+.aiSearchRunLogItem.palette-5 { --logTone: #4054ff; --logToneSoft: #d6dcfd; }
 
 /* Vertical timeline line connecting the bullets, plus a circular
    bullet on each row in the second grid column. Mirrors the design's
@@ -11853,21 +11879,19 @@ button.primary {
   height: 8px;
   margin-top: 4px;
   border-radius: 50%;
+  /* Default: gray (used by pending rows). Colored states overwrite
+     the bullet via --logTone. */
   background: var(--secondary);
   border: 2px solid var(--card);
   box-shadow: 0 0 0 1px var(--border);
 }
 
 .aiSearchRunLogItem.state-completed .aiSearchRunLogBullet,
-.aiSearchRunLogItem.state-done .aiSearchRunLogBullet {
-  background: var(--success);
-  box-shadow: 0 0 0 1px var(--success);
-}
-
+.aiSearchRunLogItem.state-done .aiSearchRunLogBullet,
 .aiSearchRunLogItem.state-running .aiSearchRunLogBullet,
 .aiSearchRunLogItem.state-active .aiSearchRunLogBullet {
-  background: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary);
+  background: var(--logTone);
+  box-shadow: 0 0 0 1px var(--logTone);
 }
 
 .aiSearchRunLogItem.state-failed .aiSearchRunLogBullet {
@@ -11913,10 +11937,13 @@ button.primary {
   text-overflow: ellipsis;
 }
 
+/* Time text uses the palette tone for any colored state, gray for
+   pending. Failed overrides to danger so a real failure is visible
+   even on a normally-green row. */
 .aiSearchRunLogItem.state-completed .aiSearchRunLogTime,
-.aiSearchRunLogItem.state-done .aiSearchRunLogTime { color: var(--success); }
+.aiSearchRunLogItem.state-done .aiSearchRunLogTime,
 .aiSearchRunLogItem.state-running .aiSearchRunLogTime,
-.aiSearchRunLogItem.state-active .aiSearchRunLogTime { color: var(--primary); }
+.aiSearchRunLogItem.state-active .aiSearchRunLogTime { color: var(--logTone); }
 .aiSearchRunLogItem.state-failed .aiSearchRunLogTime { color: var(--danger); }
 
 /* ----- Lead table tweaks for the search-in-progress version ----- */
