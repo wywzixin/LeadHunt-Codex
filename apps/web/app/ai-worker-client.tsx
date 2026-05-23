@@ -16,7 +16,6 @@ import {
   Globe2,
   Mail,
   MessageCircle,
-  MoreHorizontal,
   PhoneCall,
   Play,
   RadioTower,
@@ -1579,9 +1578,14 @@ type PoolTableRow = {
   scoreValue: number;
   hasEmail: boolean;
   emailCount: number;
+  emailFirst: string;
+  emailAll: string[];
   hasPhone: boolean;
   phoneCount: number;
+  phoneFirst: string;
+  phoneAll: string[];
   website: string;
+  websiteShort: string;
   sourceBatch: string;
   crmStatus: "pending" | "synced" | "active";
   crmStatusLabel: string;
@@ -2153,7 +2157,9 @@ function AiWorkerPool({
                       aria-label={`选择 ${row.companyName}`}
                     />
                   </td>
-                  <td className="col-company">{row.companyName}</td>
+                  <td className="col-company" title={row.companyName}>
+                    <span className="aiPoolCompanyName">{row.companyName}</span>
+                  </td>
                   <td>{row.country}</td>
                   <td>{row.industry}</td>
                   <td className="col-score">
@@ -2162,25 +2168,41 @@ function AiWorkerPool({
                     </span>
                     <span className="aiPoolScoreValue">{row.scoreValue}</span>
                   </td>
-                  <td>
+                  <td
+                    className="col-email"
+                    title={row.emailCount ? row.emailAll.join("\n") : "暂无邮箱"}
+                  >
                     {row.hasEmail ? (
-                      <span className="aiPoolContactBadge active">
-                        <Mail size={11} aria-hidden="true" /> 邮箱 {row.emailCount}
+                      <span className="aiPoolContactValue">
+                        <Mail size={11} aria-hidden="true" />
+                        <span className="aiPoolContactText">{row.emailFirst}</span>
+                        {row.emailCount > 1 ? (
+                          <span className="aiPoolContactMore">…</span>
+                        ) : null}
                       </span>
                     ) : (
                       <span className="aiPoolContactBadge muted">— 邮箱 0</span>
                     )}
                   </td>
-                  <td>
+                  <td
+                    className="col-phone"
+                    title={row.phoneCount ? row.phoneAll.join("\n") : "暂无电话"}
+                  >
                     {row.hasPhone ? (
-                      <span className="aiPoolContactBadge active">
-                        <PhoneCall size={11} aria-hidden="true" /> 电话 {row.phoneCount}
+                      <span className="aiPoolContactValue">
+                        <PhoneCall size={11} aria-hidden="true" />
+                        <span className="aiPoolContactText">{row.phoneFirst}</span>
+                        {row.phoneCount > 1 ? (
+                          <span className="aiPoolContactMore">…</span>
+                        ) : null}
                       </span>
                     ) : (
                       <span className="aiPoolContactBadge muted">电话 0</span>
                     )}
                   </td>
-                  <td className="col-website">{row.website}</td>
+                  <td className="col-website" title={row.website}>
+                    <span className="aiPoolWebsite">{row.websiteShort}</span>
+                  </td>
                   <td>
                     <span className="aiPoolSourceBadge">{row.sourceBatch}</span>
                   </td>
@@ -2197,8 +2219,12 @@ function AiWorkerPool({
                     <button type="button" className="aiPoolRowAction">
                       详情
                     </button>
-                    <button type="button" className="aiPoolRowAction icon">
-                      <MoreHorizontal size={14} aria-hidden="true" />
+                    <button
+                      type="button"
+                      className="aiPoolRowAction"
+                      disabled={row.crmStatus === "synced"}
+                    >
+                      {row.crmStatus === "synced" ? "已加入" : "加入 CRM"}
                     </button>
                   </td>
                 </tr>
@@ -2290,6 +2316,38 @@ function renderStars(filled: number): string {
   return full + empty;
 }
 
+// 2026-05 lead-table polish: cell formatting helpers shared by both
+// the search-run new-lead table and the pool-detail full table.
+
+function pickFirstContactValue(
+  contacts: LeadContact[] | undefined,
+  type: "email" | "phone"
+): { first: string; all: string[]; count: number } {
+  const all = (contacts ?? [])
+    .filter((c) => c.type === type)
+    .map((c) => c.value)
+    .filter((v) => typeof v === "string" && v.length > 0);
+  return { first: all[0] ?? "", all, count: all.length };
+}
+
+// Trim a website URL down to a short, readable form: drop the
+// scheme (http/https) and any trailing path. Designs show plain
+// domains like "azrait.sa" rather than the full URL with /path.
+function formatWebsiteShort(website: string | null | undefined): string {
+  if (!website || website === "—") return "—";
+  let raw = String(website).trim();
+  if (!raw) return "—";
+  raw = raw.replace(/^https?:\/\//i, "");
+  raw = raw.replace(/^www\./i, "");
+  // Cut the path off so the column stays narrow.
+  const slash = raw.indexOf("/");
+  if (slash > 0) raw = raw.slice(0, slash);
+  // Drop trailing slash if any.
+  raw = raw.replace(/\/+$/, "");
+  return raw || "—";
+}
+
+
 function percent(part: number, total: number): string {
   if (!total) return "—";
   return `${((part / total) * 100).toFixed(1)}%`;
@@ -2300,8 +2358,10 @@ function buildPoolTableRow(lead: DisplayLead): PoolTableRow {
   // display string). The display string joins phones with " ; ", so a
   // naive split on whitespace would yield silly numbers like "电话 16".
   const contacts = lead.raw.contacts ?? [];
-  const emailCount = contacts.filter((contact) => contact.type === "email").length;
-  const phoneCount = contacts.filter((contact) => contact.type === "phone").length;
+  const emails = pickFirstContactValue(contacts, "email");
+  const phones = pickFirstContactValue(contacts, "phone");
+  const emailCount = emails.count;
+  const phoneCount = phones.count;
   const crmStage = lead.raw.crmLead?.stage ?? null;
   const sentEmail = hasSentEmail(lead.raw);
   // 2026-05 Stage 2: CRM status reflects either an explicit crmLead row
@@ -2332,9 +2392,14 @@ function buildPoolTableRow(lead: DisplayLead): PoolTableRow {
     scoreValue: lead.score,
     hasEmail: emailCount > 0,
     emailCount,
+    emailFirst: emails.first,
+    emailAll: emails.all,
     hasPhone: phoneCount > 0,
     phoneCount,
+    phoneFirst: phones.first,
+    phoneAll: phones.all,
     website: lead.website || "—",
+    websiteShort: formatWebsiteShort(lead.website),
     sourceBatch: lead.source || "第 1 批",
     crmStatus: crmActive ? "synced" : "pending",
     crmStatusLabel: crmActive ? "已加入CRM" : "待加入CRM",
@@ -2913,41 +2978,64 @@ function AiWorkerConversation({
             <tbody>
               {leads.length ? (
                 pagedLeads.map((lead) => {
-                  const phoneCount = (lead.raw.contacts ?? []).filter(
-                    (c) => c.type === "phone"
-                  ).length;
-                  const emailCount = (lead.raw.contacts ?? []).filter(
-                    (c) => c.type === "email"
-                  ).length;
+                  const emails = pickFirstContactValue(lead.raw.contacts, "email");
+                  const phones = pickFirstContactValue(lead.raw.contacts, "phone");
+                  const websiteShort = formatWebsiteShort(lead.website);
+                  const websiteFull = lead.website && lead.website !== "—" ? lead.website : "";
+                  const inCrm = Boolean(lead.raw.crmLead);
                   const isFresh = lead.stage === "新发现" || lead.stage === "main";
                   return (
                     <tr key={lead.id} className={isFresh ? "is-fresh" : ""}>
                       <td className="col-company" title={lead.companyName}>
                         {isFresh ? <span className="aiSearchRunFreshBadge">新增</span> : null}
-                        {lead.companyName}
+                        <span className="aiSearchRunCompanyName">{lead.companyName}</span>
                       </td>
                       <td className="col-country" title={lead.country}>{lead.country}</td>
                       <td className="col-type" title={lead.tag}>{lead.tag}</td>
                       <td className="col-score">
-                        <span className="stars">{renderStars(lead.score / 20)}</span>
+                        <span className="aiSearchRunScoreStars" aria-hidden="true">
+                          {renderStars(lead.score / 20)}
+                        </span>
                         <span className="aiSearchRunScore">{lead.score}</span>
                       </td>
-                      <td className="col-email">
-                        <span className="aiSearchRunContactChip">
-                          邮箱 <b>{emailCount}</b>
-                        </span>
+                      <td
+                        className="col-email"
+                        title={emails.count ? emails.all.join("\n") : "暂无邮箱"}
+                      >
+                        {emails.count > 0 ? (
+                          <span className="aiSearchRunContactValue">
+                            <span className="aiSearchRunContactText">{emails.first}</span>
+                            {emails.count > 1 ? (
+                              <span className="aiSearchRunContactMore">…</span>
+                            ) : null}
+                          </span>
+                        ) : (
+                          <span className="aiSearchRunContactMuted">—</span>
+                        )}
                       </td>
-                      <td className="col-phone">
-                        <span className="aiSearchRunContactChip">
-                          电话 <b>{phoneCount}</b>
-                        </span>
+                      <td
+                        className="col-phone"
+                        title={phones.count ? phones.all.join("\n") : "暂无电话"}
+                      >
+                        {phones.count > 0 ? (
+                          <span className="aiSearchRunContactValue">
+                            <span className="aiSearchRunContactText">{phones.first}</span>
+                            {phones.count > 1 ? (
+                              <span className="aiSearchRunContactMore">…</span>
+                            ) : null}
+                          </span>
+                        ) : (
+                          <span className="aiSearchRunContactMuted">—</span>
+                        )}
                       </td>
-                      <td className="col-website" title={lead.website}>
-                        {lead.website !== "—" ? lead.website : "-"}
+                      <td className="col-website" title={websiteFull || websiteShort}>
+                        <span className="aiSearchRunWebsite">{websiteShort}</span>
                       </td>
                       <td className="col-status">
-                        <span className={`aiPoolStatusPill ${lead.raw.crmLead ? "synced" : "pending"}`}>
-                          {lead.raw.crmLead ? "已加入CRM" : "待加入CRM"}
+                        <span
+                          className={`aiPoolStatusPill ${inCrm ? "synced" : "pending"}`}
+                        >
+                          {inCrm ? "已加入CRM" : "待加入CRM"}
                         </span>
                       </td>
                       <td className="col-action">
@@ -2958,8 +3046,14 @@ function AiWorkerConversation({
                         >
                           详情
                         </button>
-                        <button type="button" className="aiPoolRowAction icon" aria-label="更多操作">
-                          <MoreHorizontal size={14} aria-hidden="true" />
+                        <button
+                          type="button"
+                          className="aiPoolRowAction"
+                          onClick={onOpenCrm}
+                          disabled={inCrm}
+                          title={inCrm ? "已加入 CRM" : "加入 CRM"}
+                        >
+                          {inCrm ? "已加入" : "加入 CRM"}
                         </button>
                       </td>
                     </tr>

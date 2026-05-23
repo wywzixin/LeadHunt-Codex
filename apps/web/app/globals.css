@@ -1904,12 +1904,14 @@ body:has(.aiProjectApp) {
 }
 
 .stars {
-  color: #ffb400;
+  /* 2026-05 lead-table polish: aligned with .aiPoolScoreStars at
+     #fa7f01 (sampled from design ref). */
+  color: #fa7f01;
   font-weight: 800;
 }
 
 .stars span {
-  color: #c9cdd4;
+  color: #d8dde3;
 }
 
 .realBadge,
@@ -10997,7 +10999,10 @@ button.primary {
 }
 
 .aiPoolTable tbody tr:hover {
-  background: var(--bg);
+  /* 2026-05 lead-table polish: a slightly more visible hover than
+     the default --primary-light (#eef4ff). Designs use a denser
+     light-blue tone for row highlight. */
+  background: #e3edff;
 }
 
 .aiPoolTable tbody tr.selected {
@@ -11018,23 +11023,52 @@ button.primary {
 .aiPoolTable .col-company {
   color: var(--title);
   font-weight: 600;
+  /* 2026-05 lead-table polish: company column was unbounded so a long
+     company name pushed the rest of the table sideways. Cap width and
+     ellipsis the inner span so the row stays tidy and the full name
+     surfaces via the row title. */
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Inner span makes the ellipsis predictable across browsers when the
+   td has padding or extra inline icons. Used by both the search-run
+   table and the pool-detail table. */
+.aiPoolCompanyName,
+.aiSearchRunCompanyName {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
 }
 
 .aiPoolTable .col-score {
   white-space: nowrap;
 }
 
-.aiPoolScoreStars {
+.aiPoolScoreStars,
+.aiSearchRunScoreStars {
+  /* 2026-05 lead-table polish: design uses an orange star
+     (#fa7f01) — sampled from the design ref. The previous yellow
+     (#ffb400 / var(--warning)) felt washed out and didn't match. */
   display: inline-block;
-  color: var(--warning);
+  color: #fa7f01;
   font-size: 13px;
   letter-spacing: 1px;
   margin-right: 6px;
 }
 
 .aiPoolScoreValue {
-  color: var(--secondary);
+  /* 2026-05: number sits inline with the orange stars, same hue so
+     it reads as one tag rather than two separate elements. */
+  color: #fa7f01;
   font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .aiPoolContactBadge {
@@ -11057,13 +11091,53 @@ button.primary {
   color: var(--secondary);
 }
 
+/* 2026-05 lead-table polish: contact column now shows the first
+   email/phone value (with an ellipsis and tooltip when there are
+   multiple) instead of just the count. Used by the pool-detail
+   table; the search-run table uses .aiSearchRunContactValue. */
+.aiPoolContactValue {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  color: var(--body);
+  font-size: 12px;
+}
+
+.aiPoolContactText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.aiPoolContactMore {
+  color: var(--secondary);
+  font-weight: 700;
+}
+
 .aiPoolTable .col-website {
-  color: var(--primary);
+  /* 2026-05 lead-table polish: website is plain dark text (matches
+     design ref), not blue. The cell renders the bare domain via
+     formatWebsiteShort() so the column can stay narrow. The full
+     URL is in the row title. */
+  color: var(--title);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 160px;
+  max-width: 140px;
+}
+
+.aiPoolWebsite,
+.aiSearchRunWebsite {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+  color: var(--title);
 }
 
 .aiPoolSourceBadge {
@@ -11130,8 +11204,20 @@ button.primary {
   transition: background 0.15s;
 }
 
-.aiPoolRowAction:hover {
+.aiPoolRowAction + .aiPoolRowAction {
+  margin-left: 6px;
+}
+
+.aiPoolRowAction:hover:not(:disabled) {
   background: var(--primary-light);
+}
+
+.aiPoolRowAction:disabled {
+  color: var(--secondary);
+  border-color: var(--border);
+  background: transparent;
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
 .aiPoolRowAction.icon {
@@ -11880,12 +11966,42 @@ button.primary {
 
 .aiSearchRunScore {
   margin-left: 6px;
-  color: var(--title);
+  color: #fa7f01;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
-/* Inline contact chip — 邮箱 N / 电话 N */
+/* 2026-05 lead-table polish: search-run table now shows the actual
+   first email / phone value, not a chip with the count. The full
+   list surfaces via the cell title attribute. */
+.aiSearchRunContactValue {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  color: var(--body);
+  font-size: 12px;
+}
+
+.aiSearchRunContactText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.aiSearchRunContactMore {
+  color: var(--secondary);
+  font-weight: 700;
+}
+
+.aiSearchRunContactMuted {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+/* Legacy chip class kept around in case any other consumer still
+   references it; the new-lead table no longer uses it. */
 .aiSearchRunContactChip {
   display: inline-flex;
   align-items: center;
@@ -11940,20 +12056,31 @@ button.primary {
 }
 
 .aiSearchRunPool .aiPoolTable tbody tr:hover {
-  background: var(--primary-light);
+  /* 2026-05: deeper hover than default to match the design ref. */
+  background: #e3edff;
 }
 
 /* Per-column widths so the wide columns (公司名称 / 官网) get the
-   space and the narrow ones (国家、邮箱、电话) collapse to fit. */
-.aiSearchRunPool .aiPoolTable .col-company { min-width: 200px; }
+   space and the narrow ones (国家、邮箱、电话) collapse to fit.
+   2026-05 polish: company column shrunk + ellipsis; website
+   column shrunk + ellipsis (drops scheme/path via formatWebsiteShort);
+   email/phone columns now hold actual values, so they need a bit
+   more room than the old count chip. Action column widened so two
+   text buttons fit side-by-side. */
+.aiSearchRunPool .aiPoolTable .col-company { width: 180px; max-width: 180px; }
 .aiSearchRunPool .aiPoolTable .col-country { width: 110px; }
 .aiSearchRunPool .aiPoolTable .col-type { width: 130px; }
 .aiSearchRunPool .aiPoolTable .col-score { width: 130px; }
 .aiSearchRunPool .aiPoolTable .col-email,
-.aiSearchRunPool .aiPoolTable .col-phone { width: 80px; }
-.aiSearchRunPool .aiPoolTable .col-website { min-width: 160px; color: var(--primary); }
+.aiSearchRunPool .aiPoolTable .col-phone { width: 160px; max-width: 160px; }
+.aiSearchRunPool .aiPoolTable .col-website {
+  width: 140px;
+  max-width: 140px;
+  /* override the old blue color from the base .aiPoolTable rule */
+  color: var(--title);
+}
 .aiSearchRunPool .aiPoolTable .col-status { width: 110px; }
-.aiSearchRunPool .aiPoolTable .col-action { width: 110px; }
+.aiSearchRunPool .aiPoolTable .col-action { width: 160px; }
 
 /* ----- Bottom action bar — 下一步转化 -----
    2026-05 LeadHunt 2.0: matches the design's 3-card 转化 strip.
