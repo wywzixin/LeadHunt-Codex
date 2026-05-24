@@ -2857,6 +2857,62 @@ describe("AgentWorkflowService", () => {
         data: { executionStatus: "pending" }
       });
     });
+
+    it("fills missing advanced queries when recovery finds a partial initial plan", async () => {
+      const prisma = createPrismaMock();
+      prisma.leadTask.findUnique = vi.fn().mockResolvedValue({
+        inputPayload: {
+          productProfileAnalysis: {
+            keyProducts: ["RRU"],
+            productCategories: ["Telecom"],
+            websiteUrls: []
+          },
+          customerProfileAnalysis: {
+            buyerTypes: ["system integrator"],
+            customerScenarios: [],
+            targetMarkets: ["UAE", "Saudi Arabia"]
+          },
+          keywordGroups: {
+            productTerms: ["RRU", "BBU"],
+            buyerRoles: ["telecom system integrator"],
+            scenarioTerms: ["base station maintenance"],
+            marketTerms: ["UAE", "Saudi Arabia"],
+            excludeTerms: []
+          },
+          aiKeywordExpansion: null,
+          profileSignals: {}
+        }
+      });
+      prisma.searchQuery.findMany = vi.fn().mockResolvedValue(
+        Array.from({ length: 16 }, (_, i) => ({
+          query: `existing fast query ${i + 1}`,
+          country: "UAE",
+          strategyTemplate: i < 12 ? "lane-K-K2" : "reverse-customer-network"
+        }))
+      );
+      const service = new AgentWorkflowService(prisma as any);
+      const runSlowSpy = vi
+        .spyOn(service as any, "runSlowPlanningAndAppendGptQueries")
+        .mockResolvedValue({
+          slowResult: { searchQueries: [], fallbackReasons: [] },
+          appendedCount: 14
+        });
+
+      const result = await (service as any).recoverMissingInitialSearchPlanQueries(
+        "task-1",
+        { prompt: "Find GCC telecom buyers", targetCount: 30 },
+        16
+      );
+
+      expect(runSlowSpy).toHaveBeenCalledTimes(1);
+      expect(runSlowSpy.mock.calls[0]?.[3]).toHaveLength(16);
+      expect(runSlowSpy.mock.calls[0]?.[4]).toBe(14);
+      expect(result).toEqual({
+        appendedCount: 14,
+        queryCount: 30,
+        reason: "completed_partial_plan"
+      });
+    });
   });
 
   // 2026-05 Stage 2 follow-up: "继续搜索 30 条" path. /search with

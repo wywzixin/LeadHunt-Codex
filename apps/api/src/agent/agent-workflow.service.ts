@@ -684,9 +684,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
       if (options.skipPlanning) {
         const queryCount = await this.prisma.searchQuery.count({ where: { taskId } });
+        const recoveredPlan = await this.recoverMissingInitialSearchPlanQueries(
+          taskId,
+          input,
+          queryCount
+        );
         await this.markStepCompleted(taskId, "plan_search_queries", {
           recovered: true,
-          queryCount
+          queryCount: recoveredPlan.queryCount,
+          recoveredCreatedCount: recoveredPlan.appendedCount,
+          recoveredReason: recoveredPlan.reason
         });
       } else {
         // 2026-05 V1-MVP Step 3: concurrent planning + search.
@@ -870,6 +877,94 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       }
 
       await this.markAutonomousDiscoveryFailed(taskId, error, "brave_search");
+    }
+  }
+
+  private async recoverMissingInitialSearchPlanQueries(
+    taskId: string,
+    input: CreateTaskInput,
+    existingQueryCount: number
+  ): Promise<{ appendedCount: number; queryCount: number; reason: string }> {
+    const desiredCount = Math.max(
+      1,
+      Math.floor(input.targetCount ?? DEFAULT_SEARCH_QUERY_COUNT)
+    );
+    if (existingQueryCount >= desiredCount) {
+      return {
+        appendedCount: 0,
+        queryCount: existingQueryCount,
+        reason: "already_complete"
+      };
+    }
+
+    const task = await this.prisma.leadTask.findUnique({
+      where: { id: taskId },
+      select: { inputPayload: true }
+    });
+    const payload = toPlainObject(task?.inputPayload);
+    const productProfileAnalysis = (payload.productProfileAnalysis ??
+      null) as ProductProfileAnalysis | null;
+    const customerProfileAnalysis = (payload.customerProfileAnalysis ??
+      null) as CustomerProfileAnalysis | null;
+    const keywordGroups = (payload.keywordGroups ?? null) as KeywordGroups | null;
+    if (!productProfileAnalysis || !customerProfileAnalysis || !keywordGroups) {
+      return {
+        appendedCount: 0,
+        queryCount: existingQueryCount,
+        reason: "missing_payload"
+      };
+    }
+
+    const existingQueries = await this.prisma.searchQuery.findMany({
+      where: { taskId },
+      select: { query: true, country: true, strategyTemplate: true }
+    });
+    const missingCount = Math.max(0, desiredCount - existingQueries.length);
+    if (missingCount === 0) {
+      return {
+        appendedCount: 0,
+        queryCount: existingQueries.length,
+        reason: "already_complete"
+      };
+    }
+
+    const fastResult = {
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      keywordGroups,
+      aiKeywordExpansion: (payload.aiKeywordExpansion ?? null) as KeywordExpansionResult | null,
+      fallbackReasons: [] as string[],
+      channelCustomersRequested: Boolean(
+        ((payload.profileSignals ?? {}) as Record<string, unknown>)?.channelCustomersRequested
+      ),
+      serviceAvailable: true
+    } as Awaited<ReturnType<AgentWorkflowService["runFastPlanning"]>>;
+    const targetMarkets = keywordGroups.marketTerms?.length ? keywordGroups.marketTerms : [];
+    const priorAcceptedQueries = existingQueries.map((row) => ({
+      query: row.query,
+      country: row.country ?? null,
+      strategyType: row.strategyTemplate ?? null
+    }));
+
+    try {
+      const result = await this.runSlowPlanningAndAppendGptQueries(
+        taskId,
+        fastResult,
+        targetMarkets,
+        priorAcceptedQueries,
+        missingCount
+      );
+      return {
+        appendedCount: result.appendedCount,
+        queryCount: existingQueries.length + result.appendedCount,
+        reason: result.appendedCount > 0 ? "completed_partial_plan" : "no_new_queries"
+      };
+    } catch (error) {
+      return {
+        appendedCount: 0,
+        queryCount: existingQueries.length,
+        reason: `planning_error:${searchErrorMessage(error)}`
+      };
     }
   }
 
