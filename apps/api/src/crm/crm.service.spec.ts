@@ -137,6 +137,7 @@ function createPrismaMock() {
       findMany: vi.fn().mockResolvedValue([])
     },
     leadCandidate: {
+      findMany: vi.fn().mockResolvedValue([]),
       findFirst: vi.fn().mockResolvedValue({
         id: "11111111-1111-4111-8111-111111111111",
         crmLead: null
@@ -176,6 +177,56 @@ describe("CrmService", () => {
     expect(result.companies[0]?.companyName).toBe("Gulf Telecom");
     expect(result.companies[0]?.stageLabel).toBe("已触达");
     expect(result.companies[0]?.owner).toBe("王亚伟");
+  });
+
+  it("keeps unsynced lead candidates out of CRM customer lists", async () => {
+    const prisma = createPrismaMock();
+    prisma.crmLead.findMany.mockResolvedValue([]);
+    prisma.leadCandidate.findMany.mockResolvedValue([]);
+    const service = new CrmService(prisma as any);
+
+    const result = await service.listCustomers("user-1", { view: "companies", group: "all" });
+
+    expect(prisma.leadCandidate.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          crmLead: null,
+          status: { in: ["approved", "contacted", "email_sent"] },
+          task: { userId: "user-1" }
+        })
+      })
+    );
+    expect(prisma.crmLead.upsert).not.toHaveBeenCalled();
+    expect(result.stats.companies).toBe(0);
+    expect(result.groups.all).toBe(0);
+    expect(result.companies).toHaveLength(0);
+  });
+
+  it("backfills previously approved candidates into CRM before listing", async () => {
+    const prisma = createPrismaMock();
+    prisma.crmLead.findMany.mockResolvedValue([]);
+    prisma.leadCandidate.findMany.mockResolvedValue([
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        status: "approved"
+      }
+    ]);
+    const service = new CrmService(prisma as any);
+
+    await service.listCustomers("user-1", { view: "companies", group: "all" });
+
+    expect(prisma.crmLead.upsert).toHaveBeenCalledWith({
+      where: { leadId: "11111111-1111-4111-8111-111111111111" },
+      create: {
+        leadId: "11111111-1111-4111-8111-111111111111",
+        stage: "qualified",
+        tags: ["AI 外贸员", "已加入CRM", "已确认"]
+      },
+      update: {
+        stage: "qualified",
+        tags: ["AI 外贸员", "已加入CRM", "已确认"]
+      }
+    });
   });
 
   it("flattens the contacts view and supports the 7-day contacted group", async () => {
@@ -294,6 +345,8 @@ describe("CrmService", () => {
       const result = await service.getAnalytics("user-1", "all");
 
       expect(result.overview.emailTasks).toBe(1);
+      expect(result.overview.replyMessages).toBe(1);
+      expect(result.overview.openMessages).toBe(1);
       expect(result.overview.favoriteCompanies).toBe(1);
       expect(result.reach.email.rate).toBe(100);
       expect(result.reach.email.opened).toBe(1);

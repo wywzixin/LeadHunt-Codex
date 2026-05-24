@@ -67,6 +67,16 @@ describe("CustomerProfileService", () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it("rejects notes that are too long", async () => {
+    await expect(
+      service.save("user-1", {
+        targetRegions: ["Middle East"],
+        referenceCustomerUrls: ["https://spectrummea.com/"],
+        notes: "x".repeat(801)
+      })
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
   it("stores multiple reference customers, CRM samples, and trimmed notes", async () => {
     prisma.customerProfile.upsert.mockResolvedValue({
       id: "profile-2",

@@ -67,6 +67,15 @@ describe("ProductProfileService", () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it("rejects notes that are too long", async () => {
+    await expect(
+      service.save("user-1", {
+        websiteUrl: "https://telecorenet.com/",
+        notes: "x".repeat(801)
+      })
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
   it("stores multiple document URLs and trims notes", async () => {
     prisma.productProfile.upsert.mockResolvedValue({
       id: "profile-2",
