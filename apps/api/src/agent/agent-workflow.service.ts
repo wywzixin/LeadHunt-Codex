@@ -24,7 +24,6 @@ import {
   type LeadHuntWorkflowState,
   type WorkflowStepStatus,
   type WorkflowStep,
-  type OperatorSource,
   createLeadHuntWorkflowGraph,
   createInitialWorkflowSteps,
   interrupt
@@ -4872,7 +4871,10 @@ function normalizeAiSearchPlan(
     seen.add(queryText.toLowerCase());
     output.push({
       provider: "brave",
-      operatorSource: query.operatorSource as OperatorSource,
+      operatorSource:
+        strategyType === "channel_customer"
+          ? "gpt_channel_buyer_search"
+          : "gpt_advanced_search",
       executionStatus: executionStatus as "supported" | "experimental",
       operatorName:
         strategyType === "channel_customer"
@@ -6045,7 +6047,7 @@ function buildLaneKQueries(input: LaneKInput): PlannedSearchQuery[] {
     seen.add(key);
     queries.push({
       provider: "brave",
-      operatorSource: "brave_official",
+      operatorSource: "lane_k_keyword_combination",
       executionStatus: "supported",
       operatorName: `Lane K ${tier} keyword combination`,
       strategyTemplate: `lane-K-${tier}`,
@@ -6340,7 +6342,7 @@ function buildAdvancedSearchQueriesFromKeywordGroups(input: {
     seen.add(key);
     queries.push({
       provider: "brave",
-      operatorSource: "brave_official",
+      operatorSource: "advanced_buyer_intent_search",
       executionStatus: "supported",
       operatorName: "Advanced buyer intent search",
       strategyTemplate: "advanced buyer intent template",
@@ -6443,7 +6445,7 @@ function buildReverseCustomerNetworkQueries(input: {
     // itself and burns a precious query slot without discovering a new lead.
     queries.push({
       provider: "brave",
-      operatorSource: "brave_official",
+      operatorSource: "reverse_customer_network_mining",
       executionStatus: "supported",
       operatorName: "Reverse customer network mining",
       strategyTemplate: "lane-D reference-customer reverse network",
@@ -6474,7 +6476,7 @@ function buildReverseCustomerNetworkQueries(input: {
       const safeName = trimReferenceCompanyName(referenceName);
       queries.push({
         provider: "brave",
-        operatorSource: "brave_official",
+        operatorSource: "reverse_customer_network_mining",
         executionStatus: "supported",
         operatorName: "Reverse customer network mining",
         strategyTemplate: "lane-D reference-customer name pivot",
@@ -6495,7 +6497,7 @@ function buildReverseCustomerNetworkQueries(input: {
 
       queries.push({
         provider: "brave",
-        operatorSource: "brave_official",
+        operatorSource: "reverse_customer_network_mining",
         executionStatus: "supported",
         operatorName: "Reverse customer network mining",
         strategyTemplate: "lane-D reference-customer brand-adjacent network",
@@ -6516,7 +6518,7 @@ function buildReverseCustomerNetworkQueries(input: {
 
       queries.push({
         provider: "brave",
-        operatorSource: "brave_official",
+        operatorSource: "reverse_customer_network_mining",
         executionStatus: "supported",
         operatorName: "Reverse customer network mining",
         strategyTemplate: "lane-D reference-customer infrastructure pivot",

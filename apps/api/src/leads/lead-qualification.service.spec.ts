@@ -362,6 +362,96 @@ describe("LeadQualificationService", () => {
     );
   });
 
+  it("stores a higher-quality AI company name when the result title is domain-derived", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+    const aiEvaluator = vi.fn().mockResolvedValue({
+      companyName: "Ultra Stream Technologies LLC",
+      websiteUrl: "https://www.ustech.ae/huawei-distributor-in-dubai-uae",
+      resultType: "possible_buyer",
+      buyerType: "ICT and ELV supplier / communication equipment distributor",
+      fitScore: 62,
+      confidence: 0.78,
+      decision: "review",
+      matchedSignals: ["Located in UAE", "Huawei distributor in Dubai"],
+      risks: []
+    });
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "ustech - Huawei Distributor in Dubai UAE",
+          url: "https://www.ustech.ae/huawei-distributor-in-dubai-uae",
+          snippet:
+            "Huawei distributor in Dubai UAE with telecom networking products. sales@ultrastream.ae Phone +971 4 553 8728",
+          source: "web"
+        }
+      ],
+      criteria,
+      "UAE",
+      aiEvaluator
+    );
+
+    expect(aiEvaluator).toHaveBeenCalled();
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          companyName: "Ultra Stream Technologies LLC"
+        })
+      })
+    );
+  });
+
+  it("serializes same-task candidate saves so concurrent workers do not duplicate a domain", async () => {
+    const prisma = createPrismaMock();
+    const stored: any[] = [];
+    prisma.leadCandidate.findMany.mockImplementation(async () =>
+      stored.map((lead) => ({
+        id: lead.id,
+        companyName: lead.companyName,
+        website: lead.website,
+        contacts: lead.contacts
+      }))
+    );
+    prisma.leadCandidate.create.mockImplementation(async ({ data }) => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const record = {
+        id: `lead-${stored.length + 1}`,
+        companyName: data.companyName,
+        website: data.website,
+        contacts: data.contacts.create,
+        icpScore: data.icpScore.create
+      };
+      stored.push(record);
+      return record;
+    });
+    const service = new LeadQualificationService(prisma as any);
+    const firstResult = {
+      title: "Switch Link Computers Trading - Huawei Distributor",
+      url: "https://switchlinkct.com/huawei-distributor-dubai-uae/",
+      snippet:
+        "Huawei distributor in Dubai UAE with networking and telecom solutions. info@switchlinkdubai.com +971 55 9670902",
+      source: "web" as const
+    };
+    const secondResult = {
+      title: "Switch Link Computers Trading - Networking Solutions",
+      url: "https://switchlinkct.com/",
+      snippet:
+        "Switch Link Computers Trading supplies networking and telecom solutions in UAE. info@switchlinkdubai.com +971 55 9670902",
+      source: "web" as const
+    };
+
+    const [first, second] = await Promise.all([
+      service.saveCandidates("task-1", [firstResult], criteria, "UAE"),
+      service.saveCandidates("task-1", [secondResult], criteria, "UAE")
+    ]);
+
+    expect(stored).toHaveLength(1);
+    expect(first.createdCount + second.createdCount).toBe(1);
+    expect(first.skippedCount + second.skippedCount).toBe(1);
+  });
+
   it("sanitizes AI scoring evidence before writing JSON fields", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
@@ -760,6 +850,42 @@ describe("LeadQualificationService", () => {
           countryConflict: false
         })
       })
+    );
+  });
+
+  it("uses Ethiopia phone evidence to hard-reject GCC off-target candidates", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Spectrum Engineering - Telecom Maintenance",
+          url: "https://spectrum-engineering.net/",
+          snippet:
+            "Ethiopia office. Telecom engineering contractor and network maintenance company. Phone +251 982 209 595. info@spectrumengineering.et",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"]
+      },
+      "UAE"
+    );
+
+    expect(result.createdCount).toBe(1);
+    const createCall = prisma.leadCandidate.create.mock.calls[0]?.[0];
+    expect(createCall.data.country).toBe("ETHIOPIA");
+    expect(createCall.data.queryCountry).toBe("UAE");
+    expect(createCall.data.countryConfidence).toMatch(/high|medium/);
+    expect(createCall.data.status).toBe("rejected");
+    expect(createCall.data.icpScore.create.score).toBeLessThanOrEqual(39);
+    expect(createCall.data.icpScore.create.reasons.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
+      ])
     );
   });
 

@@ -175,6 +175,8 @@ const maxAiCandidateEvaluationsPerBatch = 15;
 
 @Injectable()
 export class LeadQualificationService {
+  private readonly candidateSaveLocks = new Map<string, Promise<void>>();
+
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   normalizeSearchResults(
@@ -327,8 +329,8 @@ export class LeadQualificationService {
         countryValidation.countryConfidence === "unknown");
     const sourceQueryCountryMismatch = Boolean(
       countryValidation.inferredCountry &&
-        candidate.queryCountry &&
-        !matchesTargetRegion(countryValidation.inferredCountry, [candidate.queryCountry])
+      candidate.queryCountry &&
+      !matchesTargetRegion(countryValidation.inferredCountry, [candidate.queryCountry])
     );
     const countryConflictOnlyOffTarget = countryConflictHasOnlyOffTargetEvidence(
       countryValidation,
@@ -364,15 +366,11 @@ export class LeadQualificationService {
       // fall through to the soft-signal branches below, so candidates
       // with truly missing / ambiguous country evidence keep their
       // chance to surface for human review.
-      const verifiedOffTargetCountry =
-        targetCountryVerified &&
-        !countryValidation.countryConflict;
+      const verifiedOffTargetCountry = targetCountryVerified && !countryValidation.countryConflict;
       if (verifiedOffTargetCountry) {
         verifiedOffTargetCountryReject = true;
         forcedStatus = "rejected";
-        risks.push(
-          "Verified candidate country is outside the selected target markets"
-        );
+        risks.push("Verified candidate country is outside the selected target markets");
       } else {
         // Unverified / conflicting country mismatches stay soft so a
         // candidate with weak country evidence can still pass through
@@ -441,9 +439,7 @@ export class LeadQualificationService {
     // negation cue ("do not", "don't", "no ", "without", "except",
     // "exclude", "never", "instead of", etc.). True off-target text
     // ("Job openings: Senior Sales") still trips the penalty.
-    const matchedRisks = riskyTerms.filter((term) =>
-      containsOutsideNegationContext(text, term)
-    );
+    const matchedRisks = riskyTerms.filter((term) => containsOutsideNegationContext(text, term));
     if (matchedRisks.length > 0) {
       score -= 20;
       risks.push(`Contains disqualifying terms: ${matchedRisks.slice(0, 4).join(", ")}`);
@@ -693,6 +689,38 @@ export class LeadQualificationService {
     defaultCountry?: string,
     aiEvaluator?: CandidateAiEvaluator
   ) {
+    return this.withTaskCandidateSaveLock(taskId, () =>
+      this.saveCandidatesUnlocked(taskId, results, criteria, defaultCountry, aiEvaluator)
+    );
+  }
+
+  private async withTaskCandidateSaveLock<T>(taskId: string, run: () => Promise<T>) {
+    const previous = this.candidateSaveLocks.get(taskId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous.catch(() => undefined).then(() => current);
+    this.candidateSaveLocks.set(taskId, chained);
+
+    await previous.catch(() => undefined);
+    try {
+      return await run();
+    } finally {
+      release();
+      if (this.candidateSaveLocks.get(taskId) === chained) {
+        this.candidateSaveLocks.delete(taskId);
+      }
+    }
+  }
+
+  private async saveCandidatesUnlocked(
+    taskId: string,
+    results: BraveSearchResult[],
+    criteria: IcpScoringCriteria,
+    defaultCountry?: string,
+    aiEvaluator?: CandidateAiEvaluator
+  ) {
     const allCandidates = results.map((result) =>
       normalizeResult(result, { taskId, defaultCountry })
     );
@@ -765,11 +793,12 @@ export class LeadQualificationService {
         aiEvaluationsUsed += 1;
       }
       const icp = aiEvaluation ? mergeAiEvaluationWithRuleScore(ruleIcp, aiEvaluation) : ruleIcp;
+      const storedCompanyName = chooseStoredCompanyName(enrichedCandidate, aiEvaluation);
 
       const record = await this.prisma.leadCandidate.create({
         data: {
           taskId,
-          companyName: enrichedCandidate.companyName,
+          companyName: storedCompanyName,
           website: enrichedCandidate.website,
           // 2026-05 (Q1=A): when country is verified we use the verified
           // value; when it is unconfirmed we fall back to the queryCountry
@@ -1025,6 +1054,18 @@ function mergeAiEvaluationWithRuleScore(
   };
 }
 
+function chooseStoredCompanyName(
+  candidate: NormalizedLeadCandidate,
+  aiEvaluation: CandidateBuyerEvaluation | null
+) {
+  const aiCompanyName = aiEvaluation?.companyName?.trim();
+  if (!aiEvaluation || !aiCompanyName || aiEvaluation.confidence < 0.55) {
+    return candidate.companyName;
+  }
+
+  return chooseBestCompanyName(candidate.companyName, candidate.website, [aiCompanyName]);
+}
+
 function hasAiCompanyNameQualityRisk(ai: CandidateBuyerEvaluation) {
   const text = [...(ai.risks ?? []), ...(ai.matchedSignals ?? [])].join(" ").toLowerCase();
   return /company\s+name|wrong\s+name|looks\s+wrong|site[-\s]?builder|created\s+by|designed\s+by|powered\s+by|template\s+label|page\s+title/.test(
@@ -1185,15 +1226,15 @@ function looksLikeBrandOnlyTitle(value: string) {
 
 function cleanupCompanyName(value: string) {
   return value
-    .replace(/\b(home|official site|website|about us|contact us|logo)\b/gi, "")
-    .replace(/^\s*(?:welcome to|official)\s+/i, "")
-    // 2026-05 V1-MVP+: strip "by " prefix that leaks from attribution
-    // patterns in page titles (e.g. "by Qatar Multitech Trading...").
-    .replace(/^\s*by\s+/i, "")
-    .replace(siteBuilderCreditPrefixPattern, "")
-    .replace(/\s+\b(?:homepage|home page)\b$/i, "")
-    .replace(/\s+/g, " ")
-    .replace(/^[|:：/\\\-\s]+|[|:：/\\\-\s]+$/g, "")
+      .replace(/\b(home|official site|website|about us|contact us|logo)\b/gi, "")
+      .replace(/^\s*(?:welcome to|official)\s+/i, "")
+      // 2026-05 V1-MVP+: strip "by " prefix that leaks from attribution
+      // patterns in page titles (e.g. "by Qatar Multitech Trading...").
+      .replace(/^\s*by\s+/i, "")
+      .replace(siteBuilderCreditPrefixPattern, "")
+      .replace(/\s+\b(?:homepage|home page)\b$/i, "")
+      .replace(/\s+/g, " ")
+      .replace(/^[|:：/\\\-\s]+|[|:：/\\\-\s]+$/g, "")
     .trim();
 }
 
@@ -1219,7 +1260,10 @@ function isGenericTitle(value: string) {
 }
 
 function isForbiddenCompanyName(value: string) {
-  const normalized = cleanupCompanyName(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normalized = cleanupCompanyName(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
   return (
     !normalized ||
     forbiddenCompanyNameTerms.has(normalized) ||
@@ -1236,7 +1280,9 @@ function isForbiddenCompanyName(value: string) {
     //   - "Top 10 Telecom Companies in Qatar"
     //   - "How to Choose a Telecom Provider"
     //   - "What is 5G Technology"
-    /\b(?:which\s+(?:one|is)|how\s+to|what\s+is|top\s+\d+|best\s+\d+|vs\.?\s|versus)\b/i.test(value) ||
+    /\b(?:which\s+(?:one|is)|how\s+to|what\s+is|top\s+\d+|best\s+\d+|vs\.?\s|versus)\b/i.test(
+      value
+    ) ||
     // Long names with colons are almost always page titles, not
     // company names (e.g. "Telecom services: project management and
     // certification"). Real company names with colons are extremely
@@ -1298,7 +1344,7 @@ function looksLikeProductTitle(value: string) {
         "bbu",
         "aau",
         "networking equipment",
-      "hardware repair"
+        "hardware repair"
       ]))
   );
 }
@@ -1478,8 +1524,8 @@ function assessCountryValidation(candidate: NormalizedLeadCandidate) {
     inferredCountry = candidateCountries[0]!;
   } else if (evidenceConflict && candidate.queryCountry) {
     const queryCountryNorm = normalizeCountry(candidate.queryCountry);
-    const matchingCountry = candidateCountries.find(
-      (c) => countryMatchesTarget(c, queryCountryNorm)
+    const matchingCountry = candidateCountries.find((c) =>
+      countryMatchesTarget(c, queryCountryNorm)
     );
     if (matchingCountry) {
       // Resolve the conflict in favor of the local branch that matches
@@ -2014,9 +2060,7 @@ function looksLikeTemplatePhoneNumber(phone: string) {
   const digits = digitsOnly(phone);
   if (
     /^(?:38640(?:222555|44445555)|15551234567|1800458556)$/.test(digits) ||
-    /(?:000000|111111|222222|333333|444444|555555|666666|777777|888888|999999)/.test(
-      digits
-    )
+    /(?:000000|111111|222222|333333|444444|555555|666666|777777|888888|999999)/.test(digits)
   ) {
     return true;
   }
@@ -2383,7 +2427,9 @@ function looksLikeTier1MobileOperator(
         .toLowerCase();
       const isVendorPage =
         /vendor|supplier|procurement|tender|rfp|rfq|registration/i.test(path) ||
-        /vendor\s*(?:registration|relations|portal)|supplier\s*registration|procurement\s*portal/i.test(text);
+        /vendor\s*(?:registration|relations|portal)|supplier\s*registration|procurement\s*portal/i.test(
+          text
+        );
       if (!isVendorPage) {
         return true;
       }
@@ -2563,17 +2609,13 @@ function looksLikeCertificationOrInspectionService(
   // 2) Text-based detection: need 2+ certification signals AND no
   //    buyer-role signals to reject.
   const lowerText = text.toLowerCase();
-  const certHits = CERTIFICATION_TEXT_SIGNALS.filter((signal) =>
-    lowerText.includes(signal)
-  );
+  const certHits = CERTIFICATION_TEXT_SIGNALS.filter((signal) => lowerText.includes(signal));
   if (certHits.length < 2) {
     return false;
   }
 
   // Check for buyer-role signals that would override the rejection.
-  const hasBuyerRole = BUYER_ROLE_SIGNALS.some((signal) =>
-    lowerText.includes(signal)
-  );
+  const hasBuyerRole = BUYER_ROLE_SIGNALS.some((signal) => lowerText.includes(signal));
   if (hasBuyerRole) {
     return false;
   }
@@ -2583,10 +2625,11 @@ function looksLikeCertificationOrInspectionService(
 
 function looksLikeTrainingOrCourseSite(candidate: NormalizedLeadCandidate, text: string) {
   const path = pathFromUrl(candidate.sourceUrl).toLowerCase();
-  const domain = (candidate.website
-    ? domainFromUrl(candidate.website)
-    : domainFromUrl(candidate.sourceUrl)
-  )?.toLowerCase() ?? "";
+  const domain =
+    (candidate.website
+      ? domainFromUrl(candidate.website)
+      : domainFromUrl(candidate.sourceUrl)
+    )?.toLowerCase() ?? "";
 
   // Domain or path explicitly references coaching / civil-service
   // exam preparation / academy.
@@ -2834,10 +2877,10 @@ function isRiskyDiscoveryPage(candidate: NormalizedLeadCandidate) {
 
   return Boolean(
     (domain && (isBlockedContentDomain(domain) || isBlockedMarketplaceDomain(domain))) ||
-      looksLikeKnowledgeContentPage(candidate) ||
-      looksLikeArticlePath(path) ||
-      looksLikeContentTitle(candidate.companyName) ||
-      hasContentNoiseSignal(text)
+    looksLikeKnowledgeContentPage(candidate) ||
+    looksLikeArticlePath(path) ||
+    looksLikeContentTitle(candidate.companyName) ||
+    hasContentNoiseSignal(text)
   );
 }
 
@@ -2982,12 +3025,7 @@ function contactPagePathCandidates(...urls: string[]) {
   }
 
   // The 4 contact-page forms users actually click on most modern sites.
-  const topRootContactPaths = [
-    "/contact",
-    "/contact-us",
-    "/contacts",
-    "/contactus"
-  ];
+  const topRootContactPaths = ["/contact", "/contact-us", "/contacts", "/contactus"];
 
   // English-locale variants right after the root contact paths. Winncom
   // exposes /en/contacts, while NESIC keeps contact data on about.php?lang=en.
@@ -3024,12 +3062,7 @@ function contactPagePathCandidates(...urls: string[]) {
     "/connect/"
   ];
 
-  const prefixedContactVariants = [
-    "/contact/",
-    "/contact-us/",
-    "/contacts/",
-    "/contactus/"
-  ];
+  const prefixedContactVariants = ["/contact/", "/contact-us/", "/contacts/", "/contactus/"];
 
   // Lower-value fallbacks. /about, /company are intentionally NOT in
   // this list; they almost never carry contact info on modern sites
@@ -3143,7 +3176,9 @@ async function fetchProbePages(urls: string[]) {
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(concurrency, uniqueUrls.length) }, () => worker()));
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, uniqueUrls.length) }, () => worker())
+  );
   return results.filter(Boolean);
 }
 
@@ -3267,9 +3302,7 @@ function extractSucuriChallengeCookie(html: string) {
   }
 
   const decoded = Buffer.from(encoded, "base64").toString("utf8");
-  const assignment = decoded.match(
-    /^\s*([A-Za-z_$][\w$]*)\s*=\s*([\s\S]*?);\s*document\.cookie=/
-  );
+  const assignment = decoded.match(/^\s*([A-Za-z_$][\w$]*)\s*=\s*([\s\S]*?);\s*document\.cookie=/);
   if (!assignment?.[1] || !assignment[2]) {
     return null;
   }
@@ -3431,7 +3464,9 @@ function hasSearchContext(text: string, criteria: IcpScoringCriteria) {
     ...(criteria.brandTerms ?? [])
   ].filter((term) => term.trim().length >= 2);
 
-  return hasAny(text, criteriaTerms) || (criteriaIndicatesTelecom(criteria) && hasTelecomContext(text));
+  return (
+    hasAny(text, criteriaTerms) || (criteriaIndicatesTelecom(criteria) && hasTelecomContext(text))
+  );
 }
 
 function criteriaIndicatesTelecom(criteria: IcpScoringCriteria) {
@@ -3466,10 +3501,7 @@ function hasTargetRegionConstraint(targetRegions: string[]) {
 }
 
 function countryConflictHasOnlyOffTargetEvidence(
-  countryValidation: Pick<
-    NormalizedLeadCandidate,
-    "countryConflict" | "countryConflictCountries"
-  >,
+  countryValidation: Pick<NormalizedLeadCandidate, "countryConflict" | "countryConflictCountries">,
   targetRegions: string[]
 ) {
   if (!hasTargetRegionConstraint(targetRegions) || !countryValidation.countryConflict) {
@@ -3811,17 +3843,16 @@ function classifyEvidenceLead(
     looksLikeDirectoryEvidence(path, text) ||
     (pageType === "third_party_profile" && hasAny(text, directoryDocumentTerms));
   const hasRelevantSearchContext =
-    hasSearchContext(text, criteria) ||
-    hasAny(text, specificTelecomProductTerms);
+    hasSearchContext(text, criteria) || hasAny(text, specificTelecomProductTerms);
   const extractableCompanies = extractMentionedCompanySignals(originalText);
   const usefulProjectNews =
-    isExplicitNewsArticle &&
-    hasRelevantSearchContext &&
-    hasAny(text, projectNewsTerms);
+    isExplicitNewsArticle && hasRelevantSearchContext && hasAny(text, projectNewsTerms);
   const usefulDocumentIntelligence =
     isDocument &&
     hasRelevantSearchContext &&
-    (isProcurement || hasAny(text, exhibitionDocumentTerms) || hasAny(text, directoryDocumentTerms));
+    (isProcurement ||
+      hasAny(text, exhibitionDocumentTerms) ||
+      hasAny(text, directoryDocumentTerms));
   const allowedProcurementDirectory =
     isProcurement && domain ? isProcurementIntelligenceDomain(domain) : false;
   const hardContentNoise =
@@ -3857,9 +3888,9 @@ function classifyEvidenceLead(
       extractableCompanies,
       status: "evidence_review",
       scoreCap: 49,
-      reason: "Industry organization, standards body, conference, or event page kept only as evidence",
-      risk:
-        "Associations, alliances, standards organizations, conferences, agendas, and technical programmes are not direct customer companies"
+      reason:
+        "Industry organization, standards body, conference, or event page kept only as evidence",
+      risk: "Associations, alliances, standards organizations, conferences, agendas, and technical programmes are not direct customer companies"
     };
   }
 
@@ -3990,8 +4021,7 @@ function classifyEvidenceLead(
       status: "evidence_review",
       scoreCap: 49,
       reason: "Content page kept only as evidence, not as a customer",
-      risk:
-        "News, article, blog, media, report, or content page cannot enter the main customer list"
+      risk: "News, article, blog, media, report, or content page cannot enter the main customer list"
     };
   }
 
@@ -4011,8 +4041,7 @@ function intelligenceClassification(
     status: "intelligence_review",
     scoreCap: 49,
     reason: "Search result is useful buyer intelligence but not a direct customer",
-    risk:
-      "Intelligence sources must be reviewed and mined for real local companies before outreach or CRM sync"
+    risk: "Intelligence sources must be reviewed and mined for real local companies before outreach or CRM sync"
   };
 }
 
@@ -4442,9 +4471,8 @@ function looksLikeNonCustomerProductPage(candidate: NormalizedLeadCandidate) {
     return true;
   }
 
-  const hasSkuOrModelSignal = /\b(?:sku|model|part\s*(?:no|number)|p\/n|datasheet|product details?)\b/i.test(
-    text
-  );
+  const hasSkuOrModelSignal =
+    /\b(?:sku|model|part\s*(?:no|number)|p\/n|datasheet|product details?)\b/i.test(text);
   const hasCommerceOrCatalogSignal =
     hasAny(text, storefrontCommerceTerms) ||
     hasAny(text, storefrontCatalogTerms) ||
@@ -4462,10 +4490,10 @@ function looksLikeIndustryOrganizationOrEventPage(candidate: NormalizedLeadCandi
 
   return Boolean(
     (domain && industryOrganizationOrEventDomains.some((item) => domainMatches(domain, item))) ||
-      /\/(?:conference|event|events|agenda|technical-program|technical-programme|workshop|symposium|program-committee)\b/i.test(
-        path
-      ) ||
-      hasAny(text, industryOrganizationOrEventTerms)
+    /\/(?:conference|event|events|agenda|technical-program|technical-programme|workshop|symposium|program-committee)\b/i.test(
+      path
+    ) ||
+    hasAny(text, industryOrganizationOrEventTerms)
   );
 }
 
@@ -4499,10 +4527,10 @@ function hasChinaSupplierSignal(candidate: NormalizedLeadCandidate) {
 
   return Boolean(
     (domain &&
-        (domain.endsWith(".cn") ||
-          chinaSupplierDomains.some((item) => domainMatches(domain, item)) ||
-          /\bchina\b/i.test(domain))) ||
-      hasAny(text, chinaSupplierSignalTerms)
+      (domain.endsWith(".cn") ||
+        chinaSupplierDomains.some((item) => domainMatches(domain, item)) ||
+        /\bchina\b/i.test(domain))) ||
+    hasAny(text, chinaSupplierSignalTerms)
   );
 }
 
@@ -4560,7 +4588,10 @@ function toJsonInput(value: unknown): Prisma.InputJsonValue {
       }
 
       if (typeof item === "string") {
-        return item.split(String.fromCharCode(0)).join("").replace(/\\u0000/gi, "");
+        return item
+          .split(String.fromCharCode(0))
+          .join("")
+          .replace(/\\u0000/gi, "");
       }
 
       return item;
@@ -5308,10 +5339,7 @@ function detectOffIndustryBucket(
   // We only check overlap against the STRONG list; weak terms are
   // too generic to drive self-guard (they'd disable medical for any
   // task that incidentally mentions healthcare as a vertical).
-  const userKeywords = [
-    ...context.productKeywords,
-    ...context.customerTypeKeywords
-  ]
+  const userKeywords = [...context.productKeywords, ...context.customerTypeKeywords]
     .map((term) => term.toLowerCase())
     .filter(Boolean);
   for (const [bucketName, bucket] of Object.entries(offIndustryBuckets)) {
@@ -6775,6 +6803,7 @@ const phoneCountryCodeSignals: Array<[string, string]> = [
   ["234", "Nigeria"],
   ["27", "South Africa"],
   ["254", "Kenya"],
+  ["251", "Ethiopia"],
   ["20", "Egypt"],
   ["212", "Morocco"],
   ["233", "Ghana"],
@@ -6817,6 +6846,8 @@ const countrySignals: Array<[string, string]> = [
   ["kenya", "KENYA"],
   ["nairobi", "KENYA"],
   [".ke", "KENYA"],
+  ["ethiopia", "ETHIOPIA"],
+  [".et", "ETHIOPIA"],
   ["南非", "SOUTH AFRICA"],
   ["south africa", "SOUTH AFRICA"],
   [".za", "SOUTH AFRICA"],

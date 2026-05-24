@@ -2950,6 +2950,10 @@ describe("AgentWorkflowService", () => {
       expect(runSlowSpy.mock.calls[0]?.[3]).toBeDefined();
       expect(runSlowSpy.mock.calls[0]?.[4]).toBe(14);
       expect(result).toEqual({ appendedCount: 30, reason: "appended" });
+      const fastRows = prisma.searchQuery.createMany.mock.calls[0]?.[0].data ?? [];
+      expect(new Set(fastRows.map((row: any) => row.operatorSource))).toEqual(
+        new Set(["lane_k_keyword_combination", "reverse_customer_network_mining"])
+      );
       // Task gets touched back to running so the polling effect resumes.
       expect(prisma.leadTask.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: "task-1" } })
