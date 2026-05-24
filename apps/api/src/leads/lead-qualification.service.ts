@@ -166,18 +166,11 @@ type EvidenceLeadClassification = {
   risk: string;
 };
 
-// 2026-05: contact-probe budgets relaxed for GCC/SEA sites that
-// commonly sit behind a CDN with 4-6s TTFB or render contact info via
-// JS. Old values were 5s timeout / 6 main pages / 3 linked pages,
-// which timed out on roughly half of legitimate target-country sites
-// (notably .ae integrators with React shells and slow CDNs). Bumped
-// to 9s after observing blackcatqatar.com (Qatar EPC) responding in
-// 4-5s normally but occasionally spiking to 7-8s during peak hours.
-// 12s was too aggressive — it made each candidate take 30-60s total
-// when multiple URLs were slow, dragging the whole task to 25+ min.
+// Contact probing balances recall with task runtime: keep the timeout tight,
+// but visit enough high-value direct and linked pages for multilingual sites.
 const contactProbeTimeoutMs = 8000;
-const contactProbePageLimit = 8;
-const contactLinkedProbePageLimit = 5;
+const contactProbePageLimit = 16;
+const contactLinkedProbePageLimit = 8;
 const maxAiCandidateEvaluationsPerBatch = 15;
 
 @Injectable()
@@ -337,6 +330,10 @@ export class LeadQualificationService {
         candidate.queryCountry &&
         !matchesTargetRegion(countryValidation.inferredCountry, [candidate.queryCountry])
     );
+    const countryConflictOnlyOffTarget = countryConflictHasOnlyOffTargetEvidence(
+      countryValidation,
+      criteria.targetRegions
+    );
 
     if (
       targetCountryVerified &&
@@ -391,6 +388,13 @@ export class LeadQualificationService {
     }
 
     if (countryValidation.countryConflict) {
+      if (countryConflictOnlyOffTarget) {
+        verifiedOffTargetCountryReject = true;
+        forcedStatus = "rejected";
+        risks.push(
+          "Country evidence conflicts, but none of the verified country signals match the selected target markets"
+        );
+      }
       // Country conflicts (e.g. evidence points to two different
       // countries) used to force a separate review state. Per the
       // 2026-05 country-validation rework, we no longer split country
@@ -858,6 +862,10 @@ function shouldEvaluateCandidateWithAi(
   // we already know the company is in a different region and we don't
   // want to spend GPT budget classifying it.
   const countryValidation = validatedCountry(candidate);
+  if (countryConflictHasOnlyOffTargetEvidence(countryValidation, criteria.targetRegions)) {
+    return false;
+  }
+
   if (
     hasTargetRegionConstraint(criteria.targetRegions) &&
     countryValidation.inferredCountry &&
@@ -1123,6 +1131,17 @@ function extractCompanyName(title: string, url: string) {
     return domainCompany || "Unknown Company";
   }
 
+  // 2026-05 V1-MVP+: prefer the domain when the page title is a generic
+  // OEM-partner / channel-program label that does not name the actual
+  // operator. Brave often returns titles like "Huawei Partners",
+  // "Authorized Distributor", "ZTE Solutions" for buyer-side companies
+  // whose real brand only shows up in the domain. Without this branch
+  // the lead row reads "Huawei Partners → neodatatechnologies.com"
+  // which is confusing in the candidate table.
+  if (looksLikeOemPartnerTitle(title) && domainCompany) {
+    return domainCompany;
+  }
+
   const parts = title
     .split(/\s(?:[-–—|:»]\s)+|\s[|]\s/)
     .map((part) => cleanupCompanyName(part))
@@ -1132,6 +1151,21 @@ function extractCompanyName(title: string, url: string) {
     parts.find((part) => !isGenericTitle(part));
 
   return selected || domainCompany || "Unknown Company";
+}
+
+// 2026-05 V1-MVP+: detect titles that describe a partner/channel program
+// rather than the company itself. These titles must never override the
+// domain-derived company name (e.g. "Huawei Partners" should not become
+// the operator's name when the operator is actually NeoData).
+function looksLikeOemPartnerTitle(value: string) {
+  const lower = cleanupCompanyName(value).toLowerCase();
+  return (
+    /^(?:huawei|zte|ericsson|nokia|alcatel-lucent|cisco|samsung|fortinet|hpe|juniper|dell|lenovo|microsoft|aws|google|sap|oracle|ibm|sophos|ruckus|aruba|extreme)\s+(?:partners?|partnership|partner program|authorized\s+(?:partner|distributor|reseller|dealer)|elite\s+partner|gold\s+partner|silver\s+partner|certified\s+partner|solutions?(?:\s+partner)?|technology\s+partner|alliance|ecosystem)$/i.test(
+      lower
+    ) ||
+    /^(?:authorized|official|certified)\s+(?:distributor|reseller|dealer|partner)$/i.test(lower) ||
+    /^(?:partners?|partnership|partner program|alliance|ecosystem)$/i.test(lower)
+  );
 }
 
 function cleanupCompanyName(value: string) {
@@ -2874,79 +2908,91 @@ function looksLikeDirectCompanyEvidence(candidate: NormalizedLeadCandidate) {
 }
 
 function contactProbeUrls(website: string, sourceUrl: string) {
-  const urls = new Set<string>();
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  const addUrl = (value: string) => {
+    const normalized = normalizeProbeUrl(value);
+    if (!normalized || seen.has(normalized.key)) {
+      return;
+    }
+    seen.add(normalized.key);
+    urls.push(normalized.url);
+  };
+
   try {
     const parsed = new URL(website);
     const origin = parsed.origin;
-    urls.add(origin);
-    urls.add(website);
-    urls.add(sourceUrl);
+    addUrl(origin);
+    addUrl(sourceUrl);
+    addUrl(website);
     for (const path of contactPagePathCandidates(sourceUrl, website)) {
-      urls.add(`${origin}${path}`);
-    }
-    for (const path of [
-      "/about",
-      "/about-us",
-      "/company",
-      "/who-we-are",
-      "/our-team",
-      "/team",
-      "/our-offices",
-      "/our-locations",
-      "/locations",
-      "/offices",
-      "/imprint",
-      "/legal-notice",
-      "/support",
-      "/sales",
-      "/request-a-quote",
-      "/quote"
-    ]) {
-      urls.add(`${origin}${path}`);
+      addUrl(`${origin}${path}`);
     }
   } catch {
-    urls.add(sourceUrl);
+    addUrl(sourceUrl);
   }
 
-  return [...urls].slice(0, contactProbePageLimit);
+  return urls.slice(0, contactProbePageLimit);
+}
+
+function normalizeProbeUrl(value: string) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    if (url.pathname === "/" && !url.search) {
+      return { url: url.origin, key: url.origin };
+    }
+    return { url: url.toString(), key: url.toString() };
+  } catch {
+    const trimmed = value.trim();
+    return trimmed ? { url: trimmed, key: trimmed } : null;
+  }
 }
 
 function contactPagePathCandidates(...urls: string[]) {
-  const prefixes = new Set<string>([""]);
+  const observedPrefixes = new Set<string>();
   for (const url of urls) {
     const prefix = installBasePathPrefix(url);
     if (prefix) {
-      prefixes.add(prefix);
+      observedPrefixes.add(prefix);
     }
   }
-  prefixes.add("/wp");
 
-  // 2026-05: high-frequency contact paths come first. The previous
-  // ordering iterated `suffixes.flatMap(s => prefixes.map(p => p+s))`
-  // which interleaved every suffix with every prefix; with prefix list
-  // size >= 3 (root + sub-path + /wp), only the first 2-3 distinct
-  // suffixes ever survived the contactProbePageLimit cutoff. That meant
-  // `/contact-us` was almost always cut off on sites whose source URL
-  // had a sub-path. We now iterate the OTHER way: for each suffix in
-  // priority order, emit the empty-prefix path first, then sub-path
-  // and /wp variants. The most likely paths therefore land at the top
-  // of the URL list and survive truncation.
-  const highPrioritySuffixes = [
+  // The 4 contact-page forms users actually click on most modern sites.
+  const topRootContactPaths = [
     "/contact",
-    "/contactus",
     "/contact-us",
     "/contacts",
+    "/contactus"
+  ];
+
+  // English-locale variants right after the root contact paths. Winncom
+  // exposes /en/contacts, while NESIC keeps contact data on about.php?lang=en.
+  const enLocaleContactPaths = [
+    "/en/contact",
+    "/en/contact-us",
+    "/en/contacts",
+    "/en/contactus",
+    "/about.php?lang=en"
+  ];
+
+  const observedPrefixContactPaths = [...observedPrefixes].flatMap((prefix) =>
+    topRootContactPaths.map((suffix) => `${prefix}${suffix}`)
+  );
+  const wpContactPaths = topRootContactPaths.map((suffix) => `/wp${suffix}`);
+
+  // Trailing-slash and .html variants of the root contact paths, plus common
+  // verbal forms ("get in touch", "reach us", "connect").
+  const rootContactVariants = [
     "/contact/",
-    "/contactus/",
     "/contact-us/",
     "/contacts/",
+    "/contactus/",
     "/contact.html",
-    "/contactus.html",
     "/contact-us.html",
+    "/contactus.html",
     "/get-in-touch",
     "/get-in-touch/",
-    "/get-in-touch-with-us",
-    "/get-in-touch-customers",
     "/getintouch",
     "/getintouch/",
     "/reach-us",
@@ -2954,7 +3000,20 @@ function contactPagePathCandidates(...urls: string[]) {
     "/connect",
     "/connect/"
   ];
-  const lowPrioritySuffixes = [
+
+  const prefixedContactVariants = [
+    "/contact/",
+    "/contact-us/",
+    "/contacts/",
+    "/contactus/"
+  ];
+
+  // Lower-value fallbacks. /about, /company are intentionally NOT in
+  // this list; they almost never carry contact info on modern sites
+  // and waste probe budget. The contactLinkPathTerms list already lets
+  // us follow about/company anchors discovered on the homepage when
+  // they exist.
+  const otherFallbackPaths = [
     "/our-team",
     "/our-team/",
     "/team",
@@ -2984,22 +3043,20 @@ function contactPagePathCandidates(...urls: string[]) {
     "/offices",
     "/offices/"
   ];
-  const orderedPrefixes = ["", ...[...prefixes].filter((prefix) => prefix !== "")];
-  const allSuffixes = [...highPrioritySuffixes, ...lowPrioritySuffixes];
-  const candidates: string[] = [];
-  // First pass: emit all suffixes with empty prefix (highest priority —
-  // these are the most likely contact page paths on any site).
-  for (const suffix of allSuffixes) {
-    candidates.push(suffix);
-  }
-  // Second pass: emit sub-path and /wp variants for high-priority
-  // suffixes only (these are fallbacks for sites with path prefixes).
-  for (const suffix of highPrioritySuffixes) {
-    for (const prefix of orderedPrefixes) {
-      if (prefix === "") continue; // already emitted above
-      candidates.push(`${prefix}${suffix}`);
-    }
-  }
+
+  const candidates: string[] = [
+    ...topRootContactPaths,
+    ...enLocaleContactPaths,
+    ...observedPrefixContactPaths,
+    ...wpContactPaths,
+    ...rootContactVariants,
+    ...[...observedPrefixes].flatMap((prefix) =>
+      prefixedContactVariants.map((suffix) => `${prefix}${suffix}`)
+    ),
+    ...prefixedContactVariants.map((suffix) => `/wp${suffix}`),
+    ...otherFallbackPaths
+  ];
+
   return uniqueStrings(candidates);
 }
 
@@ -3081,11 +3138,17 @@ function extractContactLinks(html: string, baseUrl: string) {
     })
     .map((url) => {
       url.hash = "";
-      url.search = "";
+      if (!hasMeaningfulContactSearchParams(url)) {
+        url.search = "";
+      }
       return url.toString();
     });
 
   return uniqueStrings(urls).slice(0, 12);
+}
+
+function hasMeaningfulContactSearchParams(url: URL) {
+  return ["lang", "language", "locale"].some((param) => url.searchParams.has(param));
 }
 
 function urlOrigin(url: string) {
@@ -3100,33 +3163,114 @@ function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
+type ContactProbeFetchResult = {
+  ok: boolean;
+  status: number;
+  html: string;
+};
+
 async function fetchText(url: string) {
+  const first = await fetchTextOnce(url);
+  if (first.ok) {
+    return first.html;
+  }
+
+  const sucuriCookie = extractSucuriChallengeCookie(first.html);
+  if (!sucuriCookie) {
+    return "";
+  }
+
+  const second = await fetchTextOnce(url, sucuriCookie);
+  return second.ok ? second.html : "";
+}
+
+async function fetchTextOnce(url: string, cookie?: string): Promise<ContactProbeFetchResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), contactProbeTimeoutMs);
 
   try {
+    const headers: Record<string, string> = {
+      accept: "text/html,text/plain;q=0.9,*/*;q=0.8",
+      "user-agent": "Mozilla/5.0 (compatible; LeadHuntAI/0.1 contact enrichment)"
+    };
+    if (cookie) {
+      headers.cookie = cookie;
+    }
     const response = await fetch(url, {
       signal: controller.signal,
       redirect: "follow",
-      headers: {
-        accept: "text/html,text/plain;q=0.9,*/*;q=0.8",
-        "user-agent": "Mozilla/5.0 (compatible; LeadHuntAI/0.1 contact enrichment)"
-      }
+      headers
     });
     const contentType = response.headers.get("content-type") ?? "";
-    if (
-      !response.ok ||
-      (!contentType.includes("text/html") && !contentType.includes("text/plain"))
-    ) {
-      return "";
+    if (!contentType.includes("text/html") && !contentType.includes("text/plain")) {
+      return { ok: false, status: response.status, html: "" };
     }
 
-    return await response.text();
+    const html = await response.text();
+    return { ok: response.ok, status: response.status, html };
   } catch {
-    return "";
+    return { ok: false, status: 0, html: "" };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function extractSucuriChallengeCookie(html: string) {
+  if (!html.includes("sucuri_cloudproxy") || !html.includes("You are being redirected")) {
+    return null;
+  }
+
+  const encoded = html.match(/\bS=["']([A-Za-z0-9+/=]+)["']/)?.[1];
+  if (!encoded) {
+    return null;
+  }
+
+  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  const assignment = decoded.match(
+    /^\s*([A-Za-z_$][\w$]*)\s*=\s*([\s\S]*?);\s*document\.cookie=/
+  );
+  if (!assignment?.[1] || !assignment[2]) {
+    return null;
+  }
+
+  const cookieValue = evaluateSafeJavascriptConcat(assignment[2]);
+  const cookieNamePattern = new RegExp(
+    `document\\.cookie\\s*=\\s*([\\s\\S]*?)\\+\\s*["']=["']\\s*\\+\\s*${assignment[1]}\\s*\\+`
+  );
+  const cookieNameExpression = decoded.match(cookieNamePattern)?.[1];
+  const cookieName = cookieNameExpression
+    ? evaluateSafeJavascriptConcat(cookieNameExpression)
+    : null;
+
+  return cookieName && cookieValue ? `${cookieName}=${cookieValue}` : null;
+}
+
+function evaluateSafeJavascriptConcat(expression: string) {
+  const parts = expression.split("+");
+  let output = "";
+
+  for (const rawPart of parts) {
+    const part = rawPart.trim();
+    const quoted = part.match(/^["']([\s\S]*)["']$/);
+    if (quoted) {
+      output += quoted[1];
+      continue;
+    }
+
+    const charCode = part.match(/^String\.fromCharCode\((\d+)\)$/);
+    if (charCode?.[1]) {
+      output += String.fromCharCode(Number(charCode[1]));
+      continue;
+    }
+
+    if (!part) {
+      continue;
+    }
+
+    return null;
+  }
+
+  return output;
 }
 
 function htmlToSearchableText(html: string) {
@@ -3278,6 +3422,25 @@ function matchesTargetRegion(country: string, targetRegions: string[]) {
 
 function hasTargetRegionConstraint(targetRegions: string[]) {
   return targetRegions.length > 0 && !targetRegions.some(isGlobalTargetRegion);
+}
+
+function countryConflictHasOnlyOffTargetEvidence(
+  countryValidation: Pick<
+    NormalizedLeadCandidate,
+    "countryConflict" | "countryConflictCountries"
+  >,
+  targetRegions: string[]
+) {
+  if (!hasTargetRegionConstraint(targetRegions) || !countryValidation.countryConflict) {
+    return false;
+  }
+  const conflictCountries = uniqueStrings(countryValidation.countryConflictCountries ?? []).filter(
+    Boolean
+  );
+  return (
+    conflictCountries.length > 0 &&
+    conflictCountries.every((country) => !matchesTargetRegion(country, targetRegions))
+  );
 }
 
 function isMacroTargetRegion(region: string) {
@@ -5860,6 +6023,8 @@ const companyPagePathTerms = [
 
 const contactLinkPathTerms = [
   "contact",
+  "about",
+  "company",
   "get-in-touch",
   "quote",
   "request",
@@ -6277,6 +6442,49 @@ const forbiddenCompanyNameTerms = new Set([
   "category",
   "contact",
   "contact us",
+  // 2026-05 V1-MVP+: more generic page-title terms that leaked through
+  // as company names (e.g. Mobilink Kuwait's "/contact-us" page has
+  // <title>Contacts</title>, which was being extracted as a brand new
+  // candidate company. Same story for "get in touch", "our team",
+  // "team", "services", etc.).
+  "contacts",
+  "contact info",
+  "contact information",
+  "get in touch",
+  "reach us",
+  "reach out",
+  "connect with us",
+  "our team",
+  "team",
+  "our offices",
+  "offices",
+  "our locations",
+  "locations",
+  "services",
+  "our services",
+  "products",
+  "our products",
+  "solutions",
+  "our solutions",
+  "support",
+  "careers",
+  "careers home",
+  "jobs",
+  "blog",
+  "news",
+  "media",
+  "press",
+  "privacy",
+  "privacy policy",
+  "terms",
+  "terms of service",
+  "cookie policy",
+  "sitemap",
+  "search",
+  "login",
+  "sign in",
+  "sign up",
+  "register",
   "home",
   "homepage",
   "pdf",

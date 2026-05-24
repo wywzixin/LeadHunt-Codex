@@ -1119,7 +1119,7 @@ describe("LeadQualificationService", () => {
     expect(score.status).not.toBe("rejected");
   });
 
-  it("does NOT hard-reject off-target candidates when country conflict is true", () => {
+  it("does NOT hard-reject country conflicts when one conflict country matches the target market", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const score = service.scoreCandidate(
       {
@@ -1160,11 +1160,61 @@ describe("LeadQualificationService", () => {
       { ...criteria, targetRegions: ["Germany"] }
     );
 
-    // Country conflict means evidence points to two different
-    // countries — that's an ambiguity signal, not a settled
-    // off-target. The legacy conflict-risk path still fires, but we
-    // don't hard-reject.
+    // Country conflict means evidence points to two different countries.
+    // If at least one verified signal is the target market, the row is
+    // ambiguous rather than settled off-target.
     expect(score.status).not.toBe("rejected");
+  });
+
+  it("hard-rejects country conflicts when all verified country signals are outside the target markets", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Second Sight Systems",
+        website: "https://secondsightsystems.com/services/tower-services/",
+        sourceUrl: "https://secondsightsystems.com/services/tower-services/",
+        country: "UNITED STATES",
+        inferredCountry: null,
+        countryConfidence: "low",
+        countryConflict: true,
+        countryConflictCountries: ["UNITED STATES", "PHILIPPINES"],
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "UNITED STATES",
+            value: "+1 844 789 9111",
+            sourceUrl: "https://secondsightsystems.com",
+            confidence: "high"
+          },
+          {
+            type: "phone",
+            country: "PHILIPPINES",
+            value: "63127 844-789-9111",
+            sourceUrl: "https://secondsightsystems.com",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@sssrf.com",
+            sourceUrl: "https://secondsightsystems.com"
+          }
+        ],
+        summary:
+          "Tower services including tower installation, tower maintenance and microwave dish work."
+      },
+      { ...criteria, targetRegions: ["Nigeria", "Kenya"] }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("none of the verified country signals match the selected target markets")
+      ])
+    );
   });
 
   it("does NOT hard-reject member-country candidates of a macro target (Middle East + Qatar)", () => {
@@ -2092,6 +2142,330 @@ describe("LeadQualificationService", () => {
               expect.objectContaining({ type: "email", value: "info@qilantelecom.com" }),
               expect.objectContaining({ type: "email", value: "sales@qilantelecom.com" }),
               expect.objectContaining({ type: "phone", value: "+233 302 555 568" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("probes English locale contact pages before the URL cutoff", async () => {
+    const prisma = createPrismaMock();
+    const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/en/contacts")
+        ? `
+          <html><body>
+            Winncom wireless broadband and telecom equipment distributor.
+            <a href="mailto:sales@winncom.com">sales@winncom.com</a>
+            <span>Phone: 440-498-9510</span>
+          </body></html>
+        `
+        : `
+          <html><body>
+            Winncom wireless broadband and telecom equipment distributor.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Winncom Technologies - Telecom Distributor",
+          url: "https://www.winncom.com/",
+          snippet:
+            "United States wireless broadband distributor and telecom equipment stockist for RRU BBU projects.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["United States"]
+      },
+      "United States"
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://www.winncom.com/en/contacts",
+      expect.objectContaining({ headers: expect.any(Object) })
+    );
+    expect(
+      fetchSpy.mock.calls.findIndex(([input]) => String(input) === "https://www.winncom.com/en/contacts")
+    ).toBeLessThan(16);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "sales@winncom.com" }),
+              expect.objectContaining({ type: "phone", value: "440-498-9510" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("keeps observed sub-path contact pages inside the final probe URL budget", async () => {
+    const prisma = createPrismaMock();
+    const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/mena/contact-us")
+        ? `
+          <html><body>
+            MENA Network Services telecom system integrator.
+            Email: sales@menanet.ae
+            Phone: +971 4 555 1020
+          </body></html>
+        `
+        : `
+          <html><body>
+            MENA Network Services telecom system integrator in UAE.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "MENA Network Services",
+          url: "https://menanet.example/mena/solutions",
+          snippet: "UAE telecom system integrator and network services contractor.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE"]
+      },
+      "UAE"
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://menanet.example/mena/contact-us",
+      expect.objectContaining({ headers: expect.any(Object) })
+    );
+    expect(
+      fetchSpy.mock.calls.findIndex(
+        ([input]) => String(input) === "https://menanet.example/mena/contact-us"
+      )
+    ).toBeLessThan(16);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "sales@menanet.ae" }),
+              expect.objectContaining({ type: "phone", value: "+971 4 555 1020" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("follows legacy about links with language query params when contact data lives there", async () => {
+    const prisma = createPrismaMock();
+    const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/about.php?lang=en")
+        ? `
+          <html><body>
+            NESIC Saudi telecom system integrator.
+            Email: info@nesicsa.com
+            Tel: +966-13-898-9477
+          </body></html>
+        `
+        : `
+          <html><body>
+            <a href="/about.php?lang=en">About NESIC</a>
+            Saudi telecom system integrator and network contractor.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "NESIC Saudi Arabia",
+          url: "https://nesicsa.com/",
+          snippet: "Saudi Arabia telecom system integrator and network infrastructure contractor.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia"]
+      },
+      "Saudi Arabia"
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://nesicsa.com/about.php?lang=en",
+      expect.objectContaining({ headers: expect.any(Object) })
+    );
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "info@nesicsa.com" }),
+              expect.objectContaining({ type: "phone", value: "+966-13-898-9477" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("follows branded contact page slugs from homepage navigation", async () => {
+    const prisma = createPrismaMock();
+    const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/contact-us-gbi/")
+        ? `
+          <html><body>
+            Gulf Bridge International telecom Qatar.
+            <a href="mailto:info@gbiinc.com">info@gbiinc.com</a>
+            <a href="mailto:sales@gbiinc.com">sales@gbiinc.com</a>
+            Phone: +974 4009 4444
+          </body></html>
+        `
+        : `
+          <html><body>
+            <a href="/contact-us-gbi/">Contact Us - GBI</a>
+            Gulf Bridge International telecom Qatar.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "GBI Gulf Bridge International",
+          url: "https://www.gbiinc.com/",
+          snippet: "Qatar telecom network operator and infrastructure provider.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Qatar"]
+      },
+      "Qatar"
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://www.gbiinc.com/contact-us-gbi/",
+      expect.objectContaining({ headers: expect.any(Object) })
+    );
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "info@gbiinc.com" }),
+              expect.objectContaining({ type: "email", value: "sales@gbiinc.com" }),
+              expect.objectContaining({ type: "phone", value: "+974 4009 4444" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("retries Sucuri cookie challenge pages before giving up on contact extraction", async () => {
+    const prisma = createPrismaMock();
+    const challengeScript = Buffer.from(
+      `v="a" + String.fromCharCode(98);document.cookie='s'+'u'+"=" + v + ';path=/;max-age=86400'; location.reload();`
+    ).toString("base64");
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      const cookie = (init?.headers as Record<string, string> | undefined)?.cookie;
+      if (url.endsWith("/contact-us/") && cookie === "su=ab") {
+        return new Response(
+          `
+            <html><body>
+              Neo Data Technologies telecom solutions UAE.
+              Email: info@neodatatechnologies.com
+              Mobile: +971 56 418 1800
+            </body></html>
+          `,
+          {
+            status: 200,
+            headers: { "content-type": "text/html; charset=UTF-8" }
+          }
+        );
+      }
+
+      if (url.endsWith("/contact-us/")) {
+        return new Response(
+          `<html><title>You are being redirected...</title><script>var sucuri_cloudproxy_js='',S='${challengeScript}';</script></html>`,
+          {
+            status: 307,
+            headers: { "content-type": "text/html" }
+          }
+        );
+      }
+
+      return new Response("<html><body>Neo Data Technologies UAE telecom solutions.</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Neo Data Technologies",
+          url: "https://neodatatechnologies.com/contact-us/",
+          snippet: "UAE telecom solutions provider and network system integrator.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE"]
+      },
+      "UAE"
+    );
+
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({
+                type: "email",
+                value: "info@neodatatechnologies.com"
+              }),
+              expect.objectContaining({ type: "phone", value: "+971 56 418 1800" })
             ])
           }
         })
