@@ -1142,6 +1142,14 @@ function extractCompanyName(title: string, url: string) {
     return domainCompany;
   }
 
+  if (
+    domainCompany &&
+    looksLikeBrandOnlyTitle(title) &&
+    normalizeCompanyKey(domainCompany) !== normalizeCompanyKey(title)
+  ) {
+    return domainCompany;
+  }
+
   const parts = title
     .split(/\s(?:[-–—|:»]\s)+|\s[|]\s/)
     .map((part) => cleanupCompanyName(part))
@@ -1165,6 +1173,13 @@ function looksLikeOemPartnerTitle(value: string) {
     ) ||
     /^(?:authorized|official|certified)\s+(?:distributor|reseller|dealer|partner)$/i.test(lower) ||
     /^(?:partners?|partnership|partner program|alliance|ecosystem)$/i.test(lower)
+  );
+}
+
+function looksLikeBrandOnlyTitle(value: string) {
+  const lower = cleanupCompanyName(value).toLowerCase();
+  return /^(?:huawei|zte|ericsson|nokia|alcatel-lucent|cisco|samsung|fortinet|hpe|juniper|dell|lenovo|microsoft|aws|google|sap|oracle|ibm|sophos|ruckus|aruba|extreme)$/.test(
+    lower
   );
 }
 
@@ -1239,6 +1254,14 @@ function isLikelyCompanyName(value: string, domainCompany: string | null) {
   const name = cleanupCompanyName(value);
   const lower = name.toLowerCase();
   if (!name || name.length > 72 || isGenericTitle(name) || isForbiddenCompanyName(name)) {
+    return false;
+  }
+
+  if (
+    domainCompany &&
+    looksLikeBrandOnlyTitle(name) &&
+    normalizeCompanyKey(name) !== normalizeCompanyKey(domainCompany)
+  ) {
     return false;
   }
 
@@ -3106,7 +3129,22 @@ function installBasePathPrefix(url: string) {
 }
 
 async function fetchProbePages(urls: string[]) {
-  return Promise.all(uniqueStrings(urls).map(async (url) => ({ url, html: await fetchText(url) })));
+  const uniqueUrls = uniqueStrings(urls);
+  const results: Array<{ url: string; html: string }> = [];
+  const concurrency = 4;
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < uniqueUrls.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      const url = uniqueUrls[currentIndex]!;
+      results[currentIndex] = { url, html: await fetchText(url) };
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, uniqueUrls.length) }, () => worker()));
+  return results.filter(Boolean);
 }
 
 function extractContactLinks(html: string, baseUrl: string) {
@@ -3191,7 +3229,10 @@ async function fetchTextOnce(url: string, cookie?: string): Promise<ContactProbe
   try {
     const headers: Record<string, string> = {
       accept: "text/html,text/plain;q=0.9,*/*;q=0.8",
-      "user-agent": "Mozilla/5.0 (compatible; LeadHuntAI/0.1 contact enrichment)"
+      "accept-language": "en-US,en;q=0.9",
+      "cache-control": "no-cache",
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
     };
     if (cookie) {
       headers.cookie = cookie;
@@ -6380,6 +6421,7 @@ const domainCompanyNameOverrides: Record<string, string> = {
   mfcomm: "MF Communications",
   rtesqatar: "RTES Qatar",
   screamerelectronicservices: "Screamer Electronic Services",
+  sfttradingllc: "SFT Trading LLC",
   sfps: "SFPS",
   stc: "STC",
   telephonyme: "TelephonyME",

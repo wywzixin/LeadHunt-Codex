@@ -144,6 +144,25 @@ describe("LeadQualificationService", () => {
     ]);
   });
 
+  it("uses the buyer domain instead of a brand-only result title", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Huawei",
+          url: "https://sfttradingllc.com/contact-us/",
+          snippet:
+            "UAE authorized channel partner and telecom equipment distributor for Huawei network equipment.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "UAE" }
+    );
+
+    expect(candidate?.companyName).toBe("SFT Trading LLC");
+  });
+
   it("falls back to domain brands instead of using marketing headlines as company names", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
 
@@ -2237,6 +2256,72 @@ describe("LeadQualificationService", () => {
             create: expect.arrayContaining([
               expect.objectContaining({ type: "email", value: "sales@winncom.com" }),
               expect.objectContaining({ type: "phone", value: "440-498-9510" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("corrects brand-only titles and extracts SFT Trading contact details from the contact page", async () => {
+    const prisma = createPrismaMock();
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/contact-us/")
+        ? `
+          <html>
+            <head><title>SFT Trading LLC - Contact Us</title></head>
+            <body>
+              <img alt="SFT Trading LLC Logo" src="/logo.png" />
+              SFT Trading LLC is a UAE telecom equipment distributor and channel partner.
+              Email: info@sfttradingllc.com
+              Phone: +971 4 3212406
+              Mobile: +971 555 822 407
+            </body>
+          </html>
+        `
+        : `
+          <html><body>
+            SFT Trading LLC provides Huawei and ZTE telecom equipment in Dubai.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Huawei",
+          url: "https://sfttradingllc.com/contact-us/",
+          snippet:
+            "UAE channel partner and telecom equipment distributor for Huawei, ZTE, BBU, RRU and rectifier spare parts.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE"],
+        productKeywords: ["Huawei", "ZTE", "BBU", "RRU", "rectifier"],
+        customerTypeKeywords: ["distributor", "channel partner", "stockist"]
+      },
+      "UAE"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          companyName: "SFT Trading LLC",
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "info@sfttradingllc.com" }),
+              expect.objectContaining({ type: "phone", value: "+971 4 3212406" }),
+              expect.objectContaining({ type: "phone", value: "+971 555 822 407" })
             ])
           }
         })
