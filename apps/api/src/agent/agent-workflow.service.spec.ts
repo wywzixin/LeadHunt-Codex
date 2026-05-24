@@ -1170,6 +1170,7 @@ describe("AgentWorkflowService", () => {
     expect(firstLaneKQueries).toMatch(/\bNigeria\b/i);
     expect(firstLaneKQueries).toMatch(/\bKenya\b/i);
     expect(firstLaneKQueries).toMatch(/site:\.ng|site:\.ke/i);
+    expect(firstLaneKQueries).not.toMatch(/\b(?:R4850N6|MA5800|MA5608T)\b/i);
   });
 
   it("uses off-site reverse customer network queries instead of searching inside the reference site", async () => {

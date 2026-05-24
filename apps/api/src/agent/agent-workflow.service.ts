@@ -6083,13 +6083,13 @@ function buildLaneKQueries(input: LaneKInput): PlannedSearchQuery[] {
   if (productOr && telecomPrecisionEligible) {
     const precisionBuilders = [
       (country: string) =>
-        `("tower maintenance" OR "base station maintenance" OR "RAN maintenance") ${productOr} ${country} ${localContactEntry}`,
-      (country: string) =>
-        `("telecom contractor" OR "tower contractor" OR "network maintenance company") ${productOr} ${country} ("contact" OR services)`,
+        `(distributor OR stockist OR reseller OR importer) ${productOr} ${country} ("contact" OR "spare parts")`,
       (country: string) =>
         `("rectifier" OR "-48V" OR "telecom power") ("maintenance" OR "power systems" OR "field service") ${country} ("contact" OR services)`,
       (country: string) =>
-        `(distributor OR stockist OR reseller OR importer) ${productOr} ${country} ("contact" OR "spare parts")`,
+        `("telecom contractor" OR "tower contractor" OR "network maintenance company") ${productOr} ${country} ("contact" OR services)`,
+      (country: string) =>
+        `("tower maintenance" OR "base station maintenance" OR "RAN maintenance") ${productOr} ${country} ${localContactEntry}`,
       (country: string) => {
         const countrySite = marketToSite(country);
         const localSite = countrySite && countrySite !== ".com" ? `site:${countrySite}` : "";
@@ -6199,11 +6199,19 @@ function laneKProductAnchorTerms(productTerms: string[]) {
     if (lower.includes("radio unit")) anchors.push("radio unit");
     if (lower.includes("baseband")) anchors.push("baseband");
     if (lower === "olt") anchors.push("OLT");
-    if (term.length <= 28 && term.split(/\s+/).length <= 3 && !/\b\d{4,}\b/.test(term)) {
+    if (
+      term.length <= 28 &&
+      term.split(/\s+/).length <= 3 &&
+      !laneKLooksLikeExactModelTerm(term)
+    ) {
       anchors.push(term);
     }
   }
   return uniqueStrings(anchors).slice(0, 8);
+}
+
+function laneKLooksLikeExactModelTerm(term: string) {
+  return /\b(?:[a-z]{1,6}\d{2,}[a-z0-9-]*|\d{4,}[a-z0-9-]*)\b/i.test(term);
 }
 
 function laneKBuyerRoleAnchorTerms(buyerRoles: string[]) {
