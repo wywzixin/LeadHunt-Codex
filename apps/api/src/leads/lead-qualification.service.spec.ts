@@ -1963,6 +1963,38 @@ describe("LeadQualificationService", () => {
     expect(scores[3]?.score).toBeGreaterThan(scores[0]?.score ?? 0);
   });
 
+  it("keeps map/listing pages out of the customer pool despite listing-page contact emails", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Highcloud Solutions Inc - MapQuest",
+          url: "https://www.mapquest.com/us/minnesota/highcloud-solutions-inc-420618817",
+          snippet:
+            "MapQuest local listing for Highcloud Solutions Inc. Network equipment service, job listings, directions, maps, help@mapquest.com.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "Kenya" }
+    );
+
+    const score = service.scoreCandidate(candidate!, {
+      ...criteria,
+      targetRegions: ["Kenya", "Nigeria"],
+      productKeywords: ["Huawei RRU", "ZTE BBU", "rectifier module"],
+      customerTypeKeywords: ["telecom contractor", "system integrator", "maintenance company"]
+    });
+
+    expect(["intelligence", "rejected"]).toContain(score.status);
+    expect(score.status).not.toBe("review");
+    expect(score.status).not.toBe("qualified");
+    expect(score.pageType).toBe("third_party_profile");
+    expect(score.score).toBeLessThan(50);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Third-party profile")])
+    );
+  });
+
   it("filters dates and long numeric ids out of phone contacts", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(

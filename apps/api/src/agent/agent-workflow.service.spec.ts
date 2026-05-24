@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentWorkflowService,
   splitReferenceCompanyAliases,
+  trimReferenceCompanyName,
   resolveSearchQueryConcurrency
 } from "./agent-workflow.service.js";
 
@@ -1194,11 +1195,49 @@ describe("AgentWorkflowService", () => {
       query.templateId?.startsWith("reverse_network_")
     );
 
-    expect(reverseQueries.length).toBeGreaterThan(0);
+    expect(reverseQueries).toHaveLength(4);
     for (const query of reverseQueries) {
       expect(query.query).toContain("-site:spectrummea.com");
       expect(query.query).not.toMatch(/^site:spectrummea\.com\b/i);
     }
+  });
+
+  it("rejects weak cloud-only reference pivots from GPT search plans", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: [
+        aiSearchQuery(
+          '"Highcloud" ("partner" OR "client") Kenya 5G network equipment',
+          "Kenya",
+          1
+        ),
+        ...simpleAiQueriesForMarkets(input.targetMarkets)
+      ]
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      createWebsiteContentMock() as any,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt:
+        "Find Kenya telecom tower and base station maintenance contractors buying Huawei ZTE Eltek BBU RRU rectifier spare parts.",
+      targetCount: 30
+    });
+
+    const queries = result.searchQueries.map((query) => query.query);
+    const persistedPayload = prisma.leadTask.create.mock.calls[0]?.[0].data.inputPayload;
+    expect(queries.join("\n")).not.toMatch(/"Highcloud"\s+\("partner" OR "client"\)/i);
+    expect(persistedPayload.profileSignals.aiPlanning.rejectedQueries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: "weak_reference_customer_pivot:Highcloud"
+        })
+      ])
+    );
   });
 
   it("asks GPT for refills when valid long-tail queries are rejected before reaching 30", async () => {
@@ -2429,6 +2468,15 @@ describe("AgentWorkflowService", () => {
     it("returns an empty array for empty or whitespace input", () => {
       expect(splitReferenceCompanyAliases("")).toEqual([]);
       expect(splitReferenceCompanyAliases("   ")).toEqual([]);
+    });
+  });
+
+  describe("trimReferenceCompanyName", () => {
+    it("prefers specific aliases over weak cloud-only aliases", () => {
+      expect(trimReferenceCompanyName("HighCloud / HCT Group")).toBe("HCT Group");
+      expect(trimReferenceCompanyName("Highcloud / High Cloud Technologies")).toBe(
+        "High Cloud Technologies"
+      );
     });
   });
 

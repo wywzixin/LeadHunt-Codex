@@ -4829,6 +4829,16 @@ function normalizeAiSearchPlan(
       continue;
     }
 
+    const weakReferencePivot = detectWeakReferenceCustomerPivot(queryText);
+    if (weakReferencePivot) {
+      rejected.push({
+        query: rawQueryText,
+        country: rawCountry,
+        reason: `weak_reference_customer_pivot:${weakReferencePivot}`
+      });
+      continue;
+    }
+
     if (!hasEnoughQuerySignals(queryText, keywordGroups, country)) {
       rejected.push({
         query: rawQueryText,
@@ -4993,6 +5003,18 @@ function detectForbiddenSearchAntiPattern(queryText: string): string | null {
   }
 
   return null;
+}
+
+function detectWeakReferenceCustomerPivot(queryText: string): string | null {
+  const pivot = queryText.match(
+    /"([^"]{2,80})"\s*(?:\([^)]*\b(?:client|clients|partner|partners|case stud(?:y|ies)|deployment|deployments|reference|references)\b[^)]*\)|"(?:client|clients|partner|partners|case stud(?:y|ies)|deployment|deployments|reference|references)")/i
+  );
+  if (!pivot?.[1]) {
+    return null;
+  }
+
+  const alias = trimReferenceCompanyName(pivot[1]);
+  return isWeakReferenceCustomerAlias(alias) ? alias : null;
 }
 
 function uniqueRejectedAiQueries(
@@ -5592,11 +5614,10 @@ function shortenLongQuotedPhrases(query: string) {
 // 2026-05 P1: A reference company name may come back from GPT as a
 // slash-joined alias bundle (e.g. "HCT Group / High Cloud Technologies"
 // or "stc / Saudi Telecom Company"). Brave exact-matches the full quoted
-// string and returns 0 results. We pick the SHORTEST alias from the
-// slash split, which is usually the canonical short brand name. As a
-// secondary safeguard, we also drop trailing legal-entity suffixes that
-// hurt exact match (LLC, FZE, FZCO, etc.).
-function trimReferenceCompanyName(name: string): string {
+// string and returns 0 results. Prefer compact aliases, but avoid weak
+// cloud-only aliases such as "Highcloud" when a more specific alias is
+// available; those pivots return MapQuest/Clutch/cloud-hosting noise.
+export function trimReferenceCompanyName(name: string): string {
   const aliases = name
     .split(/\s*[/|,]\s*/)
     .map((alias) => alias.trim())
@@ -5604,16 +5625,34 @@ function trimReferenceCompanyName(name: string): string {
   if (aliases.length === 0) {
     return name.trim();
   }
-  // Prefer the alias that has 2-3 words (most searchable). Fall back to
-  // the shortest alias by word count.
-  const sortedByWordCount = [...aliases].sort(
-    (a, b) => a.split(/\s+/).length - b.split(/\s+/).length
-  );
-  const idealAlias = sortedByWordCount.find((a) => {
-    const wc = a.split(/\s+/).length;
-    return wc >= 1 && wc <= 4;
+  const sortedAliases = [...aliases].sort((a, b) => {
+    const weakDelta =
+      Number(isWeakReferenceCustomerAlias(a)) - Number(isWeakReferenceCustomerAlias(b));
+    if (weakDelta !== 0) {
+      return weakDelta;
+    }
+    return a.split(/\s+/).length - b.split(/\s+/).length;
   });
-  return (idealAlias ?? sortedByWordCount[0] ?? name).trim();
+  const idealAlias = sortedAliases.find((a) => {
+    const wc = a.split(/\s+/).length;
+    return wc >= 1 && wc <= 4 && !isWeakReferenceCustomerAlias(a);
+  });
+  return (idealAlias ?? sortedAliases[0] ?? name).trim();
+}
+
+function isWeakReferenceCustomerAlias(name: string) {
+  const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!normalized) {
+    return true;
+  }
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && /^(?:cloud|highcloud|hicloud|cloudone|cloud1)$/.test(words[0]!)) {
+    return true;
+  }
+  if (words.length <= 2 && words.some((word) => word === "cloud" || word === "highcloud")) {
+    return true;
+  }
+  return false;
 }
 
 function isSafeQueryNegativeTerm(term: string) {
@@ -6441,6 +6480,48 @@ function buildReverseCustomerNetworkQueries(input: {
         country: market || null,
         effectivenessScore: 0.85,
         templateId: "reverse_network_name"
+      });
+      if (queries.length >= maxQueries) {
+        break;
+      }
+
+      queries.push({
+        provider: "brave",
+        operatorSource: "brave_official",
+        executionStatus: "supported",
+        operatorName: "Reverse customer network mining",
+        strategyTemplate: "lane-D reference-customer brand-adjacent network",
+        strategyType: "main_customer",
+        query:
+          `"${safeName}" (Huawei OR ZTE OR Eltek) (distributor OR contractor OR "maintenance company")${trailingMarket} -site:${domain}`.slice(
+            0,
+            180
+          ),
+        keywordGroups: input.keywordGroups,
+        country: market || null,
+        effectivenessScore: 0.82,
+        templateId: "reverse_network_brand"
+      });
+      if (queries.length >= maxQueries) {
+        break;
+      }
+
+      queries.push({
+        provider: "brave",
+        operatorSource: "brave_official",
+        executionStatus: "supported",
+        operatorName: "Reverse customer network mining",
+        strategyTemplate: "lane-D reference-customer infrastructure pivot",
+        strategyType: "main_customer",
+        query:
+          `"${safeName}" ("base station" OR "telecom power" OR rectifier) (partner OR supplier OR contractor)${trailingMarket} -site:${domain}`.slice(
+            0,
+            180
+          ),
+        keywordGroups: input.keywordGroups,
+        country: market || null,
+        effectivenessScore: 0.8,
+        templateId: "reverse_network_infrastructure"
       });
       if (queries.length >= maxQueries) {
         break;

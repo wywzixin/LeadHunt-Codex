@@ -3511,6 +3511,10 @@ function classifyCandidatePage(
     return hasProcurementIntent(text) ? "procurement_document" : "third_party_profile";
   }
 
+  if (domain && isDirectoryIntelligenceDomain(domain)) {
+    return hasProcurementIntent(text) ? "procurement_document" : "third_party_profile";
+  }
+
   if (domain && isProcurementIntelligenceDomain(domain) && hasProcurementIntent(text)) {
     return "procurement_document";
   }
@@ -5602,6 +5606,7 @@ const directoryIntelligenceDomains = [
   "saudidirectory.com",
   "yello.ae",
   "yellosa.co.za",
+  "mapquest.com",
   "uaeplusplus.com",
   "kompass.com",
   "europages.com",
