@@ -2578,8 +2578,7 @@ body:has(.aiProjectApp) {
   gap: 14px;
   border-bottom: 1px solid #eef2f7;
   background:
-    linear-gradient(180deg, rgba(240, 253, 244, 0.78) 0%, rgba(255, 255, 255, 0) 100%),
-    #fff;
+    linear-gradient(180deg, rgba(240, 253, 244, 0.78) 0%, rgba(255, 255, 255, 0) 100%), #fff;
   padding: 22px 24px 18px;
 }
 
@@ -2721,12 +2720,46 @@ body:has(.aiProjectApp) {
 }
 
 .crmDataTableWrap {
+  /* 2026-05 responsive cleanup: allow vertical scroll inside the table
+     wrapper so the user can mouse-wheel through the rows. We keep
+     overflow-x: hidden because the columns are sized as percentages
+     of the container (no horizontal overflow expected) and a stray
+     horizontal scrollbar would look broken next to the styled border. */
   min-width: 0;
   min-height: 0;
   overflow-x: hidden;
-  overflow-y: hidden;
+  overflow-y: auto;
   border-top: 1px solid #eef2f7;
   border-bottom: 1px solid #eef2f7;
+  /* Hide the scrollbar visually while keeping the scroll behavior.
+     The wrapper uses pagination for primary navigation (see footer
+     pager), so a visible scrollbar would be redundant noise.
+     - Firefox: `scrollbar-width: none`
+     - Chromium/WebKit: `::-webkit-scrollbar { display: none }` below
+     - IE/legacy Edge: `-ms-overflow-style: none` */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.crmDataTableWrap::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* 2026-05 responsive cleanup: hover affordance on the CRM-sync preview
+   table. Each row is a customer record the user is about to sync, so
+   hover + pointer cursor signals the row is interactive (clicking
+   anywhere on the row in the future could open lead detail). For now
+   we just provide the visual cue; the click handler can be added later
+   without touching CSS again. */
+.crmDataTable tbody tr {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.crmDataTable tbody tr:hover {
+  background: #f3f7ff;
 }
 
 .crmDataTable {
@@ -3112,6 +3145,12 @@ body:has(.aiProjectApp) {
 }
 
 .crmDataTableWrap.paged {
+  /* 2026-05 responsive cleanup: paged mode keeps a fixed visual height
+     (5 rows × ~54px + thead ~44px) so the modal doesn't jitter as the
+     user pages through. Combined with .crmDataTableWrap's
+     `overflow-y: auto` above, if a row ever grows beyond its expected
+     54px (long company name wrapping, future field additions) the
+     wrapper scrolls instead of pushing the footer down. */
   height: 314px;
 }
 
@@ -3641,22 +3680,22 @@ body:has(.aiProjectApp) {
   inset: 0;
   z-index: 1200;
   display: grid;
-  place-items: start center;
+  place-items: center;
   background: rgba(17, 24, 39, 0.48);
-  overflow: auto;
-  padding: 56px 32px 32px;
+  overflow: hidden;
+  padding: 24px;
 }
 
 .mailModalProto {
   display: grid;
-  grid-template-columns: minmax(720px, 1fr) 360px;
-  width: min(1280px, calc(100vw - 64px));
-  height: min(800px, calc(100vh - 112px));
+  grid-template-columns: minmax(0, 1fr) 292px;
+  width: min(1040px, calc(100vw - 72px));
+  height: min(660px, calc(100vh - 72px));
   overflow: hidden;
   border: 1px solid #e6ecf5;
-  border-radius: 16px;
+  border-radius: 14px;
   background: #f8fafc;
-  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.24);
 }
 
 .mailMain {
@@ -3673,17 +3712,17 @@ body:has(.aiProjectApp) {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  min-height: 72px;
+  min-height: 58px;
   border-bottom: 1px solid #edf1f7;
-  padding: 0 26px;
+  padding: 0 22px;
 }
 
 .mailTitle {
   display: flex;
   align-items: center;
   color: var(--title);
-  font-size: 20px;
-  line-height: 26px;
+  font-size: 18px;
+  line-height: 24px;
   font-weight: 800;
 }
 
@@ -3702,10 +3741,10 @@ body:has(.aiProjectApp) {
   border-radius: 999px;
   background: #f8fafc;
   color: var(--body);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 18px;
-  padding: 6px 12px;
+  padding: 5px 11px;
   overflow-wrap: anywhere;
   white-space: normal;
 }
@@ -3831,7 +3870,7 @@ body:has(.aiProjectApp) {
   gap: 0;
   min-height: 0;
   overflow: hidden;
-  padding: 14px 26px 22px;
+  padding: 10px 22px 16px;
 }
 
 .rewriteBody::-webkit-scrollbar,
@@ -3842,10 +3881,10 @@ body:has(.aiProjectApp) {
 
 .formRow {
   display: grid;
-  grid-template-columns: 108px minmax(0, 1fr) auto;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
-  min-height: 54px;
+  gap: 10px;
+  min-height: 40px;
   border-bottom: 1px solid #edf1f7;
 }
 
@@ -3872,7 +3911,7 @@ body:has(.aiProjectApp) {
   width: min(520px, 100%);
   min-width: 220px;
   max-width: 520px;
-  height: 36px;
+  height: 32px;
   border: 1px solid #e3e8f3;
   border-radius: 8px;
   background: #fff;
@@ -3883,8 +3922,8 @@ body:has(.aiProjectApp) {
 
 .formValue .mailScheduleInput {
   flex: 0 1 220px;
-  width: 220px;
-  min-width: 200px;
+  width: 200px;
+  min-width: 180px;
   max-width: 100%;
   cursor: pointer;
 }
@@ -3948,7 +3987,7 @@ body:has(.aiProjectApp) {
   width: min(520px, 100%);
   min-width: 280px;
   max-width: 520px;
-  height: 36px;
+  height: 32px;
   border: 1px solid #e3e8f3;
   border-radius: 8px;
   background: #fff;
@@ -3964,7 +4003,7 @@ body:has(.aiProjectApp) {
   display: inline-flex;
   align-items: center;
   max-width: 320px;
-  height: 28px;
+  height: 26px;
   overflow: hidden;
   border-radius: 999px;
   background: var(--primary-light);
@@ -4003,8 +4042,8 @@ body:has(.aiProjectApp) {
 
 .recipientRow {
   align-items: center;
-  min-height: 62px;
-  padding: 6px 0;
+  min-height: 48px;
+  padding: 4px 0;
 }
 
 .recipientValue {
@@ -4038,7 +4077,7 @@ body:has(.aiProjectApp) {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  max-width: min(480px, 46vw);
+  max-width: min(400px, 42vw);
   overflow: hidden;
 }
 
@@ -4090,8 +4129,8 @@ body:has(.aiProjectApp) {
 }
 
 .recipientChip.inline {
-  max-width: 205px;
-  height: 30px;
+  max-width: 175px;
+  height: 28px;
   border: 1px solid var(--primary-border);
   background: var(--primary-light);
   color: var(--primary);
@@ -4197,8 +4236,8 @@ body:has(.aiProjectApp) {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 14px;
-  height: 52px;
+  gap: 12px;
+  height: 36px;
   color: var(--title);
   font-size: 13px;
   font-weight: 800;
@@ -4215,7 +4254,7 @@ body:has(.aiProjectApp) {
   flex: 1 1 auto;
   min-height: 0;
   border: 1px solid #e3e8f3;
-  border-radius: 10px;
+  border-radius: 9px;
   background: #fff;
   overflow: hidden;
 }
@@ -4226,15 +4265,15 @@ body:has(.aiProjectApp) {
   align-content: center;
   flex-wrap: wrap;
   gap: 4px;
-  min-height: 78px;
+  min-height: 52px;
   border-bottom: 1px solid #edf1f7;
   background: #f8fafc;
-  padding: 7px 8px;
+  padding: 5px 7px;
 }
 
 .richFormatSelect {
-  height: 32px;
-  min-width: 92px;
+  height: 28px;
+  min-width: 82px;
   border: 1px solid #dbe3f0;
   border-radius: 7px;
   background: #fff;
@@ -4247,7 +4286,7 @@ body:has(.aiProjectApp) {
 }
 
 .richFormatSelect.compact {
-  min-width: 70px;
+  min-width: 62px;
 }
 
 .richFormatSelect:focus {
@@ -4262,9 +4301,9 @@ body:has(.aiProjectApp) {
 
 .richTool {
   display: inline-grid;
-  flex: 0 0 30px;
-  width: 30px;
-  height: 30px;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
   place-items: center;
   border: 1px solid transparent;
   border-radius: 7px;
@@ -4300,7 +4339,7 @@ body:has(.aiProjectApp) {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  min-height: 30px;
+  min-height: 26px;
   border: 1px solid #e3e8f3;
   border-radius: 7px;
   background: #fff;
@@ -4310,8 +4349,8 @@ body:has(.aiProjectApp) {
 
 .richSwatch {
   display: inline-grid;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   place-items: center;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -4343,10 +4382,10 @@ body:has(.aiProjectApp) {
   height: 100%;
   overflow: auto;
   color: var(--body);
-  font-size: 15px;
-  line-height: 1.78;
+  font-size: 14px;
+  line-height: 1.68;
   outline: none;
-  padding: 24px 26px;
+  padding: 16px 20px;
   scrollbar-color: #8c8c8c transparent;
   scrollbar-width: thin;
 }
@@ -4356,7 +4395,7 @@ body:has(.aiProjectApp) {
 }
 
 .mailEditorContent p {
-  margin: 0 0 18px;
+  margin: 0 0 14px;
 }
 
 .mailEditorContent p:last-child {
@@ -4411,7 +4450,7 @@ body:has(.aiProjectApp) {
   gap: 12px;
   border-top: 1px solid #edf1f7;
   background: #fbfcff;
-  padding: 14px 26px;
+  padding: 12px 22px;
 }
 
 .footerActions {
@@ -4433,9 +4472,9 @@ body:has(.aiProjectApp) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 72px;
+  height: 56px;
   border-bottom: 1px solid #edf1f7;
-  padding: 0 20px;
+  padding: 0 18px;
 }
 
 .rewriteHeadTitle {
@@ -4446,8 +4485,8 @@ body:has(.aiProjectApp) {
 
 .rewriteHeadTitle span {
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   place-items: center;
   border-radius: 9px;
   background: #eef3ff;
@@ -4457,14 +4496,14 @@ body:has(.aiProjectApp) {
 .rewriteHead h3 {
   margin: 0;
   color: var(--title);
-  font-size: 18px;
-  line-height: 26px;
+  font-size: 16px;
+  line-height: 24px;
   font-weight: 800;
 }
 
 .closeButton {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
@@ -4482,21 +4521,21 @@ body:has(.aiProjectApp) {
 .rewriteBody {
   min-height: 0;
   overflow: hidden;
-  padding: 18px 20px 22px;
+  padding: 14px 18px 18px;
 }
 
 .rewriteOptions {
   display: grid;
   grid-template-columns: 1fr;
   align-items: end;
-  gap: 12px;
-  margin-bottom: 18px;
+  gap: 10px;
+  margin-bottom: 14px;
 }
 
 .selectBox {
   display: grid;
-  grid-template-rows: 18px 40px;
-  gap: 8px;
+  grid-template-rows: 18px 34px;
+  gap: 6px;
   align-self: end;
 }
 
@@ -4513,7 +4552,7 @@ body:has(.aiProjectApp) {
 }
 
 .selectBox select {
-  height: 40px;
+  height: 34px;
   min-width: 0;
   border: 1px solid #e3e8f3;
   border-radius: 8px;
@@ -4540,21 +4579,21 @@ body:has(.aiProjectApp) {
 
 .rewriteInput {
   width: 100%;
-  min-height: 210px;
+  min-height: 150px;
   resize: none;
   border: 1px solid #e3e8f3;
   border-radius: 10px;
   background: #fff;
   color: var(--body);
-  font-size: 14px;
-  line-height: 1.75;
+  font-size: 13px;
+  line-height: 1.7;
   outline: none;
-  padding: 16px;
+  padding: 14px;
 }
 
 .rewriteAction {
   width: 100%;
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 .rewriteAction,
@@ -4564,8 +4603,8 @@ body:has(.aiProjectApp) {
 }
 
 .rewriteStatus {
-  min-height: 40px;
-  margin: 14px 0 0;
+  min-height: 36px;
+  margin: 12px 0 0;
   border: 1px solid #e3e8f3;
   border-radius: 10px;
   background: #fff;
@@ -4816,23 +4855,48 @@ button.primary {
 }
 
 .productProfileMain {
-  overflow: hidden;
-  padding: 18px 28px;
+  /* 2026-05 responsive cleanup: this main shares the .appMain class
+     too (see product-profile/page.tsx mainClassName), so it inherits
+     overflow: auto + background from .appMain. We override only what
+     is actually different for the profile pages — the responsive
+     padding. Adding `background: var(--bg)` again is intentional
+     redundancy: it documents that this page expects a gray surface,
+     and it survives any future appMain change that drops background. */
+  padding: clamp(14px, 1.5vh, 24px) clamp(20px, 1.6vw, 36px);
+  background: var(--bg);
 }
 
 .productProfilePage {
+  /* 2026-05 responsive cleanup: page background carries through to
+     the bottom of the viewport even when the shell content is short
+     (e.g. customer-profile on 4K). Without this, a tall viewport with
+     shorter form content shows a hard "cut" between the white form
+     area and the unstyled main area below. min-height: 100% keeps the
+     page at least viewport-height; the body color makes any leftover
+     area visually continuous with the form section above. */
   width: 100%;
   max-width: none;
-  height: 100%;
-  min-height: 0;
+  height: auto;
+  min-height: 100%;
+  background: var(--bg);
 }
 
 .productProfileShell {
+  /* 2026-05 responsive cleanup: shell is a vertical grid that grows
+     with content. max-width caps the form line length to a comfortable
+     reading width on 4K — beyond ~1440px the eye loses the next field
+     when scanning rows. align-content: start keeps the cards top-aligned
+     so the page background fills any leftover space below (see
+     .productProfilePage which now has `background: var(--bg)`). */
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-auto-rows: auto;
   gap: 14px;
-  height: 100%;
-  min-height: 0;
+  width: 100%;
+  max-width: 1440px;
+  height: auto;
+  min-height: 100%;
+  margin: 0 auto;
+  align-content: start;
 }
 
 .productProfileHeader h1 {
@@ -4976,13 +5040,32 @@ button.primary {
 }
 
 .productFields {
+  /* 2026-05 responsive cleanup: fixed 2 columns. Unlike the workbench
+     pool grid (where column count is fluid), this is a 4-field form
+     with a designed 2x2 layout. Letting `auto-fit` decide the columns
+     would land on 3 columns at 1440px container width and break the
+     designed pairing of (link, keyword) / (notes, sources).
+     - Single column below 720px container width via media query.
+     - Each textarea has min-height: 120px so the rows have a
+       sensible vertical proportion on wide containers. */
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.85fr);
-  grid-auto-rows: minmax(96px, auto);
-  gap: 16px 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: auto;
+  align-items: start;
+  gap: 16px 24px;
   min-width: 0;
   min-height: 0;
   padding-left: 0;
+}
+
+.productFields textarea {
+  /* 2026-05 responsive cleanup: textarea height follows the natural
+     `rows` attribute set by each field. We only enforce a tiny safety
+     floor (~3 lines) so users can't drag the resize handle to a
+     useless height. The previous 120px floor over-corrected and
+     pushed the form card past the viewport on 1080p. */
+  min-height: 60px;
+  resize: vertical;
 }
 
 .productField {
@@ -5274,19 +5357,96 @@ button.primary {
 }
 
 .customerProfileShell .productFields {
-  grid-auto-rows: minmax(96px, auto);
+  grid-auto-rows: auto;
 }
 
 .customerProfileShell {
   align-content: start;
-  grid-template-rows: auto auto auto auto auto;
+  grid-auto-rows: auto;
   height: auto;
   min-height: 100%;
 }
 
+@media (min-width: 2200px) and (min-height: 1200px) {
+  /* 2026-05 responsive cleanup: large-viewport polish kept ONLY for
+     padding. shell max-width stays at 1440 — going wider hurts form
+     readability on 4K. */
+  .productProfileShell {
+    gap: 18px;
+  }
+
+  .productGuide {
+    padding: 20px 26px 18px;
+  }
+
+  .productFormCard {
+    padding: 22px 26px;
+  }
+
+  .productUnderstanding {
+    min-height: 136px;
+    padding: 18px 26px 20px;
+  }
+}
+
+@media (max-width: 1440px), (max-height: 860px) {
+  .productProfileMain {
+    padding: 14px 20px;
+  }
+
+  .productProfileShell {
+    gap: 12px;
+  }
+
+  .productGuide {
+    padding: 14px 18px 12px;
+  }
+
+  .productGuideGrid {
+    gap: 10px;
+    margin-top: 12px;
+  }
+
+  .productGuideGrid article {
+    min-height: 58px;
+    padding: 10px 12px;
+  }
+
+  .productFormCard {
+    padding: 16px 18px;
+  }
+
+  .productFields {
+    gap: 12px;
+  }
+
+  .productUnderstanding {
+    padding: 12px 18px 14px;
+  }
+}
+
+@media (max-width: 900px) {
+  /* 2026-05 responsive cleanup: kept for the guide grid only.
+     productFields also collapses to single column at this breakpoint
+     because below ~900px container width each textarea would be
+     squashed below 320px which makes URL/keyword input painful. */
+  .productGuideGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .productFields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .customerShortField textarea {
+  /* 2026-05 responsive cleanup: this is a single-line auto-resize
+     textarea (target market) — explicitly opt out of the .productFields
+     min-height: 120px default. */
   height: 42px;
+  min-height: 42px;
   overflow: hidden;
+  resize: none;
 }
 
 .targetMarketField {
@@ -11564,21 +11724,21 @@ button.primary {
   }
 
   .mailModalProto {
-    grid-template-columns: minmax(620px, 1fr) 300px;
+    grid-template-columns: minmax(0, 1fr) 280px;
   }
 }
 
 @media (max-height: 820px) {
   .modalBackdrop {
-    padding-top: 32px;
+    padding: 18px;
   }
 
   .mailModalProto {
-    height: calc(100vh - 64px);
+    height: min(660px, calc(100vh - 36px));
   }
 
   .rewriteInput {
-    min-height: 220px;
+    min-height: 132px;
   }
 }
 
@@ -12256,19 +12416,25 @@ button.primary {
   --pool-green-bg: linear-gradient(135deg, #e8fff0 0%, #ffffff 60%);
   --pool-orange-bg: linear-gradient(135deg, #fff7e8 0%, #ffffff 60%);
 
-  /* 2026-05 LeadHunt 2.0: page skeleton uses CSS Grid so the last
-     row (pool library) absorbs whatever vertical space is left after
-     the greeting / search-card stack. No height: calc() chains. */
+  /* 2026-05 responsive cleanup: top-level skeleton uses CSS Grid with
+     a final 1fr row so the pool library always absorbs whatever vertical
+     space is left after the greeting / search-card stack. Previously
+     the third row was `auto`, which left up to 600+px of dead space on
+     4K (no row was claiming the leftover height). 1fr is the canonical
+     "this row gets the rest" pattern in grid; flex `flex: 1 + min-height: 0`
+     would express the same idea, but grid lets us keep the implicit
+     gap. */
   display: grid;
   grid-template-rows:
-    auto /* 问候 + tracking pill */
-    auto /* 主搜索 + 快捷指令 */
-    1fr; /* 客户池库 — 吃掉剩余空间 */
+    auto /* greeting + tracking pill */
+    auto /* main search + quick prompts */
+    minmax(0, 1fr); /* pool library — absorbs remaining height */
+  align-content: stretch;
   gap: 14px;
   padding: 24px 32px 28px;
   background: var(--bg);
   height: 100%;
-  min-height: 0;
+  min-height: 100%;
   overflow: auto;
 }
 
@@ -12495,11 +12661,22 @@ button.primary {
 
 /* ----- Pool cards ----- */
 .aiWorkbenchPools {
-  /* 2026-05 LeadHunt 2.0: lives in the 1fr row of the workbench grid.
-     The section container takes the remaining vertical space, but
-     content stays top-aligned so the cards keep a natural height
-     instead of being stretched to ~280px. margin-top adds a touch of
-     air between the search card and the section heading. */
+  /* 2026-05 responsive cleanup: this card lives in the 1fr row of the
+     workbench grid (see .aiWorkbench above). It is a vertical flex so
+     three things stack predictably: the section header (auto), the
+     pool grid (1fr — absorbs the rest), and the pager (auto, sticks
+     to the bottom via margin-top: auto on .aiWorkbenchPoolPager).
+
+     min-height: 0 is required so the inner flex children can shrink
+     below their content size when there is not enough room — without
+     it the card would spill below the viewport even though the parent
+     row says "you only get the leftover height".
+
+     overflow: visible (not hidden) so per-card popup menus
+     (.aiWorkbenchPoolMenu) drop down past the card border without
+     being clipped — the inner .aiWorkbenchPoolGrid owns its own
+     scrollbar via overflow: auto, so we don't need this container to
+     clip anything. */
   min-height: 0;
   margin-top: 4px;
   display: flex;
@@ -12628,11 +12805,28 @@ button.primary {
 }
 
 .aiWorkbenchPoolGrid {
-  /* No flex:1 / no height:100% — the card grid sizes to content and
-     parks at the top of .aiWorkbenchPools. align-content: start keeps
-     a single row of cards from spreading vertically. */
+  /* 2026-05 responsive cleanup: column count is owned entirely by the
+     container width via `auto-fill minmax(...)`. We do NOT need media
+     queries to switch column count, and we do NOT need JS to compute a
+     limit per viewport — the same 30 rows render correctly from 1280px
+     up to 5120px. flex `flex-wrap` was considered but rejected because
+     the last row would be stretched by `flex: 1`; grid leaves a
+     natural gap on the last row.
+
+     - 360px is the minimum readable card width (icon + title + 3-line
+       meta + actions). Below that we fall back to a single column.
+     - align-content: start prevents the grid from vertically spreading
+       its rows when the row count is small (e.g. 6 cards / 2 rows on
+       1080p). Without it, rows would smear across the parent flex's
+       1fr space.
+     - flex: 1 + min-height: 0 makes the grid take the remaining
+       vertical space inside .aiWorkbenchPools, leaving room for the
+       pager strip which uses margin-top: auto to stick to the bottom. */
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 12px;
   align-content: start;
 }
@@ -13009,6 +13203,37 @@ button.primary {
   padding: 0 4px;
 }
 
+@media (min-width: 1800px) {
+  /* 2026-05 responsive cleanup: large-viewport polish kept ONLY for
+     visual breathing room (gap + padding). Card height is owned by
+     the card's own grid (icon row + body), not by min-height — so we
+     no longer enforce a min-height that would push the pool grid
+     past 1fr's available space on tall 4K viewports. */
+  .aiWorkbench {
+    gap: 16px;
+    padding: 28px 36px 32px;
+  }
+
+  .aiWorkbenchPools {
+    padding: 14px;
+  }
+
+  .aiWorkbenchPoolGrid {
+    gap: 14px;
+  }
+}
+
+@media (min-width: 2400px) {
+  .aiWorkbench {
+    gap: 18px;
+    padding: 32px 44px 38px;
+  }
+
+  .aiWorkbenchPoolGrid {
+    gap: 16px;
+  }
+}
+
 /* 2026-05 LeadHunt 2.0: no narrow-viewport breakpoint for the
    workbench. Below 1280px the leadApp shell already enforces a
    1232px min-width and turns on horizontal scroll, so search and pool
@@ -13365,10 +13590,12 @@ button.primary {
 /* ----- Filter bar ----- */
 .aiPoolFilters {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 6px;
+  position: relative;
+  min-width: 0;
+  padding: 8px 10px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -13379,9 +13606,11 @@ button.primary {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  flex: 1;
-  min-width: 220px;
-  padding: 6px 12px;
+  flex: 1 1 300px;
+  min-width: 150px;
+  max-width: 340px;
+  height: 34px;
+  padding: 0 10px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -13398,6 +13627,7 @@ button.primary {
 
 .aiPoolSearchInput input {
   flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
   color: var(--title);
@@ -13410,38 +13640,176 @@ button.primary {
 }
 
 .aiPoolFilterDropdown {
-  display: inline-flex;
+  position: relative;
+  flex: 0 1 152px;
+  min-width: 78px;
+}
+
+.aiPoolFilterDropdown[data-filter-key="country"],
+.aiPoolFilterDropdown[data-filter-key="customerType"],
+.aiPoolFilterDropdown[data-filter-key="contact"] {
+  flex-basis: 158px;
+}
+
+.aiPoolFilterDropdown[data-filter-key="score"] {
+  flex-basis: 150px;
+}
+
+.aiPoolFilterDropdown[data-filter-key="crm"],
+.aiPoolFilterDropdown[data-filter-key="mail"] {
+  flex-basis: 142px;
+}
+
+.aiPoolFilterTrigger {
+  position: relative;
+  display: flex;
   align-items: center;
   gap: 4px;
-  padding: 6px 12px;
-  background: var(--card);
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  padding: 0 28px 0 10px;
+  overflow: hidden;
+  background: var(--bg);
   color: var(--body);
   border: 1px solid var(--border);
   border-radius: 8px;
+  font-family: inherit;
   font-size: 13px;
   cursor: pointer;
   transition:
     border-color 0.15s,
-    color 0.15s;
+    color 0.15s,
+    background 0.15s,
+    box-shadow 0.15s;
 }
 
-.aiPoolFilterDropdown:hover {
+.aiPoolFilterTrigger:hover,
+.aiPoolFilterTrigger:focus {
+  outline: none;
   border-color: var(--primary-border);
+  color: var(--primary);
+}
+
+.aiPoolFilterDropdown[data-active="true"] .aiPoolFilterTrigger,
+.aiPoolFilterDropdown[data-open="true"] .aiPoolFilterTrigger {
+  background: var(--primary-light);
+  border-color: var(--primary-border);
+}
+
+.aiPoolFilterLabel {
+  color: var(--secondary);
+  flex: 0 0 auto;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.aiPoolFilterDropdown[data-active="true"] .aiPoolFilterLabel {
+  color: var(--primary);
+}
+
+.aiPoolFilterValue {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--title);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aiPoolFilterDropdown svg {
+  position: absolute;
+  right: 9px;
+  color: var(--secondary);
+  pointer-events: none;
+}
+
+.aiPoolFilterMenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  width: max(100%, 210px);
+  max-height: 260px;
+  overflow: auto;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid #dbe5f2;
+  border-radius: 10px;
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.16);
+}
+
+.aiPoolFilterDropdown[data-filter-key="mail"] .aiPoolFilterMenu {
+  right: 0;
+  left: auto;
+}
+
+.aiPoolFilterOption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 9px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--body);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+}
+
+.aiPoolFilterOption span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aiPoolFilterOption:hover {
+  background: #f4f7fb;
+  color: var(--primary);
+}
+
+.aiPoolFilterOption[aria-selected="true"] {
+  background: var(--primary-light);
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.aiPoolFilterOption[aria-selected="true"] svg {
+  position: static;
+  flex: 0 0 auto;
   color: var(--primary);
 }
 
 .aiPoolFilterClear {
   margin-left: auto;
-  padding: 6px 10px;
+  flex: 0 0 auto;
+  padding: 6px 8px;
   background: transparent;
   border: none;
   color: var(--secondary);
   font-size: 13px;
+  white-space: nowrap;
   cursor: pointer;
 }
 
 .aiPoolFilterClear:hover {
   color: var(--primary);
+}
+
+.aiPoolFilterClear:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.aiPoolFilterClear:disabled:hover {
+  color: var(--secondary);
 }
 
 /* ----- Selected chips ----- */
@@ -13458,12 +13826,18 @@ button.primary {
   padding: 4px 10px;
   background: var(--primary-light);
   color: var(--primary);
+  border: none;
   border-radius: 12px;
+  font-family: inherit;
   font-size: 12px;
+  cursor: default;
+}
+
+.aiPoolSelectedChip.is-removable {
   cursor: pointer;
 }
 
-.aiPoolSelectedChip:hover {
+.aiPoolSelectedChip.is-removable:hover {
   background: var(--primary-border);
 }
 
@@ -14036,18 +14410,22 @@ button.primary {
    skeleton so the candidate table absorbs remaining vertical space
    while the bottom action bar stays anchored at the page bottom.
    Layout: header / run-batch / table-1fr / bottom-bar. */
+/* 2026-05 responsive cleanup: search-in-progress page uses a strict
+   grid skeleton with the table row claiming the leftover height.
+   Layout: header (auto) / run-batch (auto) / table (1fr) / bottom-bar (auto).
+   - `minmax(0, 1fr)` on the table row is the canonical way to let a
+     scrollable child shrink below its content height; `1fr` alone
+     would default to `min-content` and overflow on short viewports.
+   - overflow: hidden on the page itself prevents double scrollbars;
+     the inner `.aiPoolTableScroll` is the only scroll surface. */
 .aiPool.aiSearchRunPool {
   display: grid;
-  grid-template-rows:
-    auto /* header */
-    auto /* run-batch card */
-    minmax(0, 1fr)
-    /* candidate table — fills remaining space; min:0
-                      so very short laptops can shrink it without
-                      pushing the bottom bar off-screen. */
-    auto; /* bottom action bar (CRM / mail / followup / health) */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  align-content: stretch;
   gap: 12px;
   padding: 16px 28px 18px;
+  height: 100%;
+  overflow: hidden;
 }
 
 /* Compact header for the search-in-progress view: the back button row
@@ -14094,6 +14472,99 @@ button.primary {
 .aiSearchRunPool .aiPoolMeta {
   font-size: 12px;
   margin-top: 0;
+}
+
+.aiSearchLeaveBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.34);
+  backdrop-filter: blur(2px);
+}
+
+.aiSearchLeaveDialog {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 14px 16px;
+  width: min(520px, calc(100vw - 48px));
+  padding: 22px;
+  background: #fff;
+  border: 1px solid #dbe5f2;
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.22);
+}
+
+.aiSearchLeaveIcon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.aiSearchLeaveBody {
+  min-width: 0;
+}
+
+.aiSearchLeaveBody h2 {
+  margin: 0 0 8px;
+  color: var(--title);
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 800;
+}
+
+.aiSearchLeaveBody p {
+  margin: 0;
+  color: var(--body);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.aiSearchLeaveActions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.aiSearchLeaveSecondary,
+.aiSearchLeavePrimary {
+  min-height: 36px;
+  padding: 8px 15px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.aiSearchLeaveSecondary {
+  background: #fff;
+  color: var(--body);
+  border: 1px solid var(--border);
+}
+
+.aiSearchLeaveSecondary:hover {
+  border-color: var(--primary-border);
+  color: var(--primary);
+}
+
+.aiSearchLeavePrimary {
+  background: var(--primary);
+  color: #fff;
+  border: 1px solid var(--primary);
+}
+
+.aiSearchLeavePrimary:hover {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
 }
 
 /* ----- Run batch card ----- */
@@ -14637,11 +15108,14 @@ button.primary {
 
 /* ----- Lead table tweaks for the search-in-progress version ----- */
 .aiSearchRunTableWrap {
-  /* Inside the page-level grid, this row claims 1fr and only the
-     internal table body scrolls. min-height: 0 + overflow: hidden
-     are required so the wrapper doesn't push the bottom bar off
-     the screen. The .aiPoolTableScroll inside owns the scroll. */
+  /* 2026-05 responsive cleanup: the wrapper claims the parent grid's
+     1fr row and lets the inner `.aiPoolTableScroll` own the scroll.
+     No more `clamp(...)` on height — the previous hard-cap of 560/640px
+     left ~1500px of dead space on 4K above the conversion cards.
+     min-height: 0 is required so the grid 1fr can shrink the wrapper
+     below its content height when the viewport is short. */
   min-height: 0;
+  height: 100%;
   overflow: hidden;
   flex: initial;
 }
@@ -14837,18 +15311,30 @@ button.primary {
 }
 
 .aiSearchRunBottomCards {
+  /* 2026-05 responsive cleanup: three cards always sit in one row,
+     splitting the bar width equally. Fixed 3 columns is the correct
+     primitive — `auto-fit minmax(...)` would wrap on narrow viewports
+     and break the designed 3-card strip into 2+1.
+
+     `minmax(0, 1fr)` (not just `1fr`) lets cards shrink below their
+     content width on tight viewports without forcing horizontal
+     overflow. Width is bounded by the parent .aiSearchRunBottomBar
+     which inherits the page padding; on 4K the cards each end up
+     ~1100px wide which matches the design ref (no extra cap needed
+     since the page already centers content within .aiSearchRunPool). */
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 14px;
   align-items: stretch;
 }
 
 .aiSearchRunBottomCard {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr);
   align-items: start;
-  gap: 12px;
-  padding: 14px 18px;
+  gap: 14px;
+  min-height: 112px;
+  padding: 18px 20px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -14871,8 +15357,8 @@ button.primary {
 }
 
 .aiSearchRunBottomCard .aiPoolIcon {
-  width: 44px;
-  height: 44px;
+  width: 50px;
+  height: 50px;
   border-radius: 12px;
 }
 
@@ -14907,7 +15393,8 @@ button.primary {
 .aiSearchRunBottomCta {
   align-self: flex-start;
   margin-top: 4px;
-  padding: 6px 14px;
+  min-height: 30px;
+  padding: 7px 16px;
   background: var(--primary);
   color: #fff;
   border: none;
@@ -14947,6 +15434,26 @@ button.primary {
   cursor: not-allowed;
 }
 
+@media (min-width: 2200px) {
+  /* 2026-05 responsive cleanup: large-viewport polish kept ONLY for
+     spacing — the table height and card sizing are now driven by the
+     parent grid (1fr) and `auto-fit minmax(320, 480)`, so there is
+     nothing per-breakpoint to override on dimensions. */
+  .aiSearchRunBottomBar {
+    gap: 10px;
+  }
+
+  .aiSearchRunBottomCard {
+    grid-template-columns: 56px minmax(0, 1fr);
+    padding: 20px 22px;
+  }
+
+  .aiSearchRunBottomCard .aiPoolIcon {
+    width: 54px;
+    height: 54px;
+  }
+}
+
 /* aiPool status pill helper for the table */
 .aiPoolStatusPill {
   display: inline-block;
@@ -14967,12 +15474,36 @@ button.primary {
 }
 
 /* ----- Short-viewport rescue for the search-in-progress page -----
-   The default layout is tuned to 1440×900 which gives ~826px of
-   internal height. On laptops at ≤768/720 we collapse the right-hand
-   realtime log into the progress card so the candidate table stays
-   visible. The bottom action bar is now compact (~60px) and always
-   visible — no need to hide it. */
-@media (max-height: 820px) {
+   2026-05 responsive cleanup: with the table now claiming 1fr, the
+   short-viewport path no longer needs a height override on the table
+   wrapper — the grid will give it whatever's left after the auto rows.
+   We still collapse the realtime log into the progress card so the
+   table keeps a usable minimum height on 13" laptops. */
+@media (max-height: 900px) {
+  .aiSearchRunBottomCards {
+    gap: 10px;
+  }
+
+  .aiSearchRunBottomCard {
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 10px;
+    padding: 12px 14px;
+  }
+
+  .aiSearchRunBottomCard .aiPoolIcon {
+    width: 42px;
+    height: 42px;
+  }
+
+  .aiSearchRunBottomMeta {
+    line-height: 1.4;
+  }
+
+  .aiSearchRunBottomCta {
+    min-height: 28px;
+    padding: 5px 12px;
+  }
+
   .aiSearchRunPool .aiSearchRunBody {
     grid-template-columns: minmax(0, 1fr);
   }

@@ -57,7 +57,15 @@ const fallbackMailLead: MailConfirmationLead = {
 
 const leadPageSize = 10;
 const crmPageSize = 5;
-const workbenchPoolPageSize = 6;
+// 2026-05 responsive cleanup: pool library page size is a pure data
+// concern, not a layout concern. Layout density (column count, card
+// width) is owned by CSS grid `auto-fill minmax(...)` so the same 30
+// rows look right on 13" laptops and 4K monitors. We previously had a
+// JS-driven `resolveWorkbenchPoolPageSize(width, height)` that returned
+// 6/9/15/18 by viewport — that coupled business state to viewport size
+// and broke on ultrawide / HiDPI / window-drag. Reverted to a fixed 30
+// per page so users see the same data set across devices.
+const workbenchPoolPageSize = 30;
 const taskPollIntervalMs = 2500;
 const maxTaskPollAttempts = 720;
 
@@ -381,6 +389,9 @@ export function AiWorkerClient() {
   const [taskHistorySearch, setTaskHistorySearch] = useState("");
   const [taskHistoryStatus, setTaskHistoryStatus] = useState<WorkbenchPoolStatusFilter>("all");
   const [taskHistoryTotal, setTaskHistoryTotal] = useState(0);
+  // 2026-05 responsive cleanup: page size is now a fixed business
+  // constant (see workbenchPoolPageSize at the top of the file). The
+  // previous viewport-driven dynamic value is gone; CSS handles density.
   // 2026-05 Stage 3 follow-up: workbench KPI summary covers the full
   // user history so new tasks pushing old ones out of the limit=30
   // listing window can't make the counters appear to drop.
@@ -435,7 +446,9 @@ export function AiWorkerClient() {
   const crmPageRows = crmModalRows.slice((crmPage - 1) * crmPageSize, crmPage * crmPageSize);
   const crmModalPendingCount = crmPendingRows.length;
   const crmModalSyncedCount = crmAlreadySyncedRows.length;
-  const crmModalSyncedDisplayCount = crmModalPendingCount ? crmModalSyncedCount : crmModalRows.length;
+  const crmModalSyncedDisplayCount = crmModalPendingCount
+    ? crmModalSyncedCount
+    : crmModalRows.length;
   const crmModalCountryCount = countDistinct(crmModalRows.map((row) => row.country));
   const crmModalIsPending = crmModalPendingCount > 0;
   const selectedActionableLead =
@@ -1124,7 +1137,11 @@ export function AiWorkerClient() {
               aria-labelledby="crm-data-title"
             >
               <header className="crmDataHeader">
-                <div className={crmModalIsPending ? "crmDataHeroIcon pending" : "crmDataHeroIcon synced"}>
+                <div
+                  className={
+                    crmModalIsPending ? "crmDataHeroIcon pending" : "crmDataHeroIcon synced"
+                  }
+                >
                   <Database size={42} aria-hidden="true" />
                   <span className="crmDataHeroBadge" aria-hidden="true">
                     <CheckCircle2 size={22} />
@@ -1293,7 +1310,9 @@ export function AiWorkerClient() {
                     disabled={approving || (!crmModalPendingCount && !crmModalRows.length)}
                     onClick={() => void confirmCrmSync()}
                   >
-                    {crmModalIsPending ? `确认同步 ${crmModalPendingCount} 家` : "查看 CRM 客户列表"}
+                    {crmModalIsPending
+                      ? `确认同步 ${crmModalPendingCount} 家`
+                      : "查看 CRM 客户列表"}
                   </button>
                 </div>
               </footer>
@@ -1361,7 +1380,6 @@ export function AiWorkerClient() {
           onClose={() => setMailOpen(false)}
           onSent={handleMailSent}
         />
-
       </main>
     </AppShell>
   );
@@ -2304,9 +2322,24 @@ type PoolKpi = {
   tone: "blue" | "orange" | "teal" | "indigo" | "purple" | "rose" | "green";
 };
 
-type PoolFilterDropdown = {
+type PoolFilterKey = "country" | "customerType" | "score" | "contact" | "crm" | "mail";
+
+type PoolFilters = Record<PoolFilterKey, string>;
+
+type PoolFilterOption = {
   label: string;
-  icon?: typeof Filter;
+  value: string;
+};
+
+type PoolFilterSelect = {
+  key: PoolFilterKey;
+  label: string;
+  options: PoolFilterOption[];
+};
+
+type PoolLeadRow = {
+  lead: DisplayLead;
+  row: PoolTableRow;
 };
 
 type PoolTableRow = {
@@ -2332,6 +2365,44 @@ type PoolTableRow = {
   mailStatus: "未触达" | "待发送" | "已发送" | "已回复";
   lastAction: string;
 };
+
+const emptyPoolFilters: PoolFilters = {
+  country: "",
+  customerType: "",
+  score: "",
+  contact: "",
+  crm: "",
+  mail: ""
+};
+
+const poolScoreFilterOptions: PoolFilterOption[] = [
+  { value: "", label: "全部" },
+  { value: "high", label: "75+ 高匹配" },
+  { value: "medium", label: "60-74 中匹配" },
+  { value: "low", label: "50-59 待复核" },
+  { value: "below50", label: "50 以下" }
+];
+
+const poolContactFilterOptions: PoolFilterOption[] = [
+  { value: "", label: "全部" },
+  { value: "email", label: "有邮箱" },
+  { value: "phone", label: "有电话" },
+  { value: "emailOrPhone", label: "有邮箱或电话" },
+  { value: "emailAndPhone", label: "邮箱+电话" },
+  { value: "none", label: "无联系方式" }
+];
+
+const poolCrmStatusFilterOptions: PoolFilterOption[] = [
+  { value: "", label: "全部" },
+  { value: "joined", label: "已加入" },
+  { value: "notJoined", label: "未加入" }
+];
+
+const poolMailStatusFilterOptions: PoolFilterOption[] = [
+  { value: "", label: "全部" },
+  { value: "reached", label: "已触达" },
+  { value: "unreached", label: "未触达" }
+];
 
 function AiWorkerPool({
   task,
@@ -2469,18 +2540,6 @@ function AiWorkerPool({
     }
   ];
 
-  // Filter dropdowns shown above the table.
-  const filterDropdowns: PoolFilterDropdown[] = [
-    { label: "国家/地区" },
-    { label: "客户类型" },
-    { label: "推荐指数" },
-    { label: "联系方式" },
-    { label: "CRM 状态" },
-    { label: "邮件状态" },
-    { label: "来源批次" },
-    { label: "更新时间" }
-  ];
-
   // 2026-05 Stage 2: header chips reflect the real target markets
   // for this task only. No fallback to UAE/Saudi/Qatar — that used to
   // read like a hardcoded sample whenever currentTask hadn't loaded.
@@ -2490,46 +2549,104 @@ function AiWorkerPool({
   // data source is currentTask.leadCandidates via the leads prop.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchInput, setSearchInput] = useState("");
+  const [poolFilters, setPoolFilters] = useState<PoolFilters>(() => ({ ...emptyPoolFilters }));
+  const [openPoolFilterKey, setOpenPoolFilterKey] = useState<PoolFilterKey | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const poolFiltersRef = useRef<HTMLElement>(null);
 
-  // Filter leads by the search input (company, country, website,
-  // email, phone). Empty input means show everything.
-  const filteredLeads = useMemo(() => {
+  const poolLeadRows: PoolLeadRow[] = useMemo(
+    () => leads.map((lead) => ({ lead, row: buildPoolTableRow(lead) })),
+    [leads]
+  );
+
+  const countryFilterOptions = useMemo(
+    () =>
+      createPoolFilterOptions(
+        poolLeadRows.map(({ row }) => row.country),
+        "全部"
+      ),
+    [poolLeadRows]
+  );
+  const customerTypeFilterOptions = useMemo(
+    () =>
+      createPoolFilterOptions(
+        poolLeadRows.map(({ row }) => row.industry),
+        "全部"
+      ),
+    [poolLeadRows]
+  );
+  const filterSelects: PoolFilterSelect[] = useMemo(
+    () => [
+      { key: "country", label: "国家/地区", options: countryFilterOptions },
+      { key: "customerType", label: "客户类型", options: customerTypeFilterOptions },
+      { key: "score", label: "推荐指数", options: poolScoreFilterOptions },
+      { key: "contact", label: "联系方式", options: poolContactFilterOptions },
+      { key: "crm", label: "CRM 状态", options: poolCrmStatusFilterOptions },
+      { key: "mail", label: "邮件状态", options: poolMailStatusFilterOptions }
+    ],
+    [countryFilterOptions, customerTypeFilterOptions]
+  );
+  const hasActivePoolFilters = hasAnyPoolFilter(poolFilters);
+  const activePoolFilterChips = useMemo(
+    () =>
+      filterSelects.flatMap((select) => {
+        const value = poolFilters[select.key];
+        if (!value) return [];
+        const option = select.options.find((item) => item.value === value);
+        return [
+          {
+            key: select.key,
+            label: select.label,
+            valueLabel: option?.label ?? value
+          }
+        ];
+      }),
+    [filterSelects, poolFilters]
+  );
+
+  // Filter leads by text search plus the structured select filters above.
+  // Empty search / filters mean show everything.
+  const filteredLeadRows = useMemo(() => {
     const needle = searchInput.trim().toLowerCase();
-    if (!needle) return leads;
-    return leads.filter((lead) => {
+    return poolLeadRows.filter((item) => {
+      const { lead, row } = item;
+      if (!matchesPoolLeadFilters(item, poolFilters)) return false;
+      if (!needle) return true;
       const haystack = [
         lead.companyName,
         lead.country,
         lead.website,
         lead.email,
         lead.phone,
-        lead.tag
+        lead.tag,
+        row.industry,
+        row.crmStatusLabel,
+        row.mailStatus,
+        row.lastAction,
+        row.sourceBatch
       ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
       return haystack.includes(needle);
     });
-  }, [leads, searchInput]);
+  }, [poolLeadRows, poolFilters, searchInput]);
 
-  const filteredCount = filteredLeads.length;
+  const filteredCount = filteredLeadRows.length;
   const totalPages = Math.max(1, Math.ceil(filteredCount / pageSize));
   const safePage = Math.min(pageNumber, totalPages);
   const pageStart = (safePage - 1) * pageSize;
   const pageEnd = Math.min(pageStart + pageSize, filteredCount);
-  const pagedLeads = useMemo(
-    () => filteredLeads.slice(pageStart, pageEnd),
-    [filteredLeads, pageStart, pageEnd]
+  const pagedLeadRows = useMemo(
+    () => filteredLeadRows.slice(pageStart, pageEnd),
+    [filteredLeadRows, pageStart, pageEnd]
   );
+  const pagedLeads = useMemo(() => pagedLeadRows.map(({ lead }) => lead), [pagedLeadRows]);
 
   // Build table rows from the paged candidates. No demo fallback —
   // empty state shows a single row with a placeholder message.
-  const rows: PoolTableRow[] = useMemo(
-    () => pagedLeads.map((lead) => buildPoolTableRow(lead)),
-    [pagedLeads]
-  );
+  const rows: PoolTableRow[] = useMemo(() => pagedLeadRows.map(({ row }) => row), [pagedLeadRows]);
 
   const allChecked = rows.length > 0 && rows.every((row) => selectedIds.has(row.id));
 
@@ -2574,6 +2691,29 @@ function AiWorkerPool({
       setPageNumber(totalPages);
     }
   }, [pageNumber, totalPages]);
+
+  useEffect(() => {
+    if (!openPoolFilterKey) return;
+
+    function handlePointerDown(event: MouseEvent) {
+      if (!poolFiltersRef.current?.contains(event.target as Node)) {
+        setOpenPoolFilterKey(null);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpenPoolFilterKey(null);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openPoolFilterKey]);
 
   function toggleAll() {
     if (allChecked) {
@@ -2686,7 +2826,7 @@ function AiWorkerPool({
       </section>
 
       {/* Filter bar */}
-      <section className="aiPoolFilters" aria-label="筛选条件">
+      <section className="aiPoolFilters" aria-label="筛选条件" ref={poolFiltersRef}>
         <label className="aiPoolSearchInput">
           <Search size={14} aria-hidden="true" />
           <input
@@ -2702,20 +2842,77 @@ function AiWorkerPool({
             placeholder="搜索公司、官网、邮箱、国家"
           />
         </label>
-        {filterDropdowns.map((dropdown) => (
-          <button key={dropdown.label} type="button" className="aiPoolFilterDropdown">
-            {dropdown.label}
-            <ChevronDown size={14} aria-hidden="true" />
-          </button>
-        ))}
+        {filterSelects.map((dropdown) => {
+          const selectedValue = poolFilters[dropdown.key];
+          const selectedOption =
+            dropdown.options.find((option) => option.value === selectedValue) ??
+            dropdown.options[0];
+          const isOpen = openPoolFilterKey === dropdown.key;
+
+          return (
+            <div
+              key={dropdown.key}
+              className="aiPoolFilterDropdown"
+              data-active={poolFilters[dropdown.key] ? "true" : undefined}
+              data-filter-key={dropdown.key}
+              data-open={isOpen ? "true" : undefined}
+            >
+              <button
+                type="button"
+                className="aiPoolFilterTrigger"
+                aria-label={dropdown.label}
+                aria-expanded={isOpen}
+                aria-haspopup="listbox"
+                onClick={() => {
+                  setOpenPoolFilterKey((current) =>
+                    current === dropdown.key ? null : dropdown.key
+                  );
+                }}
+              >
+                <span className="aiPoolFilterLabel">{dropdown.label}</span>
+                <span className="aiPoolFilterValue">{selectedOption?.label ?? "全部"}</span>
+                <ChevronDown size={14} aria-hidden="true" />
+              </button>
+              {isOpen ? (
+                <div className="aiPoolFilterMenu" role="listbox" aria-label={dropdown.label}>
+                  {dropdown.options.map((option) => {
+                    const selected = option.value === selectedValue;
+                    return (
+                      <button
+                        key={option.value || "all"}
+                        type="button"
+                        className="aiPoolFilterOption"
+                        role="option"
+                        aria-selected={selected}
+                        onClick={() => {
+                          setPoolFilters((current) =>
+                            current[dropdown.key] === option.value
+                              ? current
+                              : { ...current, [dropdown.key]: option.value }
+                          );
+                          setOpenPoolFilterKey(null);
+                          setPageNumber(1);
+                        }}
+                      >
+                        <span>{option.label}</span>
+                        {selected ? <CheckCircle2 size={14} aria-hidden="true" /> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
         <button
           type="button"
           className="aiPoolFilterClear"
           onClick={() => {
             setSearchInput("");
+            setPoolFilters({ ...emptyPoolFilters });
             setPageNumber(1);
           }}
-          disabled={!searchInput}
+          disabled={!searchInput && !hasActivePoolFilters}
         >
           清空筛选
         </button>
@@ -2726,8 +2923,28 @@ function AiWorkerPool({
           real review-tail count and the batch query count, so users
           know where the difference between the API total and the
           main table comes from. */}
-      {reviewTailCount > 0 || queryCount > 0 || hiddenEvidenceCount > 0 ? (
+      {activePoolFilterChips.length > 0 ||
+      reviewTailCount > 0 ||
+      queryCount > 0 ||
+      hiddenEvidenceCount > 0 ? (
         <div className="aiPoolSelectedChips">
+          {activePoolFilterChips.map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              className="aiPoolSelectedChip is-removable"
+              title={`移除 ${chip.label} 筛选`}
+              onClick={() => {
+                setPoolFilters((current) => ({ ...current, [chip.key]: "" }));
+                setPageNumber(1);
+              }}
+            >
+              <span>
+                {chip.label}：{chip.valueLabel}
+              </span>
+              <X size={12} aria-hidden="true" />
+            </button>
+          ))}
           {queryCount > 0 ? (
             <span className="aiPoolSelectedChip" data-tone="info">
               本批 {queryCount} 条 query
@@ -2954,9 +3171,7 @@ function AiWorkerPool({
                             }
                           }}
                         >
-                          {row.crmStatus === "synced"
-                            ? "已加入"
-                            : "加入 CRM"}
+                          {row.crmStatus === "synced" ? "已加入" : "加入 CRM"}
                         </button>
                       </td>
                     </tr>
@@ -2964,8 +3179,8 @@ function AiWorkerPool({
                 ) : (
                   <tr>
                     <td className="leadEmptyCell" colSpan={12}>
-                      {searchInput
-                        ? "没有匹配当前搜索条件的候选客户。"
+                      {searchInput || hasActivePoolFilters
+                        ? "没有匹配当前筛选条件的候选客户。"
                         : "暂无候选客户。回到搜索页继续搜索 30 条来扩充客户池。"}
                     </td>
                   </tr>
@@ -3144,6 +3359,73 @@ function buildPoolTableRow(lead: DisplayLead): PoolTableRow {
   };
 }
 
+function hasAnyPoolFilter(filters: PoolFilters): boolean {
+  return Object.values(filters).some(Boolean);
+}
+
+function createPoolFilterOptions(values: string[], allLabel: string): PoolFilterOption[] {
+  const seen = new Set<string>();
+  const options: PoolFilterOption[] = [{ value: "", label: allLabel }];
+
+  values.forEach((rawValue) => {
+    const value = normalizePoolFilterValue(rawValue);
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    options.push({ value, label: displayPoolFilterValue(value) });
+  });
+
+  return options;
+}
+
+function normalizePoolFilterValue(value: string): string {
+  return String(value ?? "").trim();
+}
+
+function displayPoolFilterValue(value: string): string {
+  if (value === "-" || value === "—") return "未标注";
+  return value;
+}
+
+function matchesPoolLeadFilters({ row }: PoolLeadRow, filters: PoolFilters): boolean {
+  if (filters.country && row.country !== filters.country) return false;
+  if (filters.customerType && row.industry !== filters.customerType) return false;
+  if (filters.score && !matchesPoolScoreFilter(row.scoreValue, filters.score)) return false;
+  if (filters.contact && !matchesPoolContactFilter(row, filters.contact)) return false;
+  if (filters.crm && !matchesPoolCrmFilter(row, filters.crm)) return false;
+  if (filters.mail && !matchesPoolMailFilter(row, filters.mail)) return false;
+  return true;
+}
+
+function matchesPoolScoreFilter(score: number, filter: string): boolean {
+  if (filter === "high") return score >= 75;
+  if (filter === "medium") return score >= 60 && score < 75;
+  if (filter === "low") return score >= 50 && score < 60;
+  if (filter === "below50") return score < 50;
+  return true;
+}
+
+function matchesPoolContactFilter(row: PoolTableRow, filter: string): boolean {
+  if (filter === "email") return row.hasEmail;
+  if (filter === "phone") return row.hasPhone;
+  if (filter === "emailOrPhone") return row.hasEmail || row.hasPhone;
+  if (filter === "emailAndPhone") return row.hasEmail && row.hasPhone;
+  if (filter === "none") return !row.hasEmail && !row.hasPhone;
+  return true;
+}
+
+function matchesPoolCrmFilter(row: PoolTableRow, filter: string): boolean {
+  if (filter === "joined") return row.crmStatus === "synced" || row.crmStatus === "active";
+  if (filter === "notJoined") return row.crmStatus === "pending";
+  return true;
+}
+
+function matchesPoolMailFilter(row: PoolTableRow, filter: string): boolean {
+  const reached = row.mailStatus === "已发送" || row.mailStatus === "已回复";
+  if (filter === "reached") return reached;
+  if (filter === "unreached") return !reached;
+  return true;
+}
+
 type ConversationProps = {
   prompt: string;
   status: string;
@@ -3225,6 +3507,7 @@ function AiWorkerConversation({
     hasError: Boolean(error)
   });
   const [leadPage, setLeadPage] = useState(1);
+  const [showBackConfirm, setShowBackConfirm] = useState(false);
   // Continuation searches are cumulative: keep the existing customer
   // pool visible while the backend plans/appends the next 30 queries,
   // then append newly found leads into this same list.
@@ -3301,6 +3584,13 @@ function AiWorkerConversation({
   // we must NOT treat it as active — that's the bug that pinned the
   // page at "19/40 第 N 批进行中 ETA 6 分钟".
   const isRunActive = !isTerminalTask && (searching || creating || pendingQueryCount > 0);
+
+  useEffect(() => {
+    if (!isRunActive && showBackConfirm) {
+      setShowBackConfirm(false);
+    }
+  }, [isRunActive, showBackConfirm]);
+
   // Stranded query count for the failure subline. Only meaningful in
   // terminal state — during active runs these are just queued work.
   const strandedQueryCount = isTerminalTask ? pendingQueryCount : 0;
@@ -3380,6 +3670,14 @@ function AiWorkerConversation({
           };
   const showLeadTableLoading =
     currentBatchLeads.length === 0 && (isPlanningSearchQueries || isRunActive);
+
+  function handleBackToWorkbench() {
+    if (isRunActive) {
+      setShowBackConfirm(true);
+      return;
+    }
+    onBack();
+  }
 
   // 5-step pills: 生成指令 / Brave 搜索 / 清洗候选 / ICP 评分 / 写入客户池.
   // State derived from agentSteps + searchQueries when available.
@@ -3505,7 +3803,7 @@ function AiWorkerConversation({
       {/* Header — same shape as AiWorkerPool */}
       <header className="aiPoolHeader">
         <div className="aiPoolHeaderTop">
-          <button type="button" className="aiPoolBack" onClick={onBack}>
+          <button type="button" className="aiPoolBack" onClick={handleBackToWorkbench}>
             <ChevronLeft size={16} aria-hidden="true" />
             返回工作台
           </button>
@@ -3980,7 +4278,7 @@ function AiWorkerConversation({
                 onClick={onOpenMail}
                 disabled={running || !hasActionableLeads}
               >
-                预览邮件
+                发送邮件
               </button>
             </div>
           </article>
@@ -4006,6 +4304,46 @@ function AiWorkerConversation({
           </article>
         </div>
       </section>
+
+      {showBackConfirm ? (
+        <div className="aiSearchLeaveBackdrop" role="presentation">
+          <div
+            className="aiSearchLeaveDialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-search-leave-title"
+          >
+            <span className="aiSearchLeaveIcon" aria-hidden="true">
+              <Clock size={22} />
+            </span>
+            <div className="aiSearchLeaveBody">
+              <h2 id="ai-search-leave-title">搜索会继续在后台执行</h2>
+              <p>
+                离开这个页面不会停止当前搜索。回到工作台后，你可以在“客户池”里找到这个任务，点击“搜索记录”继续查看实时进度。
+              </p>
+            </div>
+            <div className="aiSearchLeaveActions">
+              <button
+                type="button"
+                className="aiSearchLeaveSecondary"
+                onClick={() => setShowBackConfirm(false)}
+              >
+                留在搜索页
+              </button>
+              <button
+                type="button"
+                className="aiSearchLeavePrimary"
+                onClick={() => {
+                  setShowBackConfirm(false);
+                  onBack();
+                }}
+              >
+                返回工作台
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
