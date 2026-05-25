@@ -1,4 +1,16 @@
-import { BadRequestException, Body, Controller, Delete, Get, Inject, Param, Post, Query, Redirect, Req } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Inject,
+  Param,
+  Post,
+  Query,
+  Redirect,
+  Req
+} from "@nestjs/common";
 import type { Request } from "express";
 import { z } from "zod";
 import { LeadHuntAiService } from "../ai/leadhunt-ai.service.js";
@@ -24,7 +36,22 @@ const gmailMessageSchema = z.object({
 });
 
 const gmailSendSchema = gmailMessageSchema.extend({
-  confirm: z.literal(true)
+  confirm: z.literal(true),
+  scheduledAt: z.coerce.date().optional()
+});
+
+const gmailBatchSendSchema = gmailMessageSchema.omit({ leadId: true, to: true }).extend({
+  confirm: z.literal(true),
+  scheduledAt: z.coerce.date().optional(),
+  recipients: z
+    .array(
+      z.object({
+        leadId: z.string().uuid().optional(),
+        to: emailAddressSchema
+      })
+    )
+    .min(1)
+    .max(50)
 });
 
 const gmailRewriteSchema = z.object({
@@ -110,7 +137,26 @@ export class GmailController {
   async send(@Req() request: Request, @Body() body: unknown) {
     const { user } = await this.authService.me(readSessionCookie(request));
     const data = parseOrBadRequest(gmailSendSchema, body);
+    if (data.scheduledAt) {
+      return this.gmailMessageService.scheduleEmail(user.id, {
+        ...data,
+        scheduledAt: data.scheduledAt
+      });
+    }
     return this.gmailMessageService.sendEmail(user.id, data);
+  }
+
+  @Post("send-batch")
+  async sendBatch(@Req() request: Request, @Body() body: unknown) {
+    const { user } = await this.authService.me(readSessionCookie(request));
+    const data = parseOrBadRequest(gmailBatchSendSchema, body);
+    if (data.scheduledAt) {
+      return this.gmailMessageService.scheduleEmailBatch(user.id, {
+        ...data,
+        scheduledAt: data.scheduledAt
+      });
+    }
+    return this.gmailMessageService.sendEmailBatch(user.id, data);
   }
 
   @Post("rewrite")

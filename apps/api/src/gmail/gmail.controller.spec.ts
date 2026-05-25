@@ -28,7 +28,28 @@ function createController() {
   };
   const gmailMessageService = {
     createDraft: vi.fn().mockResolvedValue({ ok: true, providerDraftId: "draft-1" }),
+    scheduleEmail: vi.fn().mockResolvedValue({
+      ok: true,
+      scheduled: true,
+      scheduledAt: new Date("2026-05-24T12:00:00.000Z")
+    }),
+    scheduleEmailBatch: vi.fn().mockResolvedValue({
+      ok: true,
+      scheduled: true,
+      scheduledAt: new Date("2026-05-24T12:00:00.000Z"),
+      successCount: 2,
+      totalCount: 2
+    }),
     sendEmail: vi.fn().mockResolvedValue({ ok: true, providerMessageId: "message-1" }),
+    sendEmailBatch: vi.fn().mockResolvedValue({
+      ok: true,
+      results: [
+        { ok: true, recipient: "one@example.com" },
+        { ok: true, recipient: "two@example.com" }
+      ],
+      successCount: 2,
+      totalCount: 2
+    }),
     syncReplies: vi.fn().mockResolvedValue({ ok: true, newReplies: 1, classifiedReplies: 1 })
   };
   const leadHuntAiService = {
@@ -79,7 +100,9 @@ describe("GmailController", () => {
   it("redirects expired Google callback state back to mailbox", async () => {
     process.env.FRONTEND_URL = "http://localhost:3000";
     const { controller, gmailOAuthService } = createController();
-    gmailOAuthService.handleCallback.mockRejectedValueOnce(new BadRequestException("Expired Gmail OAuth state"));
+    gmailOAuthService.handleCallback.mockRejectedValueOnce(
+      new BadRequestException("Expired Gmail OAuth state")
+    );
 
     const result = await controller.callback("code", "state");
 
@@ -152,6 +175,89 @@ describe("GmailController", () => {
     });
   });
 
+  it("schedules a confirmed Gmail message", async () => {
+    const { controller, gmailMessageService } = createController();
+
+    const result = await controller.send(requestWithCookie(), {
+      leadId: "11111111-1111-4111-8111-111111111111",
+      to: "prospect@example.com",
+      subject: "Telecom equipment availability",
+      body: "Hello",
+      confirm: true,
+      scheduledAt: "2026-05-24T12:00:00.000Z"
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      scheduled: true,
+      scheduledAt: new Date("2026-05-24T12:00:00.000Z")
+    });
+    expect(gmailMessageService.scheduleEmail).toHaveBeenCalledWith("user-1", {
+      leadId: "11111111-1111-4111-8111-111111111111",
+      to: "prospect@example.com",
+      subject: "Telecom equipment availability",
+      body: "Hello",
+      confirm: true,
+      scheduledAt: new Date("2026-05-24T12:00:00.000Z")
+    });
+    expect(gmailMessageService.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("sends a confirmed Gmail batch", async () => {
+    const { controller, gmailMessageService } = createController();
+
+    const result = await controller.sendBatch(requestWithCookie(), {
+      recipients: [{ to: "one@example.com" }, { to: "two@example.com" }],
+      subject: "Telecom equipment availability",
+      body: "Hello",
+      confirm: true
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      results: [
+        { ok: true, recipient: "one@example.com" },
+        { ok: true, recipient: "two@example.com" }
+      ],
+      successCount: 2,
+      totalCount: 2
+    });
+    expect(gmailMessageService.sendEmailBatch).toHaveBeenCalledWith("user-1", {
+      recipients: [{ to: "one@example.com" }, { to: "two@example.com" }],
+      subject: "Telecom equipment availability",
+      body: "Hello",
+      confirm: true
+    });
+  });
+
+  it("schedules a confirmed Gmail batch", async () => {
+    const { controller, gmailMessageService } = createController();
+
+    const result = await controller.sendBatch(requestWithCookie(), {
+      recipients: [{ to: "one@example.com" }, { to: "two@example.com" }],
+      subject: "Telecom equipment availability",
+      body: "Hello",
+      confirm: true,
+      scheduledAt: "2026-05-24T12:00:00.000Z"
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      scheduled: true,
+      scheduledAt: new Date("2026-05-24T12:00:00.000Z"),
+      successCount: 2,
+      totalCount: 2
+    });
+    expect(gmailMessageService.scheduleEmailBatch).toHaveBeenCalledWith("user-1", {
+      recipients: [{ to: "one@example.com" }, { to: "two@example.com" }],
+      subject: "Telecom equipment availability",
+      body: "Hello",
+      confirm: true,
+      scheduledAt: new Date("2026-05-24T12:00:00.000Z")
+    });
+    expect(gmailMessageService.sendEmailBatch).not.toHaveBeenCalled();
+  });
+
   it("rewrites an email through the AI service", async () => {
     const { controller, leadHuntAiService } = createController();
 
@@ -179,6 +285,8 @@ describe("GmailController", () => {
     const result = await controller.sync(requestWithCookie(), { threadId: "thread-1" });
 
     expect(result).toEqual({ ok: true, newReplies: 1, classifiedReplies: 1 });
-    expect(gmailMessageService.syncReplies).toHaveBeenCalledWith("user-1", { threadId: "thread-1" });
+    expect(gmailMessageService.syncReplies).toHaveBeenCalledWith("user-1", {
+      threadId: "thread-1"
+    });
   });
 });

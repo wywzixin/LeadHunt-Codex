@@ -25,6 +25,8 @@ type CustomerProfileState = {
   notes: string;
 };
 
+const CUSTOMER_PROFILE_NOTES_MAX_LENGTH = 300;
+
 const initialState: CustomerProfileState = {
   targetRegions: INITIAL_TARGET_MARKETS,
   industryKeywords: "行业关键词、产品应用场景、目标客户行业",
@@ -120,7 +122,6 @@ export function CustomerProfileForm() {
       body: JSON.stringify({
         targetRegions: normalizedTargetRegions,
         referenceCustomerUrls,
-        crmSampleIds: [],
         notes: mergeProfileNotes(form.notes, "Customer industry keywords", industryTags)
       })
     });
@@ -168,7 +169,7 @@ export function CustomerProfileForm() {
       </header>
 
       <section className="productGuide">
-        <h2>这个功能是做什么的?</h2>
+        <h2>再告诉 AI 你想找什么客户</h2>
         <div className="productGuideGrid">
           {guideItems.map((item) => {
             const Icon = item.icon;
@@ -192,12 +193,6 @@ export function CustomerProfileForm() {
       </section>
 
       <section className="productFormCard">
-        <aside className="productSteps" aria-label="客户画像填写步骤">
-          <StepItem index={1} title="目标市场" text="告诉 AI 你要找哪些国家/地区和行业" />
-          <StepItem index={2} title="参考客户" text="提供你已有的客户官网，帮助 AI 理解客户特征" />
-          <StepItem index={3} title="补充说明" text="补充你的业务场景、客户偏好和需求，帮助 AI 更精准地找客户" />
-        </aside>
-
         <div className="productFields customerFields">
           <div className="productField customerShortField targetMarketField">
             <span>
@@ -210,7 +205,7 @@ export function CustomerProfileForm() {
             />
           </div>
 
-          <label className="productField customerShortField">
+          <label className="productField">
             <span>行业关键词（可选）</span>
             <textarea
               value={form.industryKeywords}
@@ -229,21 +224,15 @@ export function CustomerProfileForm() {
             <small>输入的官网仅用于分析客户特征，不会对外公开。</small>
           </label>
 
-          <div className="productImportBox customerCrmImport">
-            <span>从 CRM 选择</span>
-            <p>导入已有成交客户或高意向客户作为参考样本</p>
-            <button type="button">从 CRM 选择</button>
-          </div>
-
           <label className="productField productNotesField">
             <span>补充说明（可选）</span>
             <textarea
-              maxLength={300}
+              maxLength={CUSTOMER_PROFILE_NOTES_MAX_LENGTH}
               value={form.notes}
               onChange={(event) => updateField("notes", event.target.value)}
               placeholder="例如：我想找会使用、维护、安装、集成、采购或运营这类产品的客户，优先有项目交付、备件补货、维护运维或采购需求。"
             />
-            <small>{form.notes.length} / 300</small>
+            <small>{form.notes.length} / {CUSTOMER_PROFILE_NOTES_MAX_LENGTH}</small>
           </label>
         </div>
       </section>
@@ -265,15 +254,6 @@ export function CustomerProfileForm() {
           <UnderstandingRow icon="♧" label="客户类型（根据补充说明提供）" tags={customerTypeTags} />
         </div>
       </section>
-
-      <div className="profileActionTips" aria-label="保存方式说明">
-        <span>
-          <b>保存并开始找客户</b>：保存客户画像后进入 AI 外贸员，直接用最新目标客户规则启动找客户流程。
-        </span>
-        <span>
-          <b>仅保存</b>：只更新客户画像，停留在当前页面，不创建找客户任务。
-        </span>
-      </div>
 
       <div className="productActions">
         <button className="primary productPrimaryAction" type="button" onClick={handleSaveAndStart}>
@@ -310,7 +290,7 @@ function MarketMultiSelect({
   const filteredOptions = useMemo(() => filterMarketOptions(searchText), [searchText]);
   const regionOptions = filteredOptions.filter((option) => option.group === "region");
   const countryOptions = filteredOptions.filter((option) => option.group === "country");
-  const summaryText = selectedLabels.length ? selectedLabels.join("、") : "选择目标市场";
+  const summaryText = selectedLabels.length ? `已选择 ${selectedLabels.length} 个目标市场` : "选择目标市场";
 
   function toggleValue(value: string) {
     const next = new Set(selectedValues);
@@ -374,9 +354,11 @@ function MarketMultiSelect({
               placeholder="搜索国家/地区"
             />
           </label>
-          <MarketOptionGroup title="区域" options={regionOptions} selectedSet={selectedSet} onToggle={toggleValue} />
-          <MarketOptionGroup title="国家" options={countryOptions} selectedSet={selectedSet} onToggle={toggleValue} />
-          {!filteredOptions.length ? <p className="targetMarketEmpty">没有匹配项</p> : null}
+          <div className="targetMarketOptions">
+            <MarketOptionGroup title="区域" options={regionOptions} selectedSet={selectedSet} onToggle={toggleValue} />
+            <MarketOptionGroup title="国家" options={countryOptions} selectedSet={selectedSet} onToggle={toggleValue} />
+            {!filteredOptions.length ? <p className="targetMarketEmpty">没有匹配项</p> : null}
+          </div>
         </div>
       ) : null}
     </div>
@@ -419,18 +401,6 @@ function MarketOptionGroup({
           </button>
         );
       })}
-    </div>
-  );
-}
-
-function StepItem({ index, title, text }: { index: number; title: string; text: string }) {
-  return (
-    <div className="productStep">
-      <span>{index}</span>
-      <div>
-        <strong>{title}</strong>
-        <p>{text}</p>
-      </div>
     </div>
   );
 }

@@ -13,7 +13,6 @@ import {
   Send,
   ServerCog,
   ShieldCheck,
-  Smartphone,
   UserRound
 } from "lucide-react";
 import Link from "next/link";
@@ -35,8 +34,7 @@ const copy = {
     switchHref: "/register",
     switchLabel: "立即注册",
     divider: "或使用其他方式登录",
-    google: "Google 登录",
-    microsoft: "Microsoft 登录"
+    google: "Google 登录"
   },
   register: {
     head: "创建您的账户",
@@ -47,20 +45,18 @@ const copy = {
     switchHref: "/login",
     switchLabel: "立即登录",
     divider: "或使用其他方式注册",
-    google: "Google 注册",
-    microsoft: "Microsoft 注册"
+    google: "Google 注册"
   },
   forgot: {
-    head: "忘记密码?",
+    head: "忘记密码？",
     lead: "输入您的注册邮箱，我们将发送重置密码的链接到您的邮箱",
     button: "发送重置链接",
     endpoint: "/api/auth/forgot-password",
     switchText: "想起密码了？",
     switchHref: "/login",
     switchLabel: "立即登录",
-    divider: "或使用其他方式找回",
-    google: "Google",
-    microsoft: "Microsoft"
+    divider: "",
+    google: ""
   }
 };
 
@@ -128,15 +124,9 @@ export function AuthForm({ mode }: AuthFormProps) {
 
           <div className="authHeroCopy">
             <h2>
-              AI 驱动的
-              <br />
-              外贸<span>获客与营销</span>平台
+              AI 驱动的外贸<span>获客与营销</span>平台
             </h2>
-            <p>
-              通过 AI 搜索、客户触达、邮件营销和 CRM 管理，
-              <br />
-              帮助您高效获取海外客户，提升转化率。
-            </p>
+            <p>通过 AI 搜索、客户触达、邮件营销和 CRM 管理，帮助您高效获取海外客户，提升转化率。</p>
           </div>
 
           <div className="authFeatureList">
@@ -144,10 +134,6 @@ export function AuthForm({ mode }: AuthFormProps) {
             <Feature icon={<Send />} title="智能触达" text="个性化邮件触达，提高打开率与回复率" />
             <Feature icon={<ContactRound />} title="客户管理" text="CRM 全流程管理，跟进更高效" />
             <Feature icon={<BarChart3 />} title="数据驱动" text="多维度数据看板，优化您的营销策略" />
-          </div>
-
-          <div className="authGlobe">
-            <img src="/images/login.png" alt="LeadHunt AI 全球获客插图" />
           </div>
 
           <div className="trustStrip">
@@ -160,6 +146,10 @@ export function AuthForm({ mode }: AuthFormProps) {
             <div className="trustItem">
               <BadgeCheck /> 符合 GDPR 要求
             </div>
+          </div>
+
+          <div className="authGlobe" aria-hidden="true">
+            <img alt="" src="/images/login.png" />
           </div>
         </aside>
 
@@ -175,7 +165,7 @@ export function AuthForm({ mode }: AuthFormProps) {
               </div>
             )}
 
-            <div className={mode === "login" ? "authHead" : "authHead compact"}>
+            <div className={mode === "forgot" ? "authHead compact" : "authHead"}>
               {mode === "forgot" ? (
                 <div className="lockHero">
                   <LockKeyhole />
@@ -185,7 +175,7 @@ export function AuthForm({ mode }: AuthFormProps) {
               <p>{content.lead}</p>
             </div>
 
-            <form onSubmit={handleSubmit} className={`authForm authForm-${mode}`}>
+            <form className={`authForm authForm-${mode}`} onSubmit={handleSubmit}>
               {mode === "register" ? (
                 <label className="authField">
                   <span>姓名</span>
@@ -274,13 +264,9 @@ export function AuthForm({ mode }: AuthFormProps) {
                     <input defaultChecked type="checkbox" />
                     记住我
                   </label>
-                  <Link href="/forgot-password">忘记密码?</Link>
+                  <Link href="/forgot-password">忘记密码？</Link>
                 </div>
               ) : null}
-
-              <button className="authButton" disabled={submitting} type="submit">
-                {submitting ? "处理中..." : content.button}
-              </button>
 
               {mode === "register" ? (
                 <label className="authAgreement">
@@ -291,41 +277,26 @@ export function AuthForm({ mode }: AuthFormProps) {
                 </label>
               ) : null}
 
+              <button className="authButton" disabled={submitting} type="submit">
+                {submitting ? "处理中..." : content.button}
+              </button>
+
               <p className="authStatus" aria-live="polite">
                 {status}
               </p>
             </form>
 
-            <div className="authDivider">{content.divider}</div>
-            {mode === "forgot" ? (
-              <button className="authPhoneButton" disabled title="V1 暂不支持短信找回" type="button">
-                <Smartphone /> 通过手机号找回
-              </button>
-            ) : (
-              <div className="authSocialGrid">
-                <a className="authSocialButton" href="http://localhost:4000/api/auth/google">
+            {mode !== "forgot" ? (
+              <>
+                <div className="authDivider">{content.divider}</div>
+                <a className="authSocialButton" href="/api/auth/google">
                   <span className="socialMark google">G</span>
                   {content.google}
                 </a>
-                <button className="authSocialButton" disabled title="V1 暂不支持 Microsoft 登录 / 注册" type="button">
-                  <span className="socialMark microsoft" />
-                  {content.microsoft}
-                </button>
-              </div>
+              </>
+            ) : (
+              <p className="forgotNote">如果您没有收到邮件，请检查垃圾邮件箱，或稍后重试。</p>
             )}
-
-            <p className="authBottomNote">
-              {mode === "forgot" ? (
-                <>
-                  {content.switchText} <Link href={content.switchHref}>{content.switchLabel}</Link>
-                </>
-              ) : (
-                <>
-                  {mode === "login" ? "登录" : "注册"}即表示您同意我们的 <a>服务条款</a> 和 <a>隐私政策</a>
-                </>
-              )}
-            </p>
-            {mode === "forgot" ? <p className="forgotNote">如果您没有收到邮件，请检查垃圾邮件箱，或稍后重试。</p> : null}
           </section>
         </aside>
       </section>

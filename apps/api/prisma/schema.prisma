@@ -263,13 +263,18 @@ model SendLog {
   draftId           String            @map("draft_id") @db.Uuid
   channel           String            @default("email")
   status            String            @default("pending")
+  recipientEmail    String?           @map("recipient_email")
+  replyTo           String?           @map("reply_to")
   providerMessageId String?           @map("provider_message_id")
+  scheduledAt       DateTime?         @map("scheduled_at")
   sentAt            DateTime?         @map("sent_at")
+  lastError         String?           @map("last_error") @db.Text
   createdAt         DateTime          @default(now()) @map("created_at")
   draft             OutreachDraft     @relation(fields: [draftId], references: [id], onDelete: Cascade)
   engagementEvents  EngagementEvent[]
 
   @@index([draftId, status])
+  @@index([status, scheduledAt])
   @@map("send_logs")
 }
 

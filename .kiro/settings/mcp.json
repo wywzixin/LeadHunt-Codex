@@ -15,7 +15,10 @@
         "take_snapshot",
         "click",
         "evaluate_script",
-        "fill"
+        "fill",
+        "take_screenshot",
+        "wait_for",
+        "new_page"
       ]
     }
   }

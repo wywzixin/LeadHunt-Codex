@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import Script from "next/script";
+import { AppMessageProvider } from "./app-message";
 import "./(auth)/auth.css";
+import "react-datepicker/dist/react-datepicker.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -17,7 +19,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             {`document.getElementById("uptook-plugin-linkedin")?.remove();`}
           </Script>
         ) : null}
-        {children}
+        <AppMessageProvider>{children}</AppMessageProvider>
       </body>
     </html>
   );

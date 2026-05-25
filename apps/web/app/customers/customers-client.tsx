@@ -6,17 +6,15 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Clock3,
   Download,
   Filter,
   Mail,
-  MoreHorizontal,
   Plus,
   Search,
-  Star,
-  Users
+  Star
 } from "lucide-react";
 import { AppShell } from "../app-shell";
+import { TableLoadingState } from "../table-loading-state";
 
 type CrmView = "companies" | "contacts" | "favorites";
 type CrmGroup = "all" | "potential" | "contacted_7_days" | "uncontacted";
@@ -63,6 +61,19 @@ type Contact = {
   recentAction?: string;
 };
 
+type CrmFilters = {
+  country: string;
+  stage: string;
+  icpGrade: string;
+  contactStatus: "all" | "with_contacts" | "without_contacts";
+  contactType: string;
+};
+
+type StageOption = {
+  value: string;
+  label: string;
+};
+
 type CrmResponse = {
   view: CrmView;
   group: CrmGroup;
@@ -103,6 +114,17 @@ const defaultData: CrmResponse = {
   contacts: []
 };
 
+const defaultFilters: CrmFilters = {
+  country: "all",
+  stage: "all",
+  icpGrade: "all",
+  contactStatus: "all",
+  contactType: "all"
+};
+
+/*
+ * Legacy CRM demo data is intentionally kept out of runtime.
+ * The customers page must reflect only /api/crm/leads results.
 const sampleCompanies: Company[] = [
   {
     id: "sample-emirates-tower-power",
@@ -289,6 +311,7 @@ const sampleData: CrmResponse = {
   contacts: sampleContacts
 };
 
+*/
 const viewOptions: Array<{ value: Exclude<CrmView, "favorites">; label: string }> = [
   { value: "companies", label: "公司列表" },
   { value: "contacts", label: "联系人列表" }
@@ -301,32 +324,39 @@ const groupOptions: Array<{ value: CrmGroup; label: string; key: keyof CrmRespon
   { value: "uncontacted", label: "未联系客户", key: "uncontacted" }
 ];
 
-const summaryItems: Array<{
-  label: string;
-  getValue: (data: CrmResponse) => number;
-  icon: typeof Users;
-  tone: "blue" | "orange" | "green" | "gray";
-}> = [
-  { label: "客户总数", getValue: (data) => data.stats.companies, icon: Users, tone: "blue" },
-  { label: "潜在客户", getValue: (data) => data.groups.potential, icon: Star, tone: "orange" },
-  { label: "跟进中", getValue: (data) => data.stats.contacted7, icon: Clock3, tone: "green" },
-  { label: "无效客户", getValue: (data) => data.groups.uncontacted, icon: Building2, tone: "gray" }
+const icpGradeOptions = [
+  { value: "all", label: "全部评分" },
+  { value: "high", label: "高评分" },
+  { value: "medium", label: "中评分" },
+  { value: "low", label: "低评分" },
+  { value: "unknown", label: "未评分" }
 ];
+
+const contactStatusOptions = [
+  { value: "all", label: "全部客户" },
+  { value: "with_contacts", label: "有联系方式" },
+  { value: "without_contacts", label: "无联系方式" }
+] satisfies Array<{ value: CrmFilters["contactStatus"]; label: string }>;
+
+const crmPageSize = 10;
 
 export function CustomersClient() {
   const [view, setView] = useState<CrmView>("companies");
   const [group, setGroup] = useState<CrmGroup>("all");
   const [query, setQuery] = useState("");
   const [data, setData] = useState<CrmResponse>(defaultData);
-  const [status, setStatus] = useState("正在读取 CRM 客户...");
   const [loading, setLoading] = useState(true);
+  const [showCreate, setShowCreate] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
+  const [filters, setFilters] = useState<CrmFilters>(defaultFilters);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [page, setPage] = useState(1);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
       setLoading(true);
-      setStatus("正在读取 CRM 客户...");
       try {
         const params = new URLSearchParams({ view, group });
         const response = await fetch(`/api/crm/leads?${params.toString()}`, { credentials: "include" });
@@ -335,15 +365,12 @@ export function CustomersClient() {
         }
 
         const payload = (await response.json()) as CrmResponse;
-        const nextData = payload.stats.companies > 0 || payload.companies.length > 0 ? payload : sampleData;
         if (!cancelled) {
-          setData(nextData);
-          setStatus("管理和查看所有客户信息");
+          setData(payload);
         }
       } catch {
         if (!cancelled) {
-          setData(sampleData);
-          setStatus("管理和查看所有客户信息");
+          setData(defaultData);
         }
       } finally {
         if (!cancelled) {
@@ -357,36 +384,74 @@ export function CustomersClient() {
     return () => {
       cancelled = true;
     };
-  }, [view, group]);
+  }, [view, group, reloadKey]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [view, group, query, filters]);
+
+  const companyLookup = useMemo(() => new Map(data.companies.map((company) => [company.id, company])), [data.companies]);
+
+  const countryOptions = useMemo(() => {
+    const rows = view === "contacts" ? data.contacts : data.companies;
+    return uniqueSorted(rows.map((row) => row.country));
+  }, [data.companies, data.contacts, view]);
+
+  const stageOptions = useMemo(() => {
+    const rows = view === "contacts" ? data.contacts : data.companies;
+    const options = new Map<string, string>();
+    rows.forEach((row) => {
+      if (row.stage) {
+        options.set(row.stage, row.stageLabel || row.stage);
+      }
+    });
+
+    return [...options.entries()]
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, "zh-CN"));
+  }, [data.companies, data.contacts, view]);
+
+  const contactTypeOptions = useMemo(() => uniqueSorted(data.contacts.map((contact) => contact.type)), [data.contacts]);
 
   const companies = useMemo(() => {
     const keyword = query.trim().toLowerCase();
-    if (!keyword) {
-      return data.companies;
-    }
-
-    return data.companies.filter((company) =>
-      [company.companyName, company.country, company.industry, company.stageLabel, company.owner, ...company.tags]
-        .filter(Boolean)
-        .some((value) => value.toLowerCase().includes(keyword))
+    return data.companies.filter(
+      (company) => matchesCompanySearch(company, keyword) && matchesCompanyFilters(company, filters)
     );
-  }, [data.companies, query]);
+  }, [data.companies, filters, query]);
 
   const contacts = useMemo(() => {
     const keyword = query.trim().toLowerCase();
-    if (!keyword) {
-      return data.contacts;
-    }
-
     return data.contacts.filter((contact) =>
-      [contact.companyName, contact.country, contact.type, contact.value, contact.stageLabel, contact.owner]
-        .filter(Boolean)
-        .some((value) => value.toLowerCase().includes(keyword))
+      matchesContactSearch(contact, keyword) && matchesContactFilters(contact, filters, companyLookup.get(contact.companyId))
     );
-  }, [data.contacts, query]);
+  }, [companyLookup, data.contacts, filters, query]);
 
   const title = titleForView(view, group);
   const total = totalForView(data, view, group);
+  const tableTotal = view === "contacts" ? contacts.length : companies.length;
+  const activeFilterCount = countActiveFilters(filters, view);
+  const isFiltering = query.trim().length > 0 || activeFilterCount > 0;
+  const pageCount = Math.max(1, Math.ceil(tableTotal / crmPageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pageStartIndex = (currentPage - 1) * crmPageSize;
+  const pageEndIndex = Math.min(pageStartIndex + crmPageSize, tableTotal);
+  const visibleCompanies = companies.slice(pageStartIndex, pageEndIndex);
+  const visibleContacts = contacts.slice(pageStartIndex, pageEndIndex);
+  const pageTokens = paginationTokens(pageCount, currentPage);
+  const pagerLabel =
+    tableTotal === 0 ? `共 ${tableTotal} 条` : `显示 ${pageStartIndex + 1}-${pageEndIndex} / ${tableTotal} 条`;
+  const subline = loading
+    ? "正在同步客户信息"
+    : isFiltering
+      ? `筛选后 ${tableTotal} 条 · 当前列表共 ${total} 条`
+      : `共 ${total} 条 · 上次同步刚刚`;
+
+  useEffect(() => {
+    if (page > pageCount) {
+      setPage(pageCount);
+    }
+  }, [page, pageCount]);
 
   return (
     <AppShell
@@ -413,93 +478,53 @@ export function CustomersClient() {
           </div>
 
           <div className="crmFilterScroll">
-            <button
-              className={view === "favorites" ? "crmFavoriteRow active" : "crmFavoriteRow"}
-              onClick={() => {
-                setView("favorites");
-                setGroup("all");
-              }}
-              type="button"
-            >
-              <span>
-                <Star aria-hidden="true" size={14} />
-                收藏列表
-              </span>
-              <strong>{data.stats.favorites}</strong>
-            </button>
-
-            <section className="crmSideSection">
-              <div className="crmSideTitle">
+            <div className="crmSideList">
+              <button
+                className={view === "favorites" ? "crmFavoriteRow active" : "crmFavoriteRow"}
+                onClick={() => {
+                  setView("favorites");
+                  setGroup("all");
+                }}
+                type="button"
+              >
                 <span>
-                  <ChevronDown aria-hidden="true" size={14} />
-                  自动分组
+                  <Star aria-hidden="true" size={14} />
+                  收藏列表
                 </span>
-                <button aria-label="添加自动分组" type="button">
-                  +
+                <strong>{data.stats.favorites}</strong>
+              </button>
+              {groupOptions.map((item) => (
+                <button
+                  className={view !== "favorites" && group === item.value ? "active" : ""}
+                  key={item.value}
+                  onClick={() => {
+                    setView("companies");
+                    setGroup(item.value);
+                  }}
+                  type="button"
+                >
+                  <span>{item.label}</span>
+                  <strong>{data.groups[item.key]}</strong>
                 </button>
-              </div>
-              <div className="crmSideList">
-                {groupOptions.map((item) => (
-                  <button
-                    className={view !== "favorites" && group === item.value ? "active" : ""}
-                    key={item.value}
-                    onClick={() => {
-                      setView("companies");
-                      setGroup(item.value);
-                    }}
-                    type="button"
-                  >
-                    <span>{item.label}</span>
-                    <strong>{data.groups[item.key]}</strong>
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            <section className="crmSideSection">
-              <div className="crmSideTitle">
-                <span>
-                  <ChevronDown aria-hidden="true" size={14} />
-                  我的列表
-                </span>
-                <button aria-label="添加我的列表" type="button">
-                  +
-                </button>
-              </div>
-            </section>
+              ))}
+            </div>
           </div>
-
-          <section className="crmSummaryCard" aria-label="客户总览">
-            <h2>客户总览</h2>
-            {summaryItems.map((item) => {
-              const Icon = item.icon;
-              return (
-                <div className={`crmSummaryItem ${item.tone}`} key={item.label}>
-                  <span>
-                    <Icon aria-hidden="true" size={13} />
-                  </span>
-                  <p>{item.label}</p>
-                  <strong>{item.getValue(data)}</strong>
-                </div>
-              );
-            })}
-          </section>
         </aside>
 
         <section className="crmContentPane">
           <header className="crmContentHead">
             <div>
               <h1>
-                {title} <span>({total})</span>
+                {title} <span>({isFiltering ? tableTotal : total})</span>
               </h1>
-              <p>{loading ? "正在同步客户信息" : status}</p>
+              <p>{subline}</p>
             </div>
             <div className="crmHeadActions">
               <button className="crmGhostButton" type="button">
                 <Download aria-hidden="true" size={15} />
                 导出客户
               </button>
-              <button className="crmPrimaryButton" type="button">
+              <button className="crmPrimaryButton" onClick={() => setShowCreate(true)} type="button">
                 <Plus aria-hidden="true" size={16} />
                 新建客户
               </button>
@@ -511,50 +536,218 @@ export function CustomersClient() {
               <Search aria-hidden="true" size={17} />
               <input
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索公司名称 / 行业 / 国家"
+                placeholder="搜索公司名称 / 行业 / 国家 / 网站"
                 value={query}
               />
             </label>
-            <button className="crmGhostButton" type="button">
-              <Filter aria-hidden="true" size={15} />
-              筛选
-            </button>
+            <div className="crmFilterControl">
+              <button
+                aria-expanded={showFilters}
+                className={
+                  showFilters || activeFilterCount > 0
+                    ? "crmGhostButton crmFilterButton active"
+                    : "crmGhostButton crmFilterButton"
+                }
+                onClick={() => setShowFilters((current) => !current)}
+                type="button"
+              >
+                <Filter aria-hidden="true" size={15} />
+                筛选
+                {activeFilterCount > 0 ? <span className="crmFilterBadge">{activeFilterCount}</span> : null}
+              </button>
+              {showFilters ? (
+                <CrmFilterMenu
+                  activeFilterCount={activeFilterCount}
+                  contactTypeOptions={contactTypeOptions}
+                  countryOptions={countryOptions}
+                  filters={filters}
+                  onChange={setFilters}
+                  onClose={() => setShowFilters(false)}
+                  onReset={() => setFilters(defaultFilters)}
+                  stageOptions={stageOptions}
+                  view={view}
+                />
+              ) : null}
+            </div>
           </div>
 
-          {view === "contacts" ? <ContactsTable contacts={contacts} /> : <CompaniesTable companies={companies} />}
+          {view === "contacts" ? (
+            <ContactsTable contacts={visibleContacts} loading={loading} />
+          ) : (
+            <CompaniesTable companies={visibleCompanies} loading={loading} />
+          )}
 
           <footer className="crmPager" aria-label="客户分页">
-            <span>共 {total} 条</span>
-            <button className="crmPageSize" type="button">
-              10 条/页 <ChevronDown aria-hidden="true" size={14} />
-            </button>
-            <div className="crmPageButtons">
-              <button disabled type="button">
-                <ChevronLeft aria-hidden="true" size={15} />
+            <span>{pagerLabel}</span>
+            <div className="crmPagerRight">
+              <button className="crmPageSize" type="button">
+                10 条/页 <ChevronDown aria-hidden="true" size={14} />
               </button>
-              <button className="active" type="button">
-                1
-              </button>
-              <button type="button">2</button>
-              <button type="button">3</button>
-              <button type="button">4</button>
-              <button type="button">5</button>
-              <span>...</span>
-              <button type="button">16</button>
-              <button type="button">
-                <ChevronRight aria-hidden="true" size={15} />
-              </button>
+              <div className="crmPageButtons">
+                <button
+                  disabled={currentPage <= 1}
+                  onClick={() => setPage(Math.max(1, currentPage - 1))}
+                  type="button"
+                >
+                  <ChevronLeft aria-hidden="true" size={15} />
+                </button>
+                {pageTokens.map((token) =>
+                  typeof token === "number" ? (
+                    <button
+                      className={token === currentPage ? "active" : ""}
+                      key={token}
+                      onClick={() => setPage(token)}
+                      type="button"
+                    >
+                      {token}
+                    </button>
+                  ) : (
+                    <span key={token}>...</span>
+                  )
+                )}
+                <button
+                  disabled={currentPage >= pageCount}
+                  onClick={() => setPage(Math.min(pageCount, currentPage + 1))}
+                  type="button"
+                >
+                  <ChevronRight aria-hidden="true" size={15} />
+                </button>
+              </div>
             </div>
           </footer>
         </section>
       </section>
+
+      {showCreate ? (
+        <CreateLeadModal
+          onClose={() => setShowCreate(false)}
+          onCreated={() => {
+            setShowCreate(false);
+            setReloadKey((current) => current + 1);
+          }}
+        />
+      ) : null}
     </AppShell>
   );
 }
 
-function CompaniesTable({ companies }: { companies: Company[] }) {
+function CrmFilterMenu({
+  activeFilterCount,
+  contactTypeOptions,
+  countryOptions,
+  filters,
+  onChange,
+  onClose,
+  onReset,
+  stageOptions,
+  view
+}: {
+  activeFilterCount: number;
+  contactTypeOptions: string[];
+  countryOptions: string[];
+  filters: CrmFilters;
+  onChange: (filters: CrmFilters) => void;
+  onClose: () => void;
+  onReset: () => void;
+  stageOptions: StageOption[];
+  view: CrmView;
+}) {
+  return (
+    <div className="crmFilterMenu" role="dialog" aria-label="筛选客户">
+      <div className="crmFilterMenuHead">
+        <strong>筛选客户</strong>
+        <span>{activeFilterCount > 0 ? `已选 ${activeFilterCount} 项` : "实时生效"}</span>
+      </div>
+
+      <label className="crmFilterField">
+        <span>国家/地区</span>
+        <select onChange={(event) => onChange({ ...filters, country: event.target.value })} value={filters.country}>
+          <option value="all">全部国家</option>
+          {countryOptions.map((country) => (
+            <option key={country} value={country}>
+              {country}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="crmFilterField">
+        <span>客户阶段</span>
+        <select onChange={(event) => onChange({ ...filters, stage: event.target.value })} value={filters.stage}>
+          <option value="all">全部阶段</option>
+          {stageOptions.map((stage) => (
+            <option key={stage.value} value={stage.value}>
+              {stage.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="crmFilterField">
+        <span>ICP评分</span>
+        <select onChange={(event) => onChange({ ...filters, icpGrade: event.target.value })} value={filters.icpGrade}>
+          {icpGradeOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {view === "contacts" ? (
+        <label className="crmFilterField">
+          <span>联系方式类型</span>
+          <select onChange={(event) => onChange({ ...filters, contactType: event.target.value })} value={filters.contactType}>
+            <option value="all">全部类型</option>
+            {contactTypeOptions.map((type) => (
+              <option key={type} value={type}>
+                {contactTypeLabel(type)}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <label className="crmFilterField">
+          <span>联系方式</span>
+          <select
+            onChange={(event) =>
+              onChange({ ...filters, contactStatus: event.target.value as CrmFilters["contactStatus"] })
+            }
+            value={filters.contactStatus}
+          >
+            {contactStatusOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      <div className="crmFilterMenuActions">
+        <button className="crmTextButton" disabled={activeFilterCount === 0} onClick={onReset} type="button">
+          清空
+        </button>
+        <button className="crmFilterDoneButton" onClick={onClose} type="button">
+          完成
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CompaniesTable({ companies, loading }: { companies: Company[]; loading: boolean }) {
+  if (loading) {
+    return (
+      <TableLoadingState
+        title="正在同步客户信息"
+        description="正在读取 CRM 客户、联系人和跟进状态。"
+      />
+    );
+  }
+
   if (companies.length === 0) {
-    return <EmptyState text="发送开发信或手动同步客户后，这里会显示 CRM 记录。" />;
+    return <EmptyState text="把客户同步到 CRM 或手动新建客户后，这里会显示 CRM 记录。" />;
   }
 
   return (
@@ -582,8 +775,8 @@ function CompaniesTable({ companies }: { companies: Company[] }) {
               </td>
               <td>
                 <div className="crmCompanyCell">
-                  <span className={`crmCompanyMark tone${(index % 6) + 1}`}>
-                    <Building2 aria-hidden="true" size={16} />
+                  <span className={`crmCompanyMark tone${(index % 6) + 1}`} aria-hidden="true">
+                    {initialOf(company.companyName)}
                   </span>
                   <div>
                     <strong>{company.companyName}</strong>
@@ -597,13 +790,14 @@ function CompaniesTable({ companies }: { companies: Company[] }) {
                   {company.country}
                 </span>
               </td>
-              <td>{company.industry}</td>
+              <td>
+                <span className="crmIndustryTag">{company.industry}</span>
+              </td>
               <td>
                 <span className={`crmStage ${stageTone(company.stage)}`}>{company.stageLabel}</span>
               </td>
               <td>
                 <span className="crmOwner">
-                  <span>梁</span>
                   {company.owner}
                 </span>
               </td>
@@ -615,10 +809,9 @@ function CompaniesTable({ companies }: { companies: Company[] }) {
               </td>
               <td>
                 <div className="crmActions">
-                  <button type="button">查看</button>
-                  <button aria-label="更多操作" className="iconOnly" type="button">
-                    <MoreHorizontal aria-hidden="true" size={16} />
-                  </button>
+                  <button type="button">详情</button>
+                  <button type="button">发邮件</button>
+                  <button type="button">跟进</button>
                 </div>
               </td>
             </tr>
@@ -629,9 +822,18 @@ function CompaniesTable({ companies }: { companies: Company[] }) {
   );
 }
 
-function ContactsTable({ contacts }: { contacts: Contact[] }) {
+function ContactsTable({ contacts, loading }: { contacts: Contact[]; loading: boolean }) {
+  if (loading) {
+    return (
+      <TableLoadingState
+        title="正在同步联系人信息"
+        description="正在读取 CRM 联系方式和客户阶段。"
+      />
+    );
+  }
+
   if (contacts.length === 0) {
-    return <EmptyState text="客户邮箱、电话或 LinkedIn 联系方式入库后会显示在这里。" />;
+    return <EmptyState text="已同步到 CRM 的客户有邮箱、电话或 LinkedIn 后会显示在这里。" />;
   }
 
   return (
@@ -683,22 +885,189 @@ function ContactsTable({ contacts }: { contacts: Contact[] }) {
               </td>
               <td>
                 <span className="crmOwner">
-                  <span>梁</span>
                   {contact.owner}
                 </span>
               </td>
               <td>
                 <div className="crmActions">
                   <button type="button">发邮件</button>
-                  <button aria-label="更多操作" className="iconOnly" type="button">
-                    <MoreHorizontal aria-hidden="true" size={16} />
-                  </button>
+                  <button type="button">跟进</button>
                 </div>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function CreateLeadModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [companyName, setCompanyName] = useState("");
+  const [website, setWebsite] = useState("");
+  const [country, setCountry] = useState("");
+  const [stage, setStage] = useState("new");
+  const [tagsText, setTagsText] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit() {
+    setError(null);
+    const trimmedName = companyName.trim();
+    if (!trimmedName) {
+      setError("请填写公司名称");
+      return;
+    }
+
+    const tags = tagsText
+      .split(/[,，、\s]+/)
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+    const contacts: Array<{ type: string; value: string }> = [];
+    if (email.trim()) contacts.push({ type: "email", value: email.trim() });
+    if (phone.trim()) contacts.push({ type: "phone", value: phone.trim() });
+
+    setSubmitting(true);
+    try {
+      const response = await fetch("/api/crm/leads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          companyName: trimmedName,
+          website: website.trim() || undefined,
+          country: country.trim() || undefined,
+          stage,
+          tags: tags.length ? tags : undefined,
+          contacts: contacts.length ? contacts : undefined
+        })
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `HTTP ${response.status}`);
+      }
+
+      onCreated();
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "创建失败";
+      setError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div
+      className="crmModalScrim"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="新建客户"
+    >
+      <div className="crmModal">
+        <header className="crmModalHead">
+          <h2>新建客户</h2>
+          <button aria-label="关闭" className="crmModalClose" onClick={onClose} type="button">
+            ×
+          </button>
+        </header>
+        <div className="crmModalBody">
+          <label className="crmModalField">
+            <span>
+              公司名称 <em>*</em>
+            </span>
+            <input
+              autoFocus
+              maxLength={160}
+              onChange={(event) => setCompanyName(event.target.value)}
+              placeholder="例如：Emirates Tower Power"
+              type="text"
+              value={companyName}
+            />
+          </label>
+
+          <div className="crmModalGrid">
+            <label className="crmModalField">
+              <span>官网</span>
+              <input
+                onChange={(event) => setWebsite(event.target.value)}
+                placeholder="https://example.com"
+                type="text"
+                value={website}
+              />
+            </label>
+            <label className="crmModalField">
+              <span>国家 / 地区</span>
+              <input
+                onChange={(event) => setCountry(event.target.value)}
+                placeholder="例如：阿联酋"
+                type="text"
+                value={country}
+              />
+            </label>
+          </div>
+
+          <div className="crmModalGrid">
+            <label className="crmModalField">
+              <span>邮箱</span>
+              <input
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="contact@example.com"
+                type="email"
+                value={email}
+              />
+            </label>
+            <label className="crmModalField">
+              <span>电话</span>
+              <input
+                onChange={(event) => setPhone(event.target.value)}
+                placeholder="+971 ..."
+                type="text"
+                value={phone}
+              />
+            </label>
+          </div>
+
+          <div className="crmModalGrid">
+            <label className="crmModalField">
+              <span>客户阶段</span>
+              <select onChange={(event) => setStage(event.target.value)} value={stage}>
+                <option value="new">新客户</option>
+                <option value="potential">潜在客户</option>
+                <option value="qualified">已确认</option>
+                <option value="contacted">已触达</option>
+                <option value="interested">感兴趣</option>
+                <option value="quoting">报价中</option>
+                <option value="closed">已成交</option>
+              </select>
+            </label>
+            <label className="crmModalField">
+              <span>标签（逗号分隔）</span>
+              <input
+                onChange={(event) => setTagsText(event.target.value)}
+                placeholder="经销商, 现货商, UAE"
+                type="text"
+                value={tagsText}
+              />
+            </label>
+          </div>
+
+          {error ? <p className="crmModalError">{error}</p> : null}
+        </div>
+        <footer className="crmModalFoot">
+          <button className="crmGhostButton" disabled={submitting} onClick={onClose} type="button">
+            取消
+          </button>
+          <button className="crmPrimaryButton" disabled={submitting} onClick={handleSubmit} type="button">
+            {submitting ? "创建中..." : "创建客户"}
+          </button>
+        </footer>
+      </div>
     </div>
   );
 }
@@ -711,6 +1080,127 @@ function EmptyState({ text }: { text: string }) {
       <p>{text}</p>
     </div>
   );
+}
+
+function matchesCompanySearch(company: Company, keyword: string) {
+  if (!keyword) {
+    return true;
+  }
+
+  const fields = [
+    company.companyName,
+    company.country,
+    company.industry,
+    company.stageLabel,
+    company.owner,
+    company.website,
+    company.sourceUrl,
+    ...company.tags
+  ].filter(isNonEmptyString);
+
+  return (
+    fields.some((value) => value.toLowerCase().includes(keyword)) ||
+    company.contacts.some((contact) =>
+      [contact.type, contact.value, contact.sourceUrl]
+        .filter(isNonEmptyString)
+        .some((value) => value.toLowerCase().includes(keyword))
+    )
+  );
+}
+
+function matchesContactSearch(contact: Contact, keyword: string) {
+  if (!keyword) {
+    return true;
+  }
+
+  return [contact.companyName, contact.country, contact.type, contact.value, contact.stageLabel, contact.owner, contact.sourceUrl]
+    .filter(isNonEmptyString)
+    .some((value) => value.toLowerCase().includes(keyword));
+}
+
+function matchesCompanyFilters(company: Company, filters: CrmFilters) {
+  if (filters.country !== "all" && company.country !== filters.country) {
+    return false;
+  }
+
+  if (filters.stage !== "all" && company.stage !== filters.stage) {
+    return false;
+  }
+
+  if (!matchesIcpGrade(company, filters.icpGrade)) {
+    return false;
+  }
+
+  if (filters.contactStatus === "with_contacts" && company.contacts.length === 0) {
+    return false;
+  }
+
+  if (filters.contactStatus === "without_contacts" && company.contacts.length > 0) {
+    return false;
+  }
+
+  return true;
+}
+
+function matchesContactFilters(contact: Contact, filters: CrmFilters, company?: Company) {
+  if (filters.country !== "all" && contact.country !== filters.country) {
+    return false;
+  }
+
+  if (filters.stage !== "all" && contact.stage !== filters.stage) {
+    return false;
+  }
+
+  if (filters.contactType !== "all" && contact.type !== filters.contactType) {
+    return false;
+  }
+
+  return matchesIcpGrade(company, filters.icpGrade);
+}
+
+function matchesIcpGrade(company: Company | undefined, grade: string) {
+  if (grade === "all") {
+    return true;
+  }
+
+  if (grade === "unknown") {
+    return !company?.icpScore?.grade;
+  }
+
+  return company?.icpScore?.grade === grade;
+}
+
+function countActiveFilters(filters: CrmFilters, view: CrmView) {
+  return [
+    filters.country !== "all",
+    filters.stage !== "all",
+    filters.icpGrade !== "all",
+    view === "contacts" ? filters.contactType !== "all" : filters.contactStatus !== "all"
+  ].filter(Boolean).length;
+}
+
+function uniqueSorted(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b, "zh-CN"));
+}
+
+function isNonEmptyString(value: string | null | undefined): value is string {
+  return Boolean(value);
+}
+
+function contactTypeLabel(type: string) {
+  if (type === "email") {
+    return "邮箱";
+  }
+
+  if (type === "phone") {
+    return "电话";
+  }
+
+  if (type === "linkedin") {
+    return "LinkedIn";
+  }
+
+  return type;
 }
 
 function titleForView(view: CrmView, group: CrmGroup) {
@@ -737,6 +1227,31 @@ function totalForView(data: CrmResponse, view: CrmView, group: CrmGroup) {
   return data.groups[groupOptions.find((item) => item.value === group)?.key ?? "all"];
 }
 
+function paginationTokens(pageCount: number, currentPage: number): Array<number | "left-ellipsis" | "right-ellipsis"> {
+  if (pageCount <= 7) {
+    return Array.from({ length: pageCount }, (_, index) => index + 1);
+  }
+
+  const tokens: Array<number | "left-ellipsis" | "right-ellipsis"> = [1];
+  const start = Math.max(2, currentPage - 1);
+  const end = Math.min(pageCount - 1, currentPage + 1);
+
+  if (start > 2) {
+    tokens.push("left-ellipsis");
+  }
+
+  for (let pageNumber = start; pageNumber <= end; pageNumber += 1) {
+    tokens.push(pageNumber);
+  }
+
+  if (end < pageCount - 1) {
+    tokens.push("right-ellipsis");
+  }
+
+  tokens.push(pageCount);
+  return tokens;
+}
+
 function stageTone(stage: string) {
   if (["contacted", "interested", "quoting"].includes(stage)) {
     return "blue";
@@ -751,6 +1266,13 @@ function stageTone(stage: string) {
   }
 
   return "gray";
+}
+
+function initialOf(value: string) {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return "•";
+  const first = trimmed.charAt(0);
+  return /[A-Za-z0-9]/.test(first) ? first.toUpperCase() : first;
 }
 
 function flagForCountry(country: string) {

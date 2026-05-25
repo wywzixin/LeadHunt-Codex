@@ -79,6 +79,55 @@ export type GmailSendInput = GmailMessageInput & {
   confirm: boolean;
 };
 
+export type GmailScheduleInput = GmailSendInput & {
+  scheduledAt: Date;
+};
+
+export type GmailBatchSendInput = Omit<GmailMessageInput, "leadId" | "to"> & {
+  confirm: boolean;
+  recipients: GmailBatchRecipient[];
+};
+
+export type GmailBatchScheduleInput = GmailBatchSendInput & {
+  scheduledAt: Date;
+};
+
+type GmailSendOptions = {
+  ignoreMinInterval?: boolean;
+  skipRecipientDomainValidation?: boolean;
+};
+
+type GmailBatchRecipient = {
+  leadId?: string;
+  to: string;
+};
+
+type GmailAccountForSend = {
+  email: string;
+  refreshTokenEncrypted: string;
+};
+
+type PreparedDraft = {
+  id: string;
+  leadId: string;
+  channel: string;
+  subject: string;
+  body: string;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type PreparedSendLog = {
+  id: string;
+  draftId: string;
+  status: string;
+  providerMessageId?: string | null;
+  scheduledAt?: Date | null;
+  sentAt?: Date | null;
+  createdAt: Date;
+};
+
 type ReplyClassifier = Pick<LeadHuntAiService, "classifyReply">;
 type MailExchange = {
   exchange: string;
@@ -98,6 +147,7 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
   private readonly replyClassifier: ReplyClassifier | null;
   private readonly mxLookup: (domain: string) => Promise<MailExchange[]>;
   private syncTimer: ReturnType<typeof setInterval> | null = null;
+  private scheduledSendTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     @Inject(PrismaService)
@@ -109,26 +159,39 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
     this.fetchImpl = options.fetchImpl ?? createGmailFetchImpl();
     this.mxLookup = options.mxLookup ?? resolveMx;
     this.replyClassifier = isServiceOptions(aiServiceOrOptions)
-      ? options.aiService ?? null
+      ? (options.aiService ?? null)
       : aiServiceOrOptions;
   }
 
   onModuleInit() {
     const intervalMs = Number(process.env.GMAIL_SYNC_INTERVAL_MS ?? "0");
-    if (!Number.isFinite(intervalMs) || intervalMs < 60_000) {
-      return;
+    if (Number.isFinite(intervalMs) && intervalMs >= 60_000) {
+      this.syncTimer = setInterval(() => {
+        void this.syncAllUsers().catch(() => undefined);
+      }, intervalMs);
+      this.syncTimer.unref?.();
     }
 
-    this.syncTimer = setInterval(() => {
-      void this.syncAllUsers().catch(() => undefined);
-    }, intervalMs);
-    this.syncTimer.unref?.();
+    const scheduledSendIntervalMs = Number(process.env.GMAIL_SCHEDULED_SEND_INTERVAL_MS ?? "60000");
+    if (Number.isFinite(scheduledSendIntervalMs) && scheduledSendIntervalMs >= 15_000) {
+      this.scheduledSendTimer = setInterval(() => {
+        void this.processScheduledSends().catch(() => undefined);
+      }, scheduledSendIntervalMs);
+      this.scheduledSendTimer.unref?.();
+      setTimeout(() => {
+        void this.processScheduledSends().catch(() => undefined);
+      }, 2_000).unref?.();
+    }
   }
 
   onModuleDestroy() {
     if (this.syncTimer) {
       clearInterval(this.syncTimer);
       this.syncTimer = null;
+    }
+    if (this.scheduledSendTimer) {
+      clearInterval(this.scheduledSendTimer);
+      this.scheduledSendTimer = null;
     }
   }
 
@@ -174,15 +237,19 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async sendEmail(userId: string, input: GmailSendInput) {
+  async sendEmail(userId: string, input: GmailSendInput, options: GmailSendOptions = {}) {
     if (!input.confirm) {
       throw new BadRequestException("User confirmation is required before sending Gmail");
     }
 
     const account = await this.getActiveAccount(userId);
     const lead = input.leadId ? await this.ensureLeadForUser(userId, input.leadId) : null;
-    await this.assertWithinSendRateLimit(userId);
-    await this.assertRecipientDomainCanReceiveMail(input.to);
+    await this.assertWithinSendRateLimit(userId, new Date(), {
+      ignoreMinInterval: options.ignoreMinInterval
+    });
+    if (!options.skipRecipientDomainValidation) {
+      await this.assertRecipientDomainCanReceiveMail(input.to);
+    }
 
     const localDraft = input.leadId
       ? await this.prisma.outreachDraft.create({
@@ -198,10 +265,32 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
       ? await this.prisma.sendLog.create({
           data: {
             draftId: localDraft.id,
+            recipientEmail: input.to,
+            replyTo: input.replyTo || account.email,
             status: "pending"
           }
         })
       : null;
+
+    return this.deliverPreparedEmail(userId, input, {
+      account,
+      lead,
+      localDraft,
+      pendingSendLog
+    });
+  }
+
+  private async deliverPreparedEmail(
+    userId: string,
+    input: GmailMessageInput,
+    context: {
+      account: GmailAccountForSend;
+      lead: OwnedLead | null;
+      localDraft: PreparedDraft | null;
+      pendingSendLog: PreparedSendLog | null;
+    }
+  ) {
+    const { account, lead, localDraft, pendingSendLog } = context;
     const accessToken = await this.refreshAccessToken(account.refreshTokenEncrypted);
     const raw = buildMimeMessage({
       from: account.email,
@@ -223,7 +312,7 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
       if (pendingSendLog) {
         await this.prisma.sendLog.update({
           where: { id: pendingSendLog.id },
-          data: { status: "failed" }
+          data: { lastError: readErrorMessage(error), status: "failed" }
         });
       }
       if (localDraft) {
@@ -247,6 +336,7 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
           data: {
             status: "sent",
             providerMessageId: providerMessage.id ?? null,
+            lastError: null,
             sentAt: new Date()
           }
         })
@@ -302,6 +392,7 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
             id: sendLog.id,
             status: sendLog.status,
             providerMessageId: sendLog.providerMessageId,
+            scheduledAt: sendLog.scheduledAt,
             sentAt: sendLog.sentAt
           }
         : null,
@@ -323,6 +414,305 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
             note: followupTask.note
           }
         : null
+    };
+  }
+
+  async scheduleEmail(userId: string, input: GmailScheduleInput) {
+    if (!input.confirm) {
+      throw new BadRequestException("User confirmation is required before scheduling Gmail");
+    }
+    if (!input.leadId) {
+      throw new BadRequestException("Scheduled Gmail send requires a leadId");
+    }
+
+    const scheduledAt = normalizeScheduledAt(input.scheduledAt);
+    const account = await this.getActiveAccount(userId);
+    const lead = await this.ensureLeadForUser(userId, input.leadId);
+    await this.assertRecipientDomainCanReceiveMail(input.to);
+
+    const localDraft = await this.prisma.outreachDraft.create({
+      data: {
+        leadId: input.leadId,
+        subject: input.subject,
+        body: input.body,
+        status: "scheduled"
+      }
+    });
+    const sendLog = await this.prisma.sendLog.create({
+      data: {
+        draftId: localDraft.id,
+        recipientEmail: input.to,
+        replyTo: input.replyTo || account.email,
+        scheduledAt,
+        status: "scheduled"
+      }
+    });
+
+    await this.markOutreachWorkflowScheduled(lead, {
+      scheduledAt,
+      sendLogId: sendLog.id
+    });
+
+    return {
+      ok: true,
+      scheduled: true,
+      scheduledAt,
+      providerMessageId: null,
+      threadId: null,
+      draft: toSafeDraft(localDraft),
+      sendLog: {
+        id: sendLog.id,
+        status: sendLog.status,
+        providerMessageId: sendLog.providerMessageId,
+        scheduledAt: sendLog.scheduledAt,
+        sentAt: sendLog.sentAt
+      },
+      crmLead: null,
+      followupTask: null
+    };
+  }
+
+  async scheduleEmailBatch(userId: string, input: GmailBatchScheduleInput) {
+    if (!input.confirm) {
+      throw new BadRequestException("User confirmation is required before scheduling Gmail");
+    }
+    if (!input.recipients.length) {
+      throw new BadRequestException("At least one recipient is required");
+    }
+
+    const results: Array<{
+      leadId: string | null;
+      message?: string;
+      ok: boolean;
+      recipient: string;
+      result?: Awaited<ReturnType<GmailMessageService["scheduleEmail"]>>;
+    }> = [];
+    let successCount = 0;
+
+    await this.assertBatchRecipientsReady(userId, input.recipients, { requireLeadId: true });
+
+    for (const recipient of input.recipients) {
+      try {
+        const result = await this.scheduleEmail(userId, {
+          body: input.body,
+          confirm: true,
+          leadId: recipient.leadId,
+          replyTo: input.replyTo,
+          scheduledAt: input.scheduledAt,
+          subject: input.subject,
+          to: recipient.to
+        });
+        results.push({
+          leadId: recipient.leadId ?? null,
+          ok: true,
+          recipient: recipient.to,
+          result
+        });
+        successCount += 1;
+      } catch (error) {
+        results.push({
+          leadId: recipient.leadId ?? null,
+          message: readErrorMessage(error),
+          ok: false,
+          recipient: recipient.to
+        });
+      }
+    }
+
+    const lastSuccess = [...results].reverse().find((item) => item.ok)?.result ?? null;
+
+    return {
+      ...(lastSuccess ?? { ok: false, scheduled: true, scheduledAt: input.scheduledAt }),
+      failureCount: results.length - successCount,
+      ok: successCount === results.length,
+      results,
+      scheduled: true,
+      scheduledAt: input.scheduledAt,
+      successCount,
+      totalCount: results.length
+    };
+  }
+
+  async sendEmailBatch(userId: string, input: GmailBatchSendInput) {
+    if (!input.confirm) {
+      throw new BadRequestException("User confirmation is required before sending Gmail");
+    }
+    if (!input.recipients.length) {
+      throw new BadRequestException("At least one recipient is required");
+    }
+
+    const results: Array<{
+      leadId: string | null;
+      message?: string;
+      ok: boolean;
+      recipient: string;
+      result?: Awaited<ReturnType<GmailMessageService["sendEmail"]>>;
+    }> = [];
+    let successCount = 0;
+
+    await this.assertBatchRecipientsReady(userId, input.recipients);
+    await this.assertWithinBatchSendRateLimit(userId, input.recipients.length, new Date());
+
+    for (const recipient of input.recipients) {
+      try {
+        const result = await this.sendEmail(
+          userId,
+          {
+            body: input.body,
+            confirm: true,
+            leadId: recipient.leadId,
+            replyTo: input.replyTo,
+            subject: input.subject,
+            to: recipient.to
+          },
+          {
+            // Explicit multi-recipient confirmation is a single user action.
+            // Keep daily-limit checks, but do not let the per-send cooldown
+            // block the second recipient immediately after the first succeeds.
+            ignoreMinInterval: successCount > 0,
+            skipRecipientDomainValidation: true
+          }
+        );
+        results.push({
+          leadId: recipient.leadId ?? null,
+          ok: true,
+          recipient: recipient.to,
+          result
+        });
+        successCount += 1;
+      } catch (error) {
+        results.push({
+          leadId: recipient.leadId ?? null,
+          message: readErrorMessage(error),
+          ok: false,
+          recipient: recipient.to
+        });
+      }
+    }
+
+    const lastSuccess = [...results].reverse().find((item) => item.ok)?.result ?? null;
+
+    return {
+      ...(lastSuccess ?? { ok: false }),
+      failureCount: results.length - successCount,
+      ok: successCount === results.length,
+      results,
+      successCount,
+      totalCount: results.length
+    };
+  }
+
+  async processScheduledSends(input: { limit?: number; now?: Date } = {}) {
+    const now = input.now ?? new Date();
+    const limit = Math.min(Math.max(input.limit ?? 25, 1), 100);
+    const dueLogs = await this.prisma.sendLog.findMany({
+      where: {
+        status: "scheduled",
+        scheduledAt: { lte: now },
+        recipientEmail: { not: null }
+      },
+      orderBy: { scheduledAt: "asc" },
+      take: limit,
+      include: {
+        draft: {
+          include: {
+            lead: {
+              select: {
+                id: true,
+                taskId: true,
+                task: {
+                  select: { userId: true }
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+
+    let sentCount = 0;
+    let failedCount = 0;
+    let deferredCount = 0;
+
+    for (const dueLog of dueLogs) {
+      const claimed = await this.prisma.sendLog.updateMany({
+        where: { id: dueLog.id, status: "scheduled" },
+        data: { lastError: null, status: "pending" }
+      });
+      if (claimed.count === 0) {
+        continue;
+      }
+
+      const userId = dueLog.draft.lead.task.userId;
+      const lead = {
+        id: dueLog.draft.lead.id,
+        taskId: dueLog.draft.lead.taskId
+      };
+      const recipientEmail = dueLog.recipientEmail;
+      if (!recipientEmail) {
+        failedCount += 1;
+        await this.markScheduledSendFailed(dueLog.id, dueLog.draft.id, "Missing recipient email");
+        continue;
+      }
+
+      try {
+        await this.assertWithinSendRateLimit(userId, now);
+      } catch (error) {
+        if (isMinIntervalRateLimitError(error)) {
+          deferredCount += 1;
+          await this.prisma.sendLog.update({
+            where: { id: dueLog.id },
+            data: {
+              lastError: readErrorMessage(error),
+              scheduledAt: addMinutes(now, 1),
+              status: "scheduled"
+            }
+          });
+          continue;
+        }
+
+        failedCount += 1;
+        await this.markScheduledSendFailed(dueLog.id, dueLog.draft.id, readErrorMessage(error));
+        continue;
+      }
+
+      try {
+        const account = await this.getActiveAccount(userId);
+        await this.assertRecipientDomainCanReceiveMail(recipientEmail);
+        const localDraft = await this.prisma.outreachDraft.update({
+          where: { id: dueLog.draft.id },
+          data: { status: "sending" }
+        });
+
+        await this.deliverPreparedEmail(
+          userId,
+          {
+            body: localDraft.body,
+            leadId: localDraft.leadId,
+            replyTo: dueLog.replyTo ?? undefined,
+            subject: localDraft.subject,
+            to: recipientEmail
+          },
+          {
+            account,
+            lead,
+            localDraft,
+            pendingSendLog: dueLog
+          }
+        );
+        sentCount += 1;
+      } catch (error) {
+        failedCount += 1;
+        await this.markScheduledSendFailed(dueLog.id, dueLog.draft.id, readErrorMessage(error));
+      }
+    }
+
+    return {
+      ok: true,
+      checkedCount: dueLogs.length,
+      deferredCount,
+      failedCount,
+      sentCount
     };
   }
 
@@ -370,7 +760,9 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
       ok: true,
       folder,
       account: { email: account.email },
-      messages: messages.filter((message): message is NonNullable<typeof message> => Boolean(message)),
+      messages: messages.filter((message): message is NonNullable<typeof message> =>
+        Boolean(message)
+      ),
       nextPageToken: listResponse.nextPageToken ?? null,
       total: listResponse.resultSizeEstimate ?? messages.length
     };
@@ -497,7 +889,12 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
         });
         result.classifiedReplies += 1;
 
-        const workflowResult = await this.applyReplyWorkflow(userId, thread.draft.lead, classification, parsed.receivedAt);
+        const workflowResult = await this.applyReplyWorkflow(
+          userId,
+          thread.draft.lead,
+          classification,
+          parsed.receivedAt
+        );
         result.followupsCreated += workflowResult.followupsCreated;
         result.stageEventsWritten += workflowResult.stageEventsWritten;
         result.analyticsWritten += workflowResult.analyticsWritten;
@@ -677,14 +1074,73 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
     ]);
   }
 
-  private async assertWithinSendRateLimit(userId: string, now = new Date()) {
+  private async markOutreachWorkflowScheduled(
+    lead: OwnedLead,
+    output: {
+      scheduledAt: Date;
+      sendLogId: string;
+    }
+  ) {
+    const now = new Date();
+    await Promise.all([
+      this.prisma.agentStep.updateMany({
+        where: { taskId: lead.taskId, nodeName: "wait_email_confirmation" },
+        data: {
+          status: "completed",
+          output: {
+            confirmed: true,
+            leadId: lead.id,
+            scheduledAt: output.scheduledAt.toISOString()
+          },
+          endedAt: now,
+          error: null
+        }
+      }),
+      this.prisma.agentStep.updateMany({
+        where: { taskId: lead.taskId, nodeName: "send_gmail" },
+        data: {
+          status: "pending",
+          output: {
+            leadId: lead.id,
+            scheduledAt: output.scheduledAt.toISOString(),
+            sendLogId: output.sendLogId
+          },
+          startedAt: null,
+          endedAt: null,
+          error: null
+        }
+      })
+    ]);
+  }
+
+  private async markScheduledSendFailed(sendLogId: string, draftId: string, message: string) {
+    await Promise.all([
+      this.prisma.sendLog.update({
+        where: { id: sendLogId },
+        data: {
+          lastError: message,
+          status: "failed"
+        }
+      }),
+      this.prisma.outreachDraft.update({
+        where: { id: draftId },
+        data: { status: "failed" }
+      })
+    ]);
+  }
+
+  private async assertWithinSendRateLimit(
+    userId: string,
+    now = new Date(),
+    options: { ignoreMinInterval?: boolean } = {}
+  ) {
     const dailyLimit = readNonNegativeIntegerEnv("GMAIL_DAILY_SEND_LIMIT", 80);
     if (dailyLimit > 0) {
       const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
       const sentInWindow = await this.prisma.sendLog.count({
         where: {
           status: "sent",
-          createdAt: { gte: since },
+          sentAt: { gte: since },
           draft: {
             lead: {
               task: { userId }
@@ -702,29 +1158,61 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
     if (minIntervalMs <= 0) {
       return;
     }
+    if (options.ignoreMinInterval) {
+      return;
+    }
 
     const latestSend = await this.prisma.sendLog.findFirst({
       where: {
         status: "sent",
+        sentAt: { not: null },
         draft: {
           lead: {
             task: { userId }
           }
         }
       },
-      orderBy: { createdAt: "desc" },
-      select: { createdAt: true }
+      orderBy: { sentAt: "desc" },
+      select: { sentAt: true }
     });
 
     if (!latestSend) {
       return;
     }
 
-    const elapsedMs = now.getTime() - latestSend.createdAt.getTime();
+    const elapsedMs = now.getTime() - latestSend.sentAt!.getTime();
     if (elapsedMs < minIntervalMs) {
       const waitSeconds = Math.max(1, Math.ceil((minIntervalMs - elapsedMs) / 1000));
-      throw new BadRequestException(`Gmail send is rate limited. Please wait ${waitSeconds} seconds`);
+      throw new BadRequestException(
+        `Gmail send is rate limited. Please wait ${waitSeconds} seconds`
+      );
     }
+  }
+
+  private async assertWithinBatchSendRateLimit(userId: string, requestedCount: number, now: Date) {
+    const dailyLimit = readNonNegativeIntegerEnv("GMAIL_DAILY_SEND_LIMIT", 80);
+    if (dailyLimit > 0) {
+      const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const sentInWindow = await this.prisma.sendLog.count({
+        where: {
+          status: "sent",
+          sentAt: { gte: since },
+          draft: {
+            lead: {
+              task: { userId }
+            }
+          }
+        }
+      });
+
+      if (sentInWindow + requestedCount > dailyLimit) {
+        throw new BadRequestException(
+          `Gmail daily send limit would be exceeded (${sentInWindow}/${dailyLimit} sent, ${requestedCount} requested)`
+        );
+      }
+    }
+
+    await this.assertWithinSendRateLimit(userId, now);
   }
 
   private async refreshAccessToken(refreshTokenEncrypted: string) {
@@ -743,10 +1231,46 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
     const payload = (await response.json()) as GoogleRefreshResponse;
 
     if (!response.ok || !payload.access_token) {
-      throw new BadRequestException(formatGoogleError("Google refresh token failed", response.status, payload));
+      throw new BadRequestException(
+        formatGoogleError("Google refresh token failed", response.status, payload)
+      );
     }
 
     return payload.access_token;
+  }
+
+  private async assertBatchRecipientsReady(
+    userId: string,
+    recipients: GmailBatchRecipient[],
+    options: { requireLeadId?: boolean } = {}
+  ) {
+    const failures: string[] = [];
+
+    for (const recipient of recipients) {
+      if (options.requireLeadId && !recipient.leadId) {
+        failures.push(`${recipient.to}（缺少客户 ID，无法定时发送）`);
+      }
+
+      if (recipient.leadId) {
+        try {
+          await this.ensureLeadForUser(userId, recipient.leadId);
+        } catch {
+          failures.push(`${recipient.to}（客户不属于当前账号或已不存在）`);
+        }
+      }
+
+      try {
+        await this.assertRecipientDomainCanReceiveMail(recipient.to);
+      } catch (error) {
+        failures.push(`${recipient.to}（${formatRecipientDomainError(recipient.to, error)}）`);
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new BadRequestException(
+        `以下收件人邮箱不可用，已取消本次批量发送：${failures.join("；")}`
+      );
+    }
   }
 
   private async assertRecipientDomainCanReceiveMail(email: string) {
@@ -786,7 +1310,9 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
 
     if (!response.ok) {
       const message = payload.error?.message ? `: ${payload.error.message}` : "";
-      throw new BadRequestException(`Gmail API request failed with HTTP ${response.status}${message}`);
+      throw new BadRequestException(
+        `Gmail API request failed with HTTP ${response.status}${message}`
+      );
     }
 
     return payload;
@@ -803,7 +1329,9 @@ export class GmailMessageService implements OnModuleInit, OnModuleDestroy {
 
     if (!response.ok) {
       const message = payload.error?.message ? `: ${payload.error.message}` : "";
-      throw new BadRequestException(`Gmail API request failed with HTTP ${response.status}${message}`);
+      throw new BadRequestException(
+        `Gmail API request failed with HTTP ${response.status}${message}`
+      );
     }
 
     return payload;
@@ -978,7 +1506,9 @@ const replyWorkflowByCategory: Record<
   }
 };
 
-function isServiceOptions(value: ReplyClassifier | GmailMessageServiceOptions): value is GmailMessageServiceOptions {
+function isServiceOptions(
+  value: ReplyClassifier | GmailMessageServiceOptions
+): value is GmailMessageServiceOptions {
   return Boolean(value && ("fetchImpl" in value || "aiService" in value));
 }
 
@@ -1017,7 +1547,9 @@ function parseGmailThreadMessage(message: GmailThreadMessage): ParsedGmailReply 
 }
 
 function getHeader(headers: Array<{ name?: string; value?: string }>, name: string) {
-  return headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value?.trim() ?? "";
+  return (
+    headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value?.trim() ?? ""
+  );
 }
 
 function extractEmailAddress(value: string) {
@@ -1122,14 +1654,21 @@ function decodeBase64Url(value: string) {
 }
 
 function stripHtml(value: string) {
-  return value.replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ");
+  return value
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
 }
 
 function normalizeWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function classifyReplyLocally(input: { subject?: string; body: string; sender?: string }): ReplyClassificationResult {
+function classifyReplyLocally(input: {
+  subject?: string;
+  body: string;
+  sender?: string;
+}): ReplyClassificationResult {
   const text = `${input.subject ?? ""} ${input.body}`.toLowerCase();
 
   if (/(unsubscribe|remove me|opt out|stop email|退订|取消订阅)/i.test(text)) {
@@ -1203,6 +1742,50 @@ function classifyReplyLocally(input: { subject?: string; body: string; sender?: 
 
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function normalizeScheduledAt(value: Date) {
+  const scheduledAt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(scheduledAt.getTime())) {
+    throw new BadRequestException("Invalid scheduled Gmail send time");
+  }
+
+  const minimumScheduledAt = new Date(Date.now() + 60_000);
+  if (scheduledAt.getTime() < minimumScheduledAt.getTime()) {
+    throw new BadRequestException(
+      "Scheduled Gmail send time must be at least 1 minute in the future"
+    );
+  }
+
+  return scheduledAt;
+}
+
+function isMinIntervalRateLimitError(error: unknown) {
+  return error instanceof BadRequestException && readErrorMessage(error).includes("rate limited");
+}
+
+function readErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return "Gmail send failed";
+}
+
+function formatRecipientDomainError(email: string, error: unknown) {
+  const domain = email.split("@").pop()?.trim().toLowerCase() ?? "unknown";
+  const message = readErrorMessage(error);
+  if (message.includes("has no valid MX record")) {
+    return `域名 ${domain} 不存在或没有有效 MX 记录`;
+  }
+  if (message.includes("does not accept email")) {
+    return `域名 ${domain} 不接收邮件`;
+  }
+  if (message.includes("domain is invalid")) {
+    return "邮箱域名无效";
+  }
+
+  return message;
 }
 
 export function buildMimeMessage(input: {
