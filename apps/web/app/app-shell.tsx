@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   BarChart3,
-  Bell,
   Bot,
   BriefcaseBusiness,
   ChevronDown,
@@ -50,9 +49,7 @@ type NavItem = {
 
 const navGroups: Array<{ label?: string; items: NavItem[] }> = [
   {
-    items: [
-      { label: "AI 外贸员", href: "/", icon: Bot, letter: "A", badge: "New", featured: true }
-    ]
+    items: [{ label: "AI 外贸员", href: "/", icon: Bot, letter: "A", badge: "New", featured: true }]
   },
   {
     label: "线索中心",
@@ -101,7 +98,9 @@ export function AppShell({
     "leadApp",
     isLetterFrame ? "letterFrame" : "",
     sidebarCollapsed ? "sidebarCollapsed" : ""
-  ].filter(Boolean).join(" ");
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -179,20 +178,14 @@ export function AppShell({
         </div>
 
         <div className="appTopActions">
-          <div className="topAction">
-            <span className="topIcon hasDot">
-              <Bell aria-hidden="true" size={18} />
-            </span>
-            <span>消息</span>
-          </div>
-          <button className="toolboxButton" type="button">
-            <BriefcaseBusiness aria-hidden="true" size={18} />
-            工具箱
-          </button>
           <div className="creditPill" aria-label="账户积分">
             <span>积分 0</span>
-            <span className="creditDivider" aria-hidden="true">|</span>
-            <a className="creditUpgrade" href="#upgrade">升级</a>
+            <span className="creditDivider" aria-hidden="true">
+              |
+            </span>
+            <a className="creditUpgrade" href="#upgrade">
+              升级
+            </a>
           </div>
           <div className="accountMenu" ref={accountMenuRef}>
             <button
@@ -247,11 +240,7 @@ export function AppShell({
                 if (item.href === activePath) classes.push("active");
 
                 return (
-                  <a
-                    className={classes.join(" ")}
-                    href={item.href}
-                    key={item.href}
-                  >
+                  <a className={classes.join(" ")} href={item.href} key={item.href}>
                     <span className={isLetterFrame ? "navIcon letterNavIcon" : "navIcon"}>
                       {isLetterFrame ? item.letter : <Icon aria-hidden="true" size={18} />}
                     </span>
@@ -270,7 +259,11 @@ export function AppShell({
           title={sidebarCollapsed ? "展开菜单" : "收起菜单"}
           onClick={() => setSidebarCollapsed((current) => !current)}
         >
-          {sidebarCollapsed ? <ChevronRight aria-hidden="true" size={16} /> : <ChevronLeft aria-hidden="true" size={16} />}
+          {sidebarCollapsed ? (
+            <ChevronRight aria-hidden="true" size={16} />
+          ) : (
+            <ChevronLeft aria-hidden="true" size={16} />
+          )}
           <span>{sidebarCollapsed ? "展开" : "收起菜单"}</span>
         </button>
       </aside>

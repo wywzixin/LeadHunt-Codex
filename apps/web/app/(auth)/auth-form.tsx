@@ -16,7 +16,7 @@ import {
   UserRound
 } from "lucide-react";
 import Link from "next/link";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 type AuthMode = "login" | "register" | "forgot";
 
@@ -66,6 +66,13 @@ export function AuthForm({ mode }: AuthFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+  useEffect(() => {
+    const googleStatus = readGoogleAuthStatus();
+    if (googleStatus) {
+      setStatus(googleStatus);
+    }
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -130,10 +137,18 @@ export function AuthForm({ mode }: AuthFormProps) {
           </div>
 
           <div className="authFeatureList">
-            <Feature icon={<Search />} title="精准获客" text="AI 高级搜索，快速找到高意向海外客户" />
+            <Feature
+              icon={<Search />}
+              title="精准获客"
+              text="AI 高级搜索，快速找到高意向海外客户"
+            />
             <Feature icon={<Send />} title="智能触达" text="个性化邮件触达，提高打开率与回复率" />
             <Feature icon={<ContactRound />} title="客户管理" text="CRM 全流程管理，跟进更高效" />
-            <Feature icon={<BarChart3 />} title="数据驱动" text="多维度数据看板，优化您的营销策略" />
+            <Feature
+              icon={<BarChart3 />}
+              title="数据驱动"
+              text="多维度数据看板，优化您的营销策略"
+            />
           </div>
 
           <div className="trustStrip">
@@ -195,7 +210,13 @@ export function AuthForm({ mode }: AuthFormProps) {
                   <span className="authInputIcon">
                     <Mail />
                   </span>
-                  <input autoComplete="email" name="email" placeholder="请输入您的邮箱地址" required type="email" />
+                  <input
+                    autoComplete="email"
+                    name="email"
+                    placeholder="请输入您的邮箱地址"
+                    required
+                    type="email"
+                  />
                   <span />
                 </div>
               </label>
@@ -324,4 +345,27 @@ function getSafeNextPath() {
   }
 
   return next;
+}
+
+function readGoogleAuthStatus() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("google") !== "error") {
+    return "";
+  }
+
+  const reason = params.get("reason");
+  if (reason === "network") {
+    return "Google 登录失败：后端无法连接 Google 服务，请检查代理后重试。";
+  }
+  if (reason === "config" || reason === "redirect_uri") {
+    return "Google 登录配置异常，请检查 OAuth 客户端和回调地址。";
+  }
+  if (reason === "state") {
+    return "Google 登录状态已过期，请重新点击 Google 登录。";
+  }
+  if (reason === "profile") {
+    return "Google 账号资料读取失败，请换一个账号或稍后重试。";
+  }
+
+  return "Google 登录失败，请稍后重试。";
 }

@@ -53,11 +53,20 @@ describe("AuthController", () => {
     const { controller, authService } = createController();
     const response = responseMock();
 
-    const result = await controller.register({ email: "buyer@example.com", password: "secure-password" }, response);
+    const result = await controller.register(
+      { email: "buyer@example.com", password: "secure-password" },
+      response
+    );
 
     expect(result).toEqual({ user: { id: "user-1", email: "buyer@example.com" } });
-    expect(authService.register).toHaveBeenCalledWith({ email: "buyer@example.com", password: "secure-password" });
-    expect(response.setHeader).toHaveBeenCalledWith("Set-Cookie", expect.stringContaining("lh_session=session-1.token-1"));
+    expect(authService.register).toHaveBeenCalledWith({
+      email: "buyer@example.com",
+      password: "secure-password"
+    });
+    expect(response.setHeader).toHaveBeenCalledWith(
+      "Set-Cookie",
+      expect.stringContaining("lh_session=session-1.token-1")
+    );
   });
 
   it("logs in and sets a session cookie", async () => {
@@ -66,19 +75,31 @@ describe("AuthController", () => {
 
     await controller.login({ email: "buyer@example.com", password: "secure-password" }, response);
 
-    expect(authService.login).toHaveBeenCalledWith({ email: "buyer@example.com", password: "secure-password" });
-    expect(response.setHeader).toHaveBeenCalledWith("Set-Cookie", expect.stringContaining("lh_session=session-1.token-1"));
+    expect(authService.login).toHaveBeenCalledWith({
+      email: "buyer@example.com",
+      password: "secure-password"
+    });
+    expect(response.setHeader).toHaveBeenCalledWith(
+      "Set-Cookie",
+      expect.stringContaining("lh_session=session-1.token-1")
+    );
   });
 
   it("logs out and clears the session cookie", async () => {
     const { controller, authService } = createController();
     const response = responseMock();
 
-    const result = await controller.logout(requestWithCookie("lh_session=session-1.token-1"), response);
+    const result = await controller.logout(
+      requestWithCookie("lh_session=session-1.token-1"),
+      response
+    );
 
     expect(result).toEqual({ ok: true });
     expect(authService.logout).toHaveBeenCalledWith({ sessionId: "session-1", token: "token-1" });
-    expect(response.setHeader).toHaveBeenCalledWith("Set-Cookie", expect.stringContaining("Max-Age=0"));
+    expect(response.setHeader).toHaveBeenCalledWith(
+      "Set-Cookie",
+      expect.stringContaining("Max-Age=0")
+    );
   });
 
   it("supports forgot-password and password-reset compatibility routes", async () => {
@@ -94,7 +115,10 @@ describe("AuthController", () => {
     const { controller, authService } = createController();
 
     await expect(
-      controller.resetPassword({ token: "valid-reset-token-value", password: "new-secure-password" })
+      controller.resetPassword({
+        token: "valid-reset-token-value",
+        password: "new-secure-password"
+      })
     ).resolves.toEqual({ ok: true });
     expect(authService.resetPassword).toHaveBeenCalledWith({
       token: "valid-reset-token-value",
@@ -108,8 +132,13 @@ describe("AuthController", () => {
 
     controller.google(response);
 
-    expect(response.setHeader).toHaveBeenCalledWith("Set-Cookie", expect.stringContaining("lh_google_auth_state=state-token"));
-    expect(response.redirect).toHaveBeenCalledWith("https://accounts.google.com/o/oauth2/v2/auth?state=state-token");
+    expect(response.setHeader).toHaveBeenCalledWith(
+      "Set-Cookie",
+      expect.stringContaining("lh_google_auth_state=state-token")
+    );
+    expect(response.redirect).toHaveBeenCalledWith(
+      "https://accounts.google.com/o/oauth2/v2/auth?state=state-token"
+    );
   });
 
   it("handles Google callback, sets session cookie, and redirects to the web app", async () => {
@@ -131,5 +160,27 @@ describe("AuthController", () => {
       expect.stringContaining("lh_google_auth_state=")
     ]);
     expect(response.redirect).toHaveBeenCalledWith("http://localhost:3000");
+  });
+
+  it("redirects Google callback failures back to login with a readable reason", async () => {
+    const { controller, authService } = createController();
+    const response = responseMock();
+    authService.loginWithGoogleCallback.mockRejectedValue(
+      new Error("Google token exchange failed: fetch failed")
+    );
+
+    await controller.googleCallback(
+      requestWithCookie("lh_google_auth_state=state-token"),
+      { code: "google-code", state: "state-token" },
+      response
+    );
+
+    expect(response.setHeader).toHaveBeenCalledWith(
+      "Set-Cookie",
+      expect.stringContaining("lh_google_auth_state=")
+    );
+    expect(response.redirect).toHaveBeenCalledWith(
+      "http://localhost:3000/login?google=error&reason=network"
+    );
   });
 });

@@ -18,7 +18,11 @@
         "fill",
         "take_screenshot",
         "wait_for",
-        "new_page"
+        "new_page",
+        "list_network_requests",
+        "get_network_request",
+        "emulate",
+        "type_text"
       ]
     }
   }
