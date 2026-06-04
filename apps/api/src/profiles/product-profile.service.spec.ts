@@ -6,6 +6,7 @@ function createPrismaMock() {
   return {
     productProfile: {
       findUnique: vi.fn(),
+      create: vi.fn(),
       upsert: vi.fn()
     }
   };
@@ -22,6 +23,26 @@ describe("ProductProfileService", () => {
 
   it("requires authentication when reading", async () => {
     await expect(service.get(null)).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it("creates the starter product profile when a user has not saved one yet", async () => {
+    prisma.productProfile.findUnique.mockResolvedValue(null);
+    prisma.productProfile.create.mockResolvedValue({
+      id: "profile-default",
+      userId: "user-1",
+      websiteUrl: "https://telecorenet.com/"
+    });
+
+    const result = await service.get("user-1");
+
+    expect(result.websiteUrl).toBe("https://telecorenet.com/");
+    expect(prisma.productProfile.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: "user-1",
+        websiteUrl: "https://telecorenet.com/",
+        productPageUrl: "https://telecorenet.com/products"
+      })
+    });
   });
 
   it("saves a valid product profile", async () => {

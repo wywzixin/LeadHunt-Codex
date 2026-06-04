@@ -177,7 +177,7 @@ export default function CampaignsPage() {
       name: "当前邮件另存模板",
       subject,
       body,
-      owner: "王亚伟",
+      owner: "当前账号",
       createdAt: new Date().toISOString().slice(0, 10),
       summary: "从发邮件页面保存的自建模板。"
     };

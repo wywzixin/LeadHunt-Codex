@@ -33,6 +33,9 @@ function createController() {
     approveCandidatesForUser: vi
       .fn()
       .mockResolvedValue({ ok: true, approvedCount: 1, draftCount: 1 }),
+    rejectCandidatesForUser: vi
+      .fn()
+      .mockResolvedValue({ ok: true, rejectedCount: 1, rejectedLeadIds: [] }),
     softDeleteTaskForUser: vi.fn().mockResolvedValue({ ok: true, taskId: "task-1" }),
     updateTaskStatusForUser: vi.fn().mockResolvedValue({ id: "task-1", status: "paused" })
   };
@@ -80,6 +83,10 @@ describe("LeadTaskController", () => {
     await controller.approve(requestWithCookie(), "task-1", {
       leadIds: ["11111111-1111-4111-8111-111111111111"]
     });
+    await controller.reject(requestWithCookie(), "task-1", {
+      leadIds: ["22222222-2222-4222-8222-222222222222"],
+      reason: "Not a buyer"
+    });
     await controller.pause(requestWithCookie(), "task-1");
     await controller.resume(requestWithCookie(), "task-1");
     await controller.cancel(requestWithCookie(), "task-1");
@@ -95,6 +102,10 @@ describe("LeadTaskController", () => {
     expect(workflowService.approveCandidatesForUser).toHaveBeenCalledWith("user-1", "task-1", {
       leadIds: ["11111111-1111-4111-8111-111111111111"]
     });
+    expect(workflowService.rejectCandidatesForUser).toHaveBeenCalledWith("user-1", "task-1", {
+      leadIds: ["22222222-2222-4222-8222-222222222222"],
+      reason: "Not a buyer"
+    });
     expect(workflowService.updateTaskStatusForUser).toHaveBeenCalledWith(
       "user-1",
       "task-1",
@@ -109,6 +120,15 @@ describe("LeadTaskController", () => {
       controller.approve(requestWithCookie(), "task-1", { leadIds: ["not-a-uuid"] })
     ).rejects.toThrow(BadRequestException);
     expect(workflowService.approveCandidatesForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid candidate rejection payloads", async () => {
+    const { controller, workflowService } = createController();
+
+    await expect(
+      controller.reject(requestWithCookie(), "task-1", { leadIds: ["not-a-uuid"] })
+    ).rejects.toThrow(BadRequestException);
+    expect(workflowService.rejectCandidatesForUser).not.toHaveBeenCalled();
   });
 
   it("rejects invalid search execution payloads", async () => {

@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { createGmailFetchImpl, type GmailFetchLike } from "../gmail/gmail-fetch.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { defaultCustomerProfile, defaultProductProfile } from "../profiles/default-profiles.js";
 import type { AuthPayload, AuthUser } from "./auth.types.js";
 import type { SessionCookie } from "./session-cookie.js";
 
@@ -94,6 +95,12 @@ export class AuthService {
             providerUserId: email,
             email
           }
+        },
+        productProfile: {
+          create: defaultProductProfile
+        },
+        customerProfile: {
+          create: defaultCustomerProfile
         }
       }
     });
@@ -303,6 +310,12 @@ export class AuthService {
               providerUserId,
               email
             }
+          },
+          productProfile: {
+            create: defaultProductProfile
+          },
+          customerProfile: {
+            create: defaultCustomerProfile
           }
         }
       });

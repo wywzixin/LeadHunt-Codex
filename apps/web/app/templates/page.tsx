@@ -147,7 +147,7 @@ export default function TemplatesPage() {
       const nextTemplate: MailTemplate = {
         id: `custom-${Date.now()}`,
         type: "custom",
-        owner: "王亚伟",
+        owner: "当前账号",
         createdAt: new Date().toISOString().slice(0, 10),
         ...cleanDraft
       };

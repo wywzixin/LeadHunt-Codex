@@ -1,0 +1,796 @@
+{
+  "library_name": "LeadHunt Advanced Search Strategy Library",
+  "display_name_cn": "LeadHunt 高级搜索策略库（原 Google Search 指令库）",
+  "version": "v1.0",
+  "generated_at": "2026-04-28",
+  "positioning": "This is not a complete Google operator collection. It is a maintainable search strategy library for telecom equipment lead generation, using Brave Search API as the V1 execution engine.",
+  "official_sources": [
+    {
+      "name": "Brave Search API Search Operators",
+      "url": "https://api-dashboard.search.brave.com/documentation/resources/search-operators"
+    },
+    {
+      "name": "Google Search Help - Refine Google searches",
+      "url": "https://support.google.com/websearch/answer/2466433"
+    }
+  ],
+  "compatibility_model": {
+    "operator_source_values": [
+      "google_official",
+      "brave_official",
+      "common_seo"
+    ],
+    "execution_status_values": [
+      "supported",
+      "experimental",
+      "manual_only",
+      "disabled"
+    ],
+    "notes": [
+      "V1 auto execution prioritizes Brave official operators.",
+      "Brave search operators are still treated as experimental and must be measured continuously.",
+      "Google/manual SEO operators can be stored as strategy knowledge but should not be sent to Brave automatically unless tested."
+    ]
+  },
+  "keyword_expansion_model": {
+    "description_cn": "搜索前先做关键词扩展，再套高级搜索策略模板。扩词结果需要按维度展示，也要写入每条 query 的 keyword_groups。",
+    "dimensions": [
+      {
+        "id": "main_product",
+        "name_cn": "用户输入的主产品",
+        "description_cn": "从用户输入、产品画像或独立站中识别核心产品。",
+        "examples": [
+          "telecom equipment",
+          "RRU",
+          "BBU",
+          "microwave backhaul",
+          "telecom power"
+        ]
+      },
+      {
+        "id": "related_products",
+        "name_cn": "同类产品 / 细分品类",
+        "description_cn": "把主产品扩展成相关产品、型号、模块、应用品类。",
+        "examples": [
+          "AAU",
+          "remote radio unit",
+          "baseband unit",
+          "rectifier module",
+          "optical module",
+          "telecom battery"
+        ]
+      },
+      {
+        "id": "long_tail_product_terms",
+        "name_cn": "商品长尾词",
+        "description_cn": "生成更接近买家搜索、产品目录、库存页和采购清单里的具体产品名称。",
+        "examples": [
+          "Huawei RRU spare parts",
+          "ZTE BBU boards",
+          "Ericsson radio unit stock",
+          "telecom power rectifier module",
+          "microwave link equipment supplier"
+        ]
+      },
+      {
+        "id": "upstream_downstream_terms",
+        "name_cn": "上下游词",
+        "description_cn": "扩展零部件、技术材料、配套设备、供应链和服务环节相关词。",
+        "examples": [
+          "power module",
+          "RF module",
+          "antenna feeder",
+          "site power",
+          "IBS solution",
+          "network maintenance",
+          "equipment refurbishment"
+        ]
+      },
+      {
+        "id": "purchase_intent_terms",
+        "name_cn": "客户采购意图词",
+        "description_cn": "围绕采购、进口、批发、经销、现货、供应、项目交付等商业意图扩展。",
+        "examples": [
+          "distributor",
+          "stockist",
+          "importer",
+          "trading company",
+          "purchasing",
+          "supplier",
+          "wholesale",
+          "project supply",
+          "spare parts availability"
+        ]
+      },
+      {
+        "id": "target_market_terms",
+        "name_cn": "目标市场词",
+        "description_cn": "结合国家、地区、城市、国家域名、loc operator 和搜索 API country 参数生成本地化搜索词。",
+        "examples": [
+          "UAE",
+          "Dubai",
+          "Abu Dhabi",
+          "Saudi Arabia",
+          "Riyadh",
+          "Jeddah",
+          "Nigeria",
+          "Lagos",
+          "Kenya",
+          "Nairobi"
+        ]
+      },
+      {
+        "id": "industry_scenario_terms",
+        "name_cn": "行业场景词",
+        "description_cn": "根据产品使用场景、应用行业、解决方案方向扩展。",
+        "examples": [
+          "telecom infrastructure",
+          "network rollout",
+          "site maintenance",
+          "microwave link",
+          "tower power",
+          "IBS service",
+          "equipment replacement",
+          "lifecycle extension"
+        ]
+      }
+    ],
+    "telecom_expansion_example": {
+      "main_product": [
+        "telecom equipment"
+      ],
+      "related_products": [
+        "RRU",
+        "BBU",
+        "AAU",
+        "microwave backhaul",
+        "telecom power"
+      ],
+      "long_tail_product_terms": [
+        "Huawei RRU spare parts",
+        "ZTE BBU boards",
+        "telecom power rectifier module",
+        "microwave link equipment supplier"
+      ],
+      "upstream_downstream_terms": [
+        "power module",
+        "antenna feeder",
+        "IBS solution",
+        "network maintenance",
+        "equipment refurbishment"
+      ],
+      "purchase_intent_terms": [
+        "distributor",
+        "stockist",
+        "system integrator",
+        "telecom contractor",
+        "importer",
+        "purchasing"
+      ],
+      "target_market_terms": [
+        "UAE",
+        "Dubai",
+        "Saudi Arabia",
+        "Riyadh"
+      ],
+      "industry_scenario_terms": [
+        "telecom infrastructure",
+        "network rollout",
+        "site maintenance",
+        "spare parts availability"
+      ]
+    }
+  },
+  "operators": [
+    {
+      "id": "exact_phrase",
+      "syntax": "\"keyword phrase\"",
+      "operator_source": [
+        "brave_official",
+        "google_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": true,
+      "brave_api_auto_execution": true,
+      "description_cn": "精确匹配品牌、产品、客户类型或行业短语。"
+    },
+    {
+      "id": "exclude_term",
+      "syntax": "-term",
+      "operator_source": [
+        "brave_official",
+        "google_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": true,
+      "brave_api_auto_execution": true,
+      "description_cn": "排除招聘、新闻、培训、消费者、论坛、平台和中国供应商等干扰结果。"
+    },
+    {
+      "id": "or_group",
+      "syntax": "A OR B",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": true,
+      "brave_api_auto_execution": true,
+      "description_cn": "扩展同义词、品牌词、产品词和客户类型词。"
+    },
+    {
+      "id": "and_group",
+      "syntax": "A AND B",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": true,
+      "brave_api_auto_execution": true,
+      "description_cn": "要求多个概念同时命中。"
+    },
+    {
+      "id": "not_group",
+      "syntax": "A NOT B",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": true,
+      "brave_api_auto_execution": true,
+      "description_cn": "排除不需要的概念，通常优先用减号。"
+    },
+    {
+      "id": "site_filter",
+      "syntax": "site:.ae",
+      "operator_source": [
+        "brave_official",
+        "google_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": true,
+      "brave_api_auto_execution": true,
+      "description_cn": "限制国家域名、行业网站或客户官网。"
+    },
+    {
+      "id": "filetype_filter",
+      "syntax": "filetype:pdf",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": true,
+      "brave_api_auto_execution": true,
+      "description_cn": "查找展商名单、产品目录、招标文件、公司介绍和资料表。"
+    },
+    {
+      "id": "extension_filter",
+      "syntax": "ext:pdf",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": false,
+      "brave_api_auto_execution": true,
+      "description_cn": "Brave 文档里的文件扩展名过滤。"
+    },
+    {
+      "id": "title_filter",
+      "syntax": "intitle:telecom",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": true,
+      "brave_api_auto_execution": true,
+      "description_cn": "要求页面标题命中行业或客户类型词。"
+    },
+    {
+      "id": "body_filter",
+      "syntax": "inbody:telecom",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": false,
+      "brave_api_auto_execution": true,
+      "description_cn": "要求页面正文命中产品词或客户词。"
+    },
+    {
+      "id": "page_filter",
+      "syntax": "inpage:telecom",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": false,
+      "brave_api_auto_execution": true,
+      "description_cn": "要求页面内容命中指定词，适合强化业务页面相关性。"
+    },
+    {
+      "id": "location_filter",
+      "syntax": "loc:ae",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": false,
+      "brave_api_auto_execution": true,
+      "description_cn": "Brave 搜索地区约束，需和 country 参数一起测试效果。"
+    },
+    {
+      "id": "language_filter",
+      "syntax": "lang:en",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": false,
+      "brave_api_auto_execution": true,
+      "description_cn": "限制语言，V1 默认英文。"
+    },
+    {
+      "id": "required_term",
+      "syntax": "+term",
+      "operator_source": [
+        "brave_official"
+      ],
+      "execution_status": "experimental",
+      "google_manual_search": false,
+      "brave_api_auto_execution": true,
+      "description_cn": "要求某个词必须出现，V1 谨慎使用。"
+    },
+    {
+      "id": "url_filter_common",
+      "syntax": "inurl:telecom",
+      "operator_source": [
+        "common_seo"
+      ],
+      "execution_status": "manual_only",
+      "google_manual_search": true,
+      "brave_api_auto_execution": false,
+      "description_cn": "Google / SEO 常见用法，不进入 V1 Brave 自动执行白名单。"
+    },
+    {
+      "id": "text_filter_common",
+      "syntax": "intext:telecom",
+      "operator_source": [
+        "common_seo"
+      ],
+      "execution_status": "manual_only",
+      "google_manual_search": true,
+      "brave_api_auto_execution": false,
+      "description_cn": "Google / SEO 常见用法，不进入 V1 Brave 自动执行白名单。"
+    },
+    {
+      "id": "all_operators_common",
+      "syntax": "allintitle: / allinurl: / allintext:",
+      "operator_source": [
+        "common_seo"
+      ],
+      "execution_status": "disabled",
+      "google_manual_search": true,
+      "brave_api_auto_execution": false,
+      "description_cn": "V1 不自动生成，后续按执行器兼容性测试。"
+    },
+    {
+      "id": "legacy_or_unstable_google_common",
+      "syntax": "before: / after: / AROUND() / related: / cache:",
+      "operator_source": [
+        "common_seo"
+      ],
+      "execution_status": "disabled",
+      "google_manual_search": true,
+      "brave_api_auto_execution": false,
+      "description_cn": "V1 不自动生成。"
+    }
+  ],
+  "keyword_pools": {
+    "brand_terms": [
+      "Huawei",
+      "ZTE",
+      "Ericsson",
+      "Nokia",
+      "Eltek",
+      "Delta",
+      "Vertiv"
+    ],
+    "product_terms": [
+      "RRU",
+      "BBU",
+      "AAU",
+      "remote radio unit",
+      "baseband unit",
+      "microwave backhaul",
+      "telecom power",
+      "rectifier",
+      "power module",
+      "telecom battery",
+      "optical module",
+      "OLT",
+      "board",
+      "spare parts",
+      "refurbished telecom equipment"
+    ],
+    "customer_type_terms": [
+      "telecom equipment distributor",
+      "telecom equipment stockist",
+      "telecom spare parts supplier",
+      "system integrator",
+      "telecom contractor",
+      "tower contractor",
+      "IBS contractor",
+      "network maintenance company",
+      "telecom service provider",
+      "telecom trading company",
+      "telecom importer"
+    ],
+    "scenario_terms": [
+      "project supply",
+      "network rollout",
+      "site maintenance",
+      "equipment replacement",
+      "spare parts availability",
+      "microwave link",
+      "telecom infrastructure",
+      "tower power",
+      "IBS solution",
+      "lifecycle extension"
+    ],
+    "region_terms": [
+      {
+        "market": "UAE",
+        "country_param": "ae",
+        "loc_operator": "loc:ae",
+        "site_tlds": [
+          "site:.ae"
+        ],
+        "aliases": [
+          "UAE",
+          "United Arab Emirates",
+          "Dubai",
+          "Abu Dhabi"
+        ]
+      },
+      {
+        "market": "Saudi Arabia",
+        "country_param": "sa",
+        "loc_operator": "loc:sa",
+        "site_tlds": [
+          "site:.sa"
+        ],
+        "aliases": [
+          "Saudi",
+          "Saudi Arabia",
+          "KSA",
+          "Riyadh",
+          "Jeddah"
+        ]
+      },
+      {
+        "market": "Nigeria",
+        "country_param": "ng",
+        "loc_operator": "loc:ng",
+        "site_tlds": [
+          "site:.ng"
+        ],
+        "aliases": [
+          "Nigeria",
+          "Lagos",
+          "Abuja"
+        ]
+      },
+      {
+        "market": "Kenya",
+        "country_param": "ke",
+        "loc_operator": "loc:ke",
+        "site_tlds": [
+          "site:.ke"
+        ],
+        "aliases": [
+          "Kenya",
+          "Nairobi"
+        ]
+      },
+      {
+        "market": "Brazil",
+        "country_param": "br",
+        "loc_operator": "loc:br",
+        "site_tlds": [
+          "site:.br"
+        ],
+        "aliases": [
+          "Brazil",
+          "Brasil",
+          "Sao Paulo"
+        ]
+      }
+    ],
+    "exclude_terms": [
+      "-job",
+      "-jobs",
+      "-career",
+      "-careers",
+      "-training",
+      "-course",
+      "-news",
+      "-blog",
+      "-forum",
+      "-youtube",
+      "-facebook",
+      "-linkedin",
+      "-wiki",
+      "-wikipedia",
+      "-consumer",
+      "-phone",
+      "-mobile phone",
+      "-marketplace",
+      "-directory",
+      "-yellowpages",
+      "-Alibaba",
+      "-Amazon",
+      "-AliExpress",
+      "-China",
+      "-Chinese",
+      "-cn"
+    ]
+  },
+  "strategy_templates": [
+    {
+      "id": "TPL-001",
+      "name_cn": "多品牌通信设备经销商 / 现货商",
+      "template": "(\"RRU\" OR \"BBU\" OR \"AAU\") (\"distributor\" OR \"stockist\" OR \"system integrator\") {market_alias} {exclude_terms}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group",
+        "exclude_term"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"RRU\" OR \"BBU\" OR \"AAU\") (\"distributor\" OR \"stockist\" OR \"system integrator\") UAE -job -training -news"
+    },
+    {
+      "id": "TPL-002",
+      "name_cn": "标题命中 telecom equipment",
+      "template": "intitle:\"telecom equipment\" (\"Huawei\" OR \"ZTE\") (\"stockist\" OR \"distributor\") {site_tld}",
+      "operator_ids": [
+        "title_filter",
+        "exact_phrase",
+        "or_group",
+        "site_filter"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "intitle:\"telecom equipment\" (\"Huawei\" OR \"ZTE\") (\"stockist\" OR \"distributor\") site:.ae"
+    },
+    {
+      "id": "TPL-003",
+      "name_cn": "备件贸易商 / 进口商",
+      "template": "\"Huawei ZTE spare parts\" (\"trading\" OR \"importer\" OR \"purchasing\") {market_alias} {exclude_terms}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group",
+        "exclude_term"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "\"Huawei ZTE spare parts\" (\"trading\" OR \"importer\" OR \"purchasing\") UAE -Alibaba -Amazon -China -forum"
+    },
+    {
+      "id": "TPL-004",
+      "name_cn": "微波回传 / 电源服务商",
+      "template": "inpage:telecom (\"microwave backhaul\" OR \"telecom power\") (\"service\" OR \"solution\") {loc_operator}",
+      "operator_ids": [
+        "page_filter",
+        "exact_phrase",
+        "or_group",
+        "location_filter"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "inpage:telecom (\"microwave backhaul\" OR \"telecom power\") (\"service\" OR \"solution\") loc:sa"
+    },
+    {
+      "id": "TPL-005",
+      "name_cn": "系统集成商 / 工程承包商",
+      "template": "(\"telecom infrastructure\" OR \"network rollout\") (\"system integrator\" OR \"turnkey contractor\" OR \"telecom contractor\") {market_alias}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"telecom infrastructure\" OR \"network rollout\") (\"system integrator\" OR \"turnkey contractor\" OR \"telecom contractor\") Saudi"
+    },
+    {
+      "id": "TPL-006",
+      "name_cn": "铁塔 / 电源 / IBS 服务商",
+      "template": "(\"tower power\" OR \"IBS service\" OR \"site maintenance\") (\"telecom\" OR \"mobile network\") {market_alias} {exclude_terms}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group",
+        "exclude_term"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"tower power\" OR \"IBS service\" OR \"site maintenance\") (\"telecom\" OR \"mobile network\") UAE -job -training -news"
+    },
+    {
+      "id": "TPL-007",
+      "name_cn": "网络维护 / 设备替换",
+      "template": "(\"network maintenance\" OR \"equipment replacement\" OR \"refurbished telecom equipment\") (\"RRU\" OR \"BBU\" OR \"telecom spare parts\") {market_alias}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"network maintenance\" OR \"equipment replacement\" OR \"refurbished telecom equipment\") (\"RRU\" OR \"BBU\" OR \"telecom spare parts\") Nigeria"
+    },
+    {
+      "id": "TPL-008",
+      "name_cn": "PDF 展商 / 目录线索",
+      "template": "filetype:pdf \"telecom\" (\"exhibitors\" OR \"catalog\") {market_alias}",
+      "operator_ids": [
+        "filetype_filter",
+        "exact_phrase",
+        "or_group"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "filetype:pdf \"telecom\" (\"exhibitors\" OR \"catalog\") UAE"
+    },
+    {
+      "id": "TPL-009",
+      "name_cn": "光网络 / OLT 设备渠道商",
+      "template": "(\"OLT\" OR \"optical module\" OR \"fiber access\") (\"distributor\" OR \"stockist\" OR \"supplier\") {market_alias} {exclude_terms}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group",
+        "exclude_term"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"OLT\" OR \"optical module\" OR \"fiber access\") (\"distributor\" OR \"stockist\" OR \"supplier\") Kenya -job -news -training"
+    },
+    {
+      "id": "TPL-010",
+      "name_cn": "通信电源 / 整流模块",
+      "template": "(\"telecom power\" OR \"rectifier\" OR \"power module\") (\"Eltek\" OR \"Delta\" OR \"Vertiv\") (\"supplier\" OR \"service\") {market_alias}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"telecom power\" OR \"rectifier\" OR \"power module\") (\"Eltek\" OR \"Delta\" OR \"Vertiv\") (\"supplier\" OR \"service\") Brazil"
+    },
+    {
+      "id": "TPL-011",
+      "name_cn": "品牌 + 备件可用性",
+      "template": "(\"Huawei\" OR \"ZTE\" OR \"Ericsson\" OR \"Nokia\") (\"spare parts\" OR \"replacement parts\" OR \"availability\") (\"stockist\" OR \"supplier\") {market_alias}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"Huawei\" OR \"ZTE\" OR \"Ericsson\" OR \"Nokia\") (\"spare parts\" OR \"replacement parts\" OR \"availability\") (\"stockist\" OR \"supplier\") UAE"
+    },
+    {
+      "id": "TPL-012",
+      "name_cn": "公司官网服务页强化",
+      "template": "inbody:\"telecom\" inpage:\"services\" (\"microwave\" OR \"power\" OR \"network maintenance\") {loc_operator}",
+      "operator_ids": [
+        "body_filter",
+        "page_filter",
+        "exact_phrase",
+        "or_group",
+        "location_filter"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "inbody:\"telecom\" inpage:\"services\" (\"microwave\" OR \"power\" OR \"network maintenance\") loc:ae"
+    },
+    {
+      "id": "TPL-013",
+      "name_cn": "国家域名限定",
+      "template": "(\"telecom equipment\" OR \"telecom spare parts\") (\"distributor\" OR \"supplier\") {site_tld}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group",
+        "site_filter"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"telecom equipment\" OR \"telecom spare parts\") (\"distributor\" OR \"supplier\") site:.ae"
+    },
+    {
+      "id": "TPL-014",
+      "name_cn": "贸易 / 采购语义",
+      "template": "(\"telecom equipment\" OR \"network equipment\") (\"purchase\" OR \"purchasing\" OR \"importer\" OR \"trading\") {market_alias}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"telecom equipment\" OR \"network equipment\") (\"purchase\" OR \"purchasing\" OR \"importer\" OR \"trading\") Saudi"
+    },
+    {
+      "id": "TPL-015",
+      "name_cn": "招投标 / 项目线索",
+      "template": "(\"telecom project\" OR \"network upgrade\" OR \"site rollout\") (\"contractor\" OR \"integrator\" OR \"supplier\") {market_alias}",
+      "operator_ids": [
+        "exact_phrase",
+        "or_group"
+      ],
+      "operator_source": "brave_official",
+      "execution_status": "experimental",
+      "brave_ready": true,
+      "sample_query": "(\"telecom project\" OR \"network upgrade\" OR \"site rollout\") (\"contractor\" OR \"integrator\" OR \"supplier\") UAE"
+    },
+    {
+      "id": "TPL-016",
+      "name_cn": "手动 Google inurl 方案",
+      "template": "inurl:telecom (\"microwave backhaul\" OR \"telecom power\") (\"system integrator\" OR \"contractor\") {market_alias}",
+      "operator_ids": [
+        "url_filter_common",
+        "exact_phrase",
+        "or_group"
+      ],
+      "operator_source": "common_seo",
+      "execution_status": "manual_only",
+      "brave_ready": false,
+      "sample_query": "inurl:telecom (\"microwave backhaul\" OR \"telecom power\") (\"system integrator\" OR \"contractor\") Saudi"
+    }
+  ],
+  "query_generation_rules": {
+    "minimum_queries_per_task": 15,
+    "default_result_count_per_query": 20,
+    "default_language": "en",
+    "v1_auto_execution_allowed_status": [
+      "supported",
+      "experimental"
+    ],
+    "v1_auto_execution_blocked_status": [
+      "manual_only",
+      "disabled"
+    ],
+    "required_query_record_fields": [
+      "task_id",
+      "template_id",
+      "provider",
+      "operator_source",
+      "execution_status",
+      "strategy_template",
+      "query",
+      "keyword_groups",
+      "country",
+      "result_count",
+      "qualified_count",
+      "effectiveness_score"
+    ],
+    "query_quality_rules": [
+      "Every query should include at least one product term and one customer type term.",
+      "Every query should include a target market alias, site TLD, loc operator, or country API parameter.",
+      "Every query should include exclusion terms unless the template is a file or site-specific search.",
+      "Do not automatically execute manual_only or disabled operators in V1.",
+      "Deduplicate by normalized domain and canonical company name.",
+      "Score each query by candidate count, qualified count, ICP average score, email availability, and reply performance."
+    ]
+  }
+}

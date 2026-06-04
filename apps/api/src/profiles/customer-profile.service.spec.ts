@@ -6,6 +6,7 @@ function createPrismaMock() {
   return {
     customerProfile: {
       findUnique: vi.fn(),
+      create: vi.fn(),
       upsert: vi.fn()
     }
   };
@@ -22,6 +23,26 @@ describe("CustomerProfileService", () => {
 
   it("requires authentication when reading", async () => {
     await expect(service.get(null)).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it("creates the starter customer profile when a user has not saved one yet", async () => {
+    prisma.customerProfile.findUnique.mockResolvedValue(null);
+    prisma.customerProfile.create.mockResolvedValue({
+      id: "profile-default",
+      userId: "user-1",
+      targetRegions: ["UAE", "Saudi Arabia"]
+    });
+
+    const result = await service.get("user-1");
+
+    expect(result.targetRegions).toEqual(["UAE", "Saudi Arabia"]);
+    expect(prisma.customerProfile.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: "user-1",
+        targetRegions: expect.arrayContaining(["UAE", "Saudi Arabia", "Africa"]),
+        referenceCustomerUrls: ["https://spectrummea.com/", "https://highcloud.ae/"]
+      })
+    });
   });
 
   it("saves a valid customer profile", async () => {

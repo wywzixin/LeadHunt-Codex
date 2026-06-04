@@ -25,18 +25,20 @@ export class BraveSearchService {
   }
 
   async searchAndSaveResults(queryId: string, params: BraveSearchParams) {
-    const webResults = await this.searchWeb(params);
+    const webResults = filterBlockedSearchResults(await this.searchWeb(params));
     if (webResults.length >= 5) {
       return this.saveResults(queryId, webResults);
     }
 
     try {
-      const contextResults = await this.searchLlmContext({
-        ...params,
-        maximumNumberOfUrls: params.count ?? 10,
-        maximumNumberOfTokens: 4096,
-        contextThresholdMode: "low"
-      });
+      const contextResults = filterBlockedSearchResults(
+        await this.searchLlmContext({
+          ...params,
+          maximumNumberOfUrls: params.count ?? 10,
+          maximumNumberOfTokens: 4096,
+          contextThresholdMode: "low"
+        })
+      );
       return this.saveResults(queryId, [...webResults, ...contextResults]);
     } catch {
       return this.saveResults(queryId, webResults);
@@ -44,16 +46,18 @@ export class BraveSearchService {
   }
 
   async saveResults(queryId: string, rawResults: BraveSearchResult[]) {
-    const results = dedupeByUrl(rawResults);
-    await this.prisma.searchResult.createMany({
-      data: results.map((result) => ({
-        queryId,
-        title: result.title,
-        url: result.url,
-        snippet: result.snippet,
-        domain: domainFromUrl(result.url)
-      }))
-    });
+    const results = filterBlockedSearchResults(dedupeByUrl(rawResults));
+    if (results.length) {
+      await this.prisma.searchResult.createMany({
+        data: results.map((result) => ({
+          queryId,
+          title: result.title,
+          url: result.url,
+          snippet: result.snippet,
+          domain: domainFromUrl(result.url)
+        }))
+      });
+    }
 
     await this.prisma.searchQuery.update({
       where: { id: queryId },
@@ -76,6 +80,39 @@ function dedupeByUrl(results: BraveSearchResult[]) {
     }
     seen.add(normalized);
     return true;
+  });
+}
+
+const blockedSearchResultDomains = [
+  "alibaba.com",
+  "made-in-china.com",
+  "globalsources.com",
+  "indiamart.com",
+  "tradewheel.com",
+  "exporthub.com",
+  "ec21.com",
+  "okorder.com",
+  "pv-tech.org",
+  "pv-magazine.com",
+  "energy-storage.news",
+  "blackridgeresearch.com",
+  "wiki-solar.org",
+  "wikipedia.org",
+  "reddit.com",
+  "youtube.com",
+  "facebook.com",
+  "linkedin.com"
+];
+
+function filterBlockedSearchResults(results: BraveSearchResult[]) {
+  return results.filter((result) => {
+    const domain = domainFromUrl(result.url);
+    if (!domain) {
+      return true;
+    }
+    return !blockedSearchResultDomains.some(
+      (blocked) => domain === blocked || domain.endsWith(`.${blocked}`)
+    );
   });
 }
 
