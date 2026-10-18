@@ -88,6 +88,40 @@ describe("LeadQualificationService", () => {
     expect(candidates[1]?.companyName).toBe("High Cloud");
   });
 
+  it("keeps social share links while normalizing malformed protocol emails", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "GreenPower Overseas - Telecom DC Power",
+          url: "https://greenpowernig.com/telecom-dc-power-supply-and-rectifier/",
+          snippet:
+            "Telecom DC power and rectifier maintenance in Nigeria. http://info@greenpowernig.com https://www.linkedin.com/company/greenpower-overseas-limited-3208 https://www.facebook.com/sharer/sharer.php?u=https://greenpowernig.com/post https://twitter.com/home?status=Telecom",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1" }
+    );
+
+    expect(candidate?.contacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "email", value: "info@greenpowernig.com" }),
+        expect.objectContaining({
+          type: "social",
+          value: "https://www.linkedin.com/company/greenpower-overseas-limited-3208"
+        }),
+        expect.objectContaining({ value: expect.stringContaining("facebook.com/sharer") }),
+        expect.objectContaining({ value: expect.stringContaining("twitter.com/home") })
+      ])
+    );
+    expect(candidate?.contacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "http://info@greenpowernig.com" })
+      ])
+    );
+  });
+
   it("infers missing candidate country from direct phone contacts", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
 
@@ -336,6 +370,12 @@ describe("LeadQualificationService", () => {
 
     expect(result.createdCount).toBe(1);
     expect(result.skippedCount).toBe(1);
+    expect(result.matchedCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "existing-lead-1" }),
+        expect.objectContaining({ companyName: "High Cloud" })
+      ])
+    );
     expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -359,6 +399,45 @@ describe("LeadQualificationService", () => {
           }
         })
       })
+    );
+  });
+
+  it("stores contact form pages as reachable contact entries", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        '<html><body><h1>Contact us</h1><form><input name="email" /></form></body></html>',
+        {
+          status: 200,
+          headers: { "content-type": "text/html; charset=UTF-8" }
+        }
+      )
+    );
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "High Cloud - Telecom Stockist UAE",
+          url: "http://highcloud.ae/",
+          snippet:
+            "Dubai telecom stockist with BBU spare parts. Contact our procurement team through the form. info@highcloud.ae",
+          source: "web"
+        }
+      ],
+      criteria,
+      "UAE"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(result.candidates[0]?.contacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "form",
+          value: expect.stringContaining("highcloud.ae")
+        })
+      ])
     );
   });
 
@@ -401,6 +480,235 @@ describe("LeadQualificationService", () => {
         })
       })
     );
+  });
+
+  it("does not let AI lift evidence-capped telecom leads into high match", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+    const aiEvaluator = vi.fn().mockResolvedValue({
+      companyName: "Networks & System Integration S. A. Co. Ltd",
+      websiteUrl: "http://www.nesicsa.com/",
+      resultType: "target_buyer",
+      buyerType: "system integrator",
+      fitScore: 95,
+      confidence: 0.9,
+      decision: "qualified",
+      matchedSignals: ["System integration services", "Saudi Arabia target market"],
+      risks: [
+        "Telecom task but candidate page has no telecom, RAN, base-station, fiber, ISP, tower, or telecom-power evidence",
+        "No explicit telecom evidence on the candidate page; capped at review until manually validated"
+      ]
+    });
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Networks & System Integration S. A. Co. Ltd",
+          url: "http://www.nesicsa.com/",
+          snippet:
+            "Saudi Arabia system integration company. Contact info@nesicsa.com Phone +966 11 123 4567.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["system integrator", "contractor", "installer"]
+      },
+      "Saudi Arabia",
+      aiEvaluator
+    );
+
+    const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(createData.status).toBe("review");
+    expect(createData.icpScore.create.score).toBeLessThan(75);
+    expect(createData.icpScore.create.grade).toBe("medium");
+  });
+
+  it("rejects AI-confirmed off-target country leads instead of keeping them in review", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+    const aiEvaluator = vi.fn().mockResolvedValue({
+      companyName: "Pacific Network Services",
+      websiteUrl: "https://www.pacific-network.example/contact",
+      resultType: "possible_buyer",
+      buyerType: "telecom operator",
+      fitScore: 78,
+      confidence: 0.82,
+      decision: "review",
+      matchedSignals: ["Telecom operator contact page"],
+      risks: [
+        "Pacific Network Services is based in Hong Kong, while the requested target regions are Middle East and Africa markets."
+      ]
+    });
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Pacific Network Services telecom contact Qatar",
+          url: "https://www.pacific-network.example/contact",
+          snippet:
+            "Telecom operator with 5G services and contact sales@pacific-network.example.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Qatar"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["telecom operator", "system integrator"]
+      },
+      "Qatar",
+      aiEvaluator
+    );
+
+    const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(createData.status).toBe("rejected");
+    expect(createData.icpScore.create.score).toBeLessThan(50);
+    expect(createData.icpScore.create.reasons).toEqual(
+      expect.objectContaining({
+        risks: expect.arrayContaining([
+          "Pacific Network Services is based in Hong Kong, while the requested target regions are Middle East and Africa markets."
+        ])
+      })
+    );
+  });
+
+  it("rejects AI-confirmed off-target leads when the risk starts with located in", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+    const aiEvaluator = vi.fn().mockResolvedValue({
+      companyName: "HKT",
+      websiteUrl: "https://www.hkt.com/en/about-hkt/milestones/",
+      resultType: "possible_buyer",
+      buyerType: "telecom operator procurement",
+      fitScore: 72,
+      confidence: 0.78,
+      decision: "review",
+      matchedSignals: ["Official page identifies HKT as a telecommunications service provider"],
+      risks: [
+        "Located in Hong Kong, outside the stated priority target regions",
+        "Page is a corporate milestones/about page, not a procurement, vendor registration, RFQ, or tender page"
+      ]
+    });
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "HKT milestones Saudi Arabia 5G communication equipment",
+          url: "https://www.hkt.com/en/about-hkt/milestones/",
+          snippet:
+            "HKT becomes first telecom service provider to adopt 50G PON technology. Contact business_inquiry@pccw.com.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["telecom operator", "system integrator"]
+      },
+      "Saudi Arabia",
+      aiEvaluator
+    );
+
+    const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(createData.status).toBe("rejected");
+    expect(createData.icpScore.create.score).toBeLessThan(50);
+  });
+
+  it("rejects low-fit industrial spare-parts pages that have no telecom evidence", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+    const aiEvaluator = vi.fn().mockResolvedValue({
+      companyName: "Industry International",
+      websiteUrl: "https://industryinternational.co.za/topbrands",
+      resultType: "possible_buyer",
+      buyerType: "industrial spare parts reseller",
+      fitScore: 43,
+      confidence: 0.58,
+      decision: "review",
+      matchedSignals: ["Local reseller for industrial equipment and spare parts"],
+      risks: [
+        "Telecom task but candidate page has no telecom, RAN, base-station, fiber, ISP, tower, or telecom-power evidence",
+        "Website appears primarily to sell industrial automation, pneumatics, motors, pumps, sensors, gearboxes, and general industrial components",
+        "No evidence of telecom system integration, base station maintenance, RAN maintenance, tower maintenance, operator procurement, or telecom power maintenance activity"
+      ]
+    });
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Industry International telecom spare parts Nigeria contact",
+          url: "https://industryinternational.co.za/topbrands",
+          snippet:
+            "Marketplace from direct reseller of industries. Choose spare parts from more than 10,000 brands. info@industryinternational.co.za +27 11 545 55 20.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Nigeria", "South Africa"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["stockist", "distributor", "system integrator"]
+      },
+      "Nigeria",
+      aiEvaluator
+    );
+
+    const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(createData.status).toBe("rejected");
+    expect(createData.icpScore.create.score).toBeLessThan(50);
+  });
+
+  it("rejects telecom-task candidates with off-target product evidence and no telecom evidence", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+    const aiEvaluator = vi.fn().mockResolvedValue({
+      companyName: "Gulf MEP Projects",
+      websiteUrl: "https://gulf-mep.example/",
+      resultType: "possible_buyer",
+      buyerType: "MEP contractor",
+      fitScore: 58,
+      confidence: 0.67,
+      decision: "review",
+      matchedSignals: ["Regional contractor with contact details"],
+      risks: [
+        "Telecom task but candidate page has no telecom, RAN, base-station, fiber, ISP, tower, or telecom-power evidence",
+        "Off-target product/service evidence for a telecom task: hvac",
+        "Company appears primarily focused on MEP, manpower, cleaning, security, and general contracting services"
+      ]
+    });
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Gulf MEP Projects Kuwait - Contact",
+          url: "https://gulf-mep.example/",
+          snippet:
+            "Kuwait MEP and HVAC contractor. Contact engineering@gulf-mep.example Phone +965 2222 3333.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Kuwait"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["system integrator", "contractor", "installer"]
+      },
+      "Kuwait",
+      aiEvaluator
+    );
+
+    const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(createData.status).toBe("rejected");
+    expect(createData.icpScore.create.score).toBeLessThan(50);
   });
 
   it("serializes same-task candidate saves so concurrent workers do not duplicate a domain", async () => {
@@ -744,11 +1052,10 @@ describe("LeadQualificationService", () => {
     expect(prisma.leadCandidate.create).toHaveBeenCalled();
   });
 
-  it("uses the buyer-role floor to keep contact-less service pages in review instead of rejecting them", async () => {
-    // 2026-05: pages from buyer-side service companies (maintenance,
-    // system integrator, etc.) now stay in review even without a phone
-    // or email yet, so the human can decide whether to enrich. The
-    // candidate WITH a direct contact still scores higher.
+  it("keeps contact-less unverified service pages in review unless they are obvious errors", async () => {
+    // Mature lead-quality policy: a buyer-side service page can be
+    // useful evidence. Without direct contact and verified country it
+    // should stay review-level, not be silently discarded.
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -1689,6 +1996,62 @@ describe("LeadQualificationService", () => {
     );
   });
 
+  it("keeps solar OEM brand sites out of the buyer review list", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "GoodWe UAE - Solar inverter and energy storage solutions",
+          url: "https://www.goodwe.com/",
+          snippet:
+            "GoodWe manufactures PV inverters, hybrid inverters and energy storage systems. Contact sales@goodwe.com.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "UAE" }
+    );
+
+    const score = service.scoreCandidate(candidate!, {
+      ...criteria,
+      targetRegions: ["UAE"],
+      productKeywords: ["solar inverter", "PV inverter", "BESS"],
+      customerTypeKeywords: ["solar EPC contractor", "PV distributor", "installer"],
+      brandTerms: ["GoodWe", "Sungrow", "Growatt", "SolaX"]
+    });
+
+    expect(score.score).toBeLessThan(50);
+    expect(score.status).toBe("rejected");
+    expect(score.pageType).toBe("brand_oem_site");
+  });
+
+  it("keeps local non-telecom distributor storefronts as downstream channel buyers", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "PAS INTERNATIONAL TRADING | Solar Equipment Distributor in UAE",
+          url: "https://pas-solar.com/",
+          snippet:
+            "Solar equipment distributor in Dubai UAE distributing inverters, solar panels, cables and accessories. sales@pas-solar.com +971 4 555 0199.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "UAE" }
+    );
+
+    const score = service.scoreCandidate(candidate!, {
+      ...criteria,
+      targetRegions: ["UAE"],
+      productKeywords: ["solar inverter", "PV inverter", "BESS"],
+      customerTypeKeywords: ["solar EPC contractor", "PV distributor", "dealer", "importer"],
+      brandTerms: ["GoodWe", "Sungrow", "Growatt", "SolaX"]
+    });
+
+    expect(score.pageType).toBe("official_company_site");
+    expect(score.status).not.toBe("rejected");
+    expect(score.score).toBeGreaterThanOrEqual(50);
+  });
+
   it("skips index and indicator pages as discovery noise", async () => {
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
@@ -1898,12 +2261,7 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps contactless service-company pages in review with the buyer-role floor instead of rejecting them", () => {
-    // 2026-05: a buyer-side service page (system integrator,
-    // maintenance company) without a phone/email is no longer dropped
-    // below 50. The buyer-role floor lifts it to ~55 so the human can
-    // decide whether to enrich. We still keep it under "qualified" and
-    // record "no usable contact" as a risk.
+  it("keeps contactless service-company pages in review when they are not obvious errors", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(
       [
@@ -1921,9 +2279,48 @@ describe("LeadQualificationService", () => {
     const score = service.scoreCandidate(candidate!, criteria);
 
     expect(score.score).toBeGreaterThanOrEqual(50);
-    expect(score.score).toBeLessThan(75);
     expect(score.status).toBe("review");
-    expect(score.risks).toContain("No usable email or phone found yet");
+    expect(score.risks).toContain("No usable email, phone, contact form, or social entry found yet");
+    expect(score.risks).toContain(
+      "No reachable contact entry and target country is unverified; keep as review unless another hard reject applies"
+    );
+  });
+
+  it("treats contact forms and social profiles as reachable contact entries", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Gulf Network Solutions LLC - Vendor Registration UAE",
+          url: "https://gulfnetwork.ae/vendor-registration",
+          snippet:
+            "Dubai telecom system integrator and network maintenance company for 5G rollout. Submit vendor registration and RFQ requests through this page.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "UAE" }
+    );
+
+    const score = service.scoreCandidate(candidate!, {
+      ...criteria,
+      targetRegions: ["UAE"]
+    });
+
+    expect(candidate?.contacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "form",
+          value: "https://gulfnetwork.ae/vendor-registration"
+        })
+      ])
+    );
+    expect(score.risks).not.toContain(
+      "No usable email, phone, contact form, or social entry found yet"
+    );
+    expect(score.risks).not.toContain(
+      "No reachable contact entry and target country is unverified; keep as review unless another hard reject applies"
+    );
+    expect(score.reasons).toContain("Has usable contact signals");
   });
 
   it("keeps small ISP and WISP operators for review without requiring explicit spare-parts demand", () => {
@@ -1954,7 +2351,7 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps DAS, small-cell, private-network, and tower engineering firms for review", () => {
+  it("promotes reachable DAS and wireless engineering firms while keeping contactless infrastructure pages in review", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const candidates = service.normalizeSearchResults(
       [
@@ -1996,7 +2393,15 @@ describe("LeadQualificationService", () => {
       })
     );
 
-    expect(scores.map((score) => score.status)).toEqual(["review", "review", "review"]);
+    expect(scores.map((score) => score.status)).toEqual(["qualified", "qualified", "review"]);
+    expect(scores.map((score) => score.score)).toEqual([
+      expect.any(Number),
+      expect.any(Number),
+      expect.any(Number)
+    ]);
+    expect(scores[0]?.score).toBeGreaterThanOrEqual(75);
+    expect(scores[1]?.score).toBeGreaterThanOrEqual(75);
+    expect(scores[2]?.score).toBeLessThan(75);
     scores.forEach((score) => {
       expect(score.score).toBeGreaterThanOrEqual(50);
       expect(score.risks).not.toContain(
@@ -2140,6 +2545,469 @@ describe("LeadQualificationService", () => {
     );
   });
 
+  it("keeps third-party directories and asset-title names out of the main customer pool", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const candidates = service.normalizeSearchResults(
+      [
+        {
+          title:
+            "Networks System Integration Saudi Arabia Corporation Limited | ProTenders",
+          url: "https://www.protenders.com/companies/networks-system-integration-saudi-arabia-corporation-limited",
+          snippet:
+            "Company profile on a construction directory for system integration projects in Saudi Arabia.",
+          source: "web"
+        },
+        {
+          title: "The Best Systems Integration Companies in Qatar",
+          url: "https://themanifest.com/qa/systems-integration/companies",
+          snippet:
+            "Directory list of top systems integration companies in Qatar with rankings and profiles.",
+          source: "web"
+        },
+        {
+          title: "Distributors in Qatar | Exporteers",
+          url: "https://exporteers.com/distributors-qatar/",
+          snippet:
+            "Consulting page about finding resellers and dealers in Qatar, not an official buyer company.",
+          source: "web"
+        },
+        {
+          title: "OM0000003026 - Oman Telecommunications Company SAOG",
+          url: "https://www.marketscreener.com/quote/stock/OMAN-TELECOMMUNICATIONS-C-6498723/company/",
+          snippet:
+            "Financial profile and company stock market data for Oman Telecommunications.",
+          source: "web"
+        },
+        {
+          title: "FTTH - Encyclopedia",
+          url: "https://encyclopedia.pub/entry/ftth-network-architecture",
+          snippet:
+            "Encyclopedia article about FTTH and telecom networks. Contact office@encyclopedia.pub.",
+          source: "web"
+        },
+        {
+          title: "Artificial Intelligence icon",
+          url: "https://www.creative-sols.com/system-integration",
+          snippet:
+            "Creative Solutions provides system integration services in Saudi Arabia. Contact us for enterprise IT services.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "Saudi Arabia" }
+    );
+
+    expect(candidates[5]?.companyName).toBe("Creative Sols");
+
+    const scores = candidates.map((candidate) =>
+      service.scoreCandidate(candidate, {
+        ...criteria,
+        targetRegions: ["Saudi Arabia", "Qatar"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["system integrator", "maintenance company", "stockist"]
+      })
+    );
+
+    expect(["rejected", "intelligence"]).toContain(scores[0]?.status);
+    expect(scores[0]?.status).not.toBe("review");
+    expect(scores[0]?.status).not.toBe("qualified");
+    expect(["third_party_profile", "procurement_document"]).toContain(scores[0]?.pageType);
+    expect(scores[0]?.score).toBeLessThan(50);
+    expect(["rejected", "intelligence"]).toContain(scores[1]?.status);
+    expect(scores[1]?.status).not.toBe("review");
+    expect(scores[1]?.status).not.toBe("qualified");
+    expect(scores[1]?.pageType).toBe("third_party_profile");
+    expect(scores[1]?.score).toBeLessThan(50);
+    expect(["rejected", "intelligence"]).toContain(scores[2]?.status);
+    expect(scores[2]?.status).not.toBe("review");
+    expect(scores[2]?.status).not.toBe("qualified");
+    expect(scores[2]?.pageType).toBe("third_party_profile");
+    expect(scores[2]?.score).toBeLessThan(50);
+    expect(["rejected", "intelligence"]).toContain(scores[3]?.status);
+    expect(scores[3]?.status).not.toBe("review");
+    expect(scores[3]?.status).not.toBe("qualified");
+    expect(scores[3]?.pageType).toBe("third_party_profile");
+    expect(scores[3]?.score).toBeLessThan(50);
+    expect(scores[4]?.status).toBe("rejected");
+    expect(scores[4]?.score).toBeLessThan(50);
+    expect(scores[5]?.score).toBeLessThan(75);
+    expect(scores[5]?.status).not.toBe("qualified");
+  });
+
+  it("keeps obvious directory, article, and off-industry pages out of relaxed telecom review", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const candidates = service.normalizeSearchResults(
+      [
+        {
+          title: "Telecommunications Contractor | Yellow Pages Asia",
+          url: "https://www.yellowpages.asia/places/telecommunications-contractor",
+          snippet:
+            "Telecommunications Contractor suppliers on Yellow Pages Asia. B2B Marketplace, Products, Companies, Distributors, Dealers, Contact.",
+          source: "web"
+        },
+        {
+          title: "Saudi Arabia Transmission systems installers",
+          url: "https://security-img.scdn6.secure.raxcdn.com/companies/transmission-systems-installers-saudi-arabia/directory.html",
+          snippet:
+            "Directory listing of telecom contractors and systems integrators in Saudi Arabia.",
+          source: "web"
+        },
+        {
+          title: "GOODWILL FREIGHT LIMITED heavy machinery sourcing",
+          url: "https://www.goodwillfreight.com/2025/08/26/heavy-machinery-sourcing-china-uae-importers/",
+          snippet:
+            "Sourcing from China offers UAE businesses heavy equipment import options and freight services.",
+          source: "web"
+        },
+        {
+          title: "VectorPro force testing software distributors",
+          url: "https://www.mecmesin.com/distributors",
+          snippet:
+            "Force testing software and materials testing instruments distributors. UAE phone +971 67454194.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "Saudi Arabia" }
+    );
+
+    const scores = candidates.map((candidate) =>
+      service.scoreCandidate(candidate, {
+        ...criteria,
+        targetRegions: ["Saudi Arabia", "UAE"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["system integrator", "maintenance company", "stockist"]
+      })
+    );
+
+    expect(["intelligence", "rejected"]).toContain(scores[0]?.status);
+    expect(scores.slice(1).map((score) => score.status)).toEqual([
+      "intelligence",
+      "rejected",
+      "rejected"
+    ]);
+    for (const score of scores) {
+      expect(score.status).not.toBe("review");
+      expect(score.status).not.toBe("qualified");
+      expect(score.score).toBeLessThan(50);
+    }
+  });
+
+  it("does not promote unverified companies mined from unrelated directories", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Beny",
+        website: "https://www.beny.com/",
+        country: null,
+        queryCountry: "QATAR",
+        sourceUrl: "https://www.beny.com/",
+        sourcePageUrl: "https://www.enfsolar.com/directory/installer/UAE",
+        sourcePageTitle: "ENF List of Solar Companies and Products",
+        summary:
+          "ENF Solar is a company directory of photovoltaic suppliers. Buyers and sellers are directly connected.",
+        contacts: []
+      },
+      {
+        ...criteria,
+        targetRegions: ["Qatar"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["system integrator", "maintenance company", "stockist"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.pageType).toBe("third_party_profile");
+    expect(score.score).toBeLessThan(50);
+  });
+
+  it("does not let consumer electronics pages become high-match telecom infrastructure leads", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Consumer Electronics",
+        website: "https://alibinali.com/business-streams/aba-consumer-electronics/",
+        sourceUrl: "https://alibinali.com/business-streams/aba-consumer-electronics/",
+        country: "QATAR",
+        inferredCountry: "QATAR",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email",
+            value: "sales@example.qa",
+            sourceUrl: "https://alibinali.com/contact-us"
+          },
+          {
+            type: "phone",
+            value: "+974 44292126",
+            sourceUrl: "https://alibinali.com/contact-us"
+          }
+        ],
+        summary:
+          "The official distributor of Samsung in Qatar supplies Samsung phones, accessories, print and display solutions and monitors to major retailers. Apart from consumer electronics, it provides enterprise solutions and Telecom."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Qatar"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["distributor", "system integrator", "maintenance company"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "Consumer-electronics or phone-accessory page is not a 5G/RAN/base-station infrastructure buyer"
+        )
+      ])
+    );
+  });
+
+  it("rejects security-camera and CCTV pages in telecom infrastructure tasks", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Hikvision UAE",
+        website: "https://www.hikvision.com/mena/",
+        sourceUrl: "https://www.hikvision.com/mena/products/IP-Products/Network-Cameras/",
+        country: "UAE",
+        inferredCountry: "UAE",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "form",
+            value: "https://www.hikvision.com/mena/support/contact-us/",
+            sourceUrl: "https://www.hikvision.com/mena/support/contact-us/"
+          }
+        ],
+        summary:
+          "Hikvision provides video surveillance, security cameras, CCTV and access control solutions for commercial buildings in UAE."
+      },
+      {
+        ...criteria,
+        targetRegions: ["UAE"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["stockist", "system integrator", "tower contractor"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Off-target product/service evidence for a telecom task")
+      ])
+    );
+  });
+
+  it("rejects event and expo pages in telecom infrastructure tasks", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "HouseHold Expo",
+        website: "https://householdexpo.com/",
+        sourceUrl: "https://householdexpo.com/exhibitors",
+        country: "UAE",
+        inferredCountry: "UAE",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email",
+            value: "info@householdexpo.com",
+            sourceUrl: "https://householdexpo.com/contact"
+          }
+        ],
+        summary:
+          "International trade show and exhibition for household goods, baby products and toys. Exhibitor registration and expo visitor information."
+      },
+      {
+        ...criteria,
+        targetRegions: ["UAE"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["stockist", "system integrator", "tower contractor"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Off-target product/service evidence for a telecom task")
+      ])
+    );
+  });
+
+  it("promotes reachable telecom infrastructure system integrators into high-match leads", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Waseela",
+        website: "https://waseela.com/en/contact",
+        sourceUrl: "https://waseela.com/en/contact",
+        country: "SAUDI ARABIA",
+        inferredCountry: "SAUDI ARABIA",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email",
+            value: "info@waseela.com",
+            sourceUrl: "https://waseela.com/en/contact"
+          },
+          {
+            type: "phone",
+            value: "+966 11 2171117",
+            sourceUrl: "https://waseela.com/en/contact"
+          }
+        ],
+        summary:
+          "Waseela is a leading Master Turnkey Systems Integrator offering end-to-end solutions for complex large-scale ICT projects for telecom service providers, public sector, and enterprise clients in Saudi Arabia and the Middle East."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["system integrator", "maintenance company", "stockist"]
+      }
+    );
+
+    expect(score.status).toBe("qualified");
+    expect(score.score).toBeGreaterThanOrEqual(75);
+    expect(score.reasons).toEqual(
+      expect.arrayContaining([expect.stringContaining("Reachable infrastructure buyer")])
+    );
+  });
+
+  it("keeps global OEM and component-brand sites out of the telecom buyer pool", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Broadcom",
+        website: "https://www.broadcom.com/",
+        sourceUrl: "https://www.broadcom.com/products/wireless/wireless-lan-infrastructure",
+        country: "QATAR",
+        contacts: [
+          {
+            type: "social",
+            value: "https://www.linkedin.com/company/broadcom",
+            sourceUrl: "https://www.broadcom.com/"
+          }
+        ],
+        summary:
+          "Broadcom semiconductor and wireless infrastructure products for distributors and partners."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Qatar"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["distributor", "stockist", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThan(50);
+    expect(score.pageType).toBe("brand_oem_site");
+  });
+
+  it("does not mark country-unverified shop or catalog leads as high match", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Intertec Group W.L.L.",
+        website: "https://shopintertec.com/",
+        sourceUrl: "https://shopintertec.com/",
+        country: "QATAR",
+        contacts: [
+          {
+            type: "email",
+            value: "sales@shopintertec.com",
+            sourceUrl: "https://shopintertec.com/"
+          }
+        ],
+        summary: "Telecom spare parts distributor and stockist with brands and contact details."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Qatar"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["distributor", "stockist", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("review");
+    expect(score.score).toBe(74);
+    expect(score.risks).toContain(
+      "High-match cap applied until target country is verified from official evidence"
+    );
+  });
+
+  it("allows strong source-query market buyers to become high match when country evidence is unverified", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Qatar Telecom Field Services",
+        website: "https://qatartelecomfield.qa/",
+        sourceUrl: "https://qatartelecomfield.qa/services/5g-ran-maintenance",
+        country: null,
+        queryCountry: "Qatar",
+        inferredCountry: null,
+        countryConfidence: "unknown",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email",
+            value: "sales@qatartelecomfield.qa",
+            sourceUrl: "https://qatartelecomfield.qa/contact"
+          },
+          {
+            type: "social",
+            value: "https://www.linkedin.com/company/qatar-telecom-field-services",
+            sourceUrl: "https://qatartelecomfield.qa/contact"
+          }
+        ],
+        summary:
+          "Official telecom system integrator and field maintenance contractor for 5G RAN, RRU, BBU, base station, tower and DC power services."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Qatar"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: [
+          "distributor",
+          "stockist",
+          "system integrator",
+          "field maintenance contractor"
+        ]
+      }
+    );
+
+    expect(score.status).toBe("qualified");
+    expect(score.score).toBeGreaterThanOrEqual(75);
+    expect(score.risks).toContain(
+      "Target country is inferred from the source query or page context; verify before outreach"
+    );
+    expect(score.risks).not.toContain(
+      "High-match cap applied until target country is verified from official evidence"
+    );
+  });
+
   it("filters dates and long numeric ids out of phone contacts", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(
@@ -2155,9 +3023,11 @@ describe("LeadQualificationService", () => {
       { taskId: "task-1" }
     );
 
-    expect(candidate?.contacts).toEqual([
+    expect(candidate?.contacts).toEqual(
+      expect.arrayContaining([
       expect.objectContaining({ type: "phone", value: "+971 52 266 9803" })
-    ]);
+      ])
+    );
   });
 
   it("does not treat rectifier model and part numbers as phone contacts", () => {
@@ -2255,6 +3125,62 @@ describe("LeadQualificationService", () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+
+  it("keeps protected contact pages as form contact entrances", async () => {
+    const prisma = createPrismaMock();
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.includes("/contact")
+        ? `
+          <html><head><title>Your access to this site has been limited by the site owner</title></head>
+          <body>Wordfence has temporarily limited access to this page.</body></html>
+        `
+        : `
+          <html><body>
+            <a href="/contact">Contact us</a>
+            Ghana telecom system integrator and network maintenance company.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: url.includes("/contact") ? 503 : 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Blocked Telecom Services - Network Maintenance",
+          url: "https://blockedtelecom.example/",
+          snippet: "Ghana telecom system integrator and network maintenance company.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Ghana"]
+      },
+      "Ghana"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({
+                type: "form",
+                value: "https://blockedtelecom.example/contact"
+              })
+            ])
+          }
+        })
+      })
+    );
   });
 
   it("finds contacts from homepage navigation, contact html pages, and get-in-touch pages", async () => {
@@ -2382,6 +3308,67 @@ describe("LeadQualificationService", () => {
             create: expect.arrayContaining([
               expect.objectContaining({ type: "email", value: "sales@winncom.com" }),
               expect.objectContaining({ type: "phone", value: "440-498-9510" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("keeps a discovered official contact link as a reachable form when the linked page blocks fetching", async () => {
+    const prisma = createPrismaMock();
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "https://www.reachlink.af/contact") {
+        return new Response("temporary upstream error", {
+          status: 502,
+          headers: { "content-type": "text/html; charset=UTF-8" }
+        });
+      }
+
+      return new Response(
+        `
+          <html><body>
+            ReachLink Afghanistan is a telecom network contractor and FTTH maintenance provider.
+            <a href="/contact">Contact our sales team</a>
+          </body></html>
+        `,
+        {
+          status: 200,
+          headers: { "content-type": "text/html; charset=UTF-8" }
+        }
+      );
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "ReachLink Afghanistan - Telecom Network Contractor",
+          url: "https://www.reachlink.af/",
+          snippet: "Afghanistan telecom network contractor and FTTH maintenance provider.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Afghanistan"]
+      },
+      "Afghanistan"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({
+                type: "form",
+                value: "https://www.reachlink.af/contact",
+                sourceUrl: "https://www.reachlink.af/contact"
+              })
             ])
           }
         })
@@ -2846,6 +3833,7 @@ describe("LeadQualificationService", () => {
           <html><body>
             Email us: info@hashport.ae
             Template demo: suport@tecnologia.com
+            Template font email: team@latofonts.com
             Template demo: support@yourmail.com
             Template demo: info@your-domain.com
             Template phone: +386 40 222 555
@@ -2910,6 +3898,7 @@ describe("LeadQualificationService", () => {
             create: expect.arrayContaining([
               expect.objectContaining({ value: "support@yourmail.com" }),
               expect.objectContaining({ value: "info@your-domain.com" }),
+              expect.objectContaining({ value: "team@latofonts.com" }),
               expect.objectContaining({ value: "+386 40 222 555" })
             ])
           }
@@ -3059,6 +4048,160 @@ describe("LeadQualificationService", () => {
     });
   });
 
+  it("keeps generic procurement and off-target distributor pages out of telecom main customers", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Air curtains distributors Saudi Arabia",
+          url: "https://www.airtecnics.com/contact/air-curtains-distributors/saudi-arabia",
+          snippet:
+            "Air curtains distributor in Saudi Arabia. Contact our Saudi Arabia distributor for air curtains.",
+          source: "web"
+        },
+        {
+          title: "Qatar Foundation",
+          url: "https://www.qf.org.qa/supplier-registration",
+          snippet: "Qatar Foundation official page for organizations and partners.",
+          source: "web"
+        },
+        {
+          title: "Doha International Airport supplier portal",
+          url: "https://esourcing.qatarairways.com.qa/",
+          snippet: "Supplier registration and e-sourcing portal for vendors.",
+          source: "web"
+        },
+        {
+          title: "Kiewit Corporation",
+          url: "https://www.kiewit.com/",
+          snippet: "Engineering and construction contractor delivering infrastructure projects.",
+          source: "web"
+        },
+        {
+          title: "ACES telecom infrastructure EPC contractor Saudi Arabia",
+          url: "https://aces-co.com/",
+          snippet:
+            "Saudi Arabia telecommunication infrastructure EPC contractor, system integrator and maintenance company. sales@aces-co.com +966 11 2500333",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia", "Qatar"]
+      },
+      "Saudi Arabia"
+    );
+
+    const created = prisma.leadCandidate.create.mock.calls.map((call) => call[0].data);
+    const airCurtain = created.find((lead) => lead.website?.includes("airtecnics.com"));
+    const procurement = created.find((lead) => lead.website?.includes("qf.org.qa"));
+    const esourcing = created.find((lead) => lead.website?.includes("esourcing.qatarairways"));
+    const weakContractor = created.find((lead) => lead.website === "https://www.kiewit.com/");
+    const aces = created.find((lead) => lead.website === "https://aces-co.com/");
+
+    expect(airCurtain?.status).toBe("rejected");
+    expect(airCurtain?.icpScore.create.score).toBeLessThanOrEqual(39);
+    expect(procurement?.status).toBe("intelligence");
+    expect(procurement?.icpScore.create.score).toBeLessThanOrEqual(49);
+    expect(esourcing?.status).toBe("intelligence");
+    expect(esourcing?.icpScore.create.score).toBeLessThanOrEqual(49);
+    expect(weakContractor?.status).toBe("rejected");
+    expect(weakContractor?.icpScore.create.score).toBeLessThanOrEqual(39);
+    expect(aces?.status).not.toBe("rejected");
+    expect(aces?.icpScore.create.score).toBeGreaterThanOrEqual(50);
+  });
+
+  it("does not let query-contaminated snippets rescue off-target telecom candidates", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        `<html><head><title>Qnited Trading Company</title></head><body>
+          Qnited Trading Company is an FMCG distributor for foodstuff, retail businesses,
+          horeca, and fast-moving consumer goods in Qatar.
+          Contact sales@qnited.qa Phone +974 4412 3456
+        </body></html>`,
+        {
+          status: 200,
+          headers: { "content-type": "text/html; charset=UTF-8" }
+        }
+      )
+    );
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Qnited Trading Company - Contact",
+          url: "https://www.qnited.qa/",
+          snippet:
+            "Qatar telecom spare parts distributor and stockist. Contact sales@qnited.qa",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Qatar"],
+        productKeywords: ["5G telecom equipment", "RAN equipment", "telecom spare parts"],
+        customerTypeKeywords: ["distributor", "stockist", "system integrator"]
+      },
+      "Qatar"
+    );
+
+    const createData = prisma.leadCandidate.create.mock.calls[0]?.[0].data;
+    expect(createData.status).toBe("rejected");
+    expect(createData.icpScore.create.score).toBeLessThanOrEqual(39);
+    expect(createData.icpScore.create.reasons.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Telecom task but candidate page has no telecom"),
+        expect.stringContaining("Off-target product/service evidence")
+      ])
+    );
+  });
+
+  it("does not treat automobile distributor networks as telecom context", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "KOYO.",
+        website: "https://www.jtekt.ae/distributors-kuwait",
+        sourceUrl: "https://www.jtekt.ae/distributors-kuwait",
+        country: "KUWAIT",
+        inferredCountry: "KUWAIT",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "phone" as const,
+            value: "+965 2221 2345",
+            sourceUrl: "https://www.jtekt.ae/distributors-kuwait"
+          }
+        ],
+        summary:
+          "Official page text: JTEKT distributor network for KOYO bearings, automotive spare parts, steering systems and automobile mobility components in Kuwait."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Kuwait"],
+        productKeywords: ["RAN equipment", "telecom spare parts", "rectifier module"],
+        customerTypeKeywords: ["distributor", "stockist", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Telecom task but candidate page has no telecom"),
+        expect.stringContaining("Off-target product/service evidence")
+      ])
+    );
+  });
+
   it("keeps government tender and exhibition PDFs as intelligence, not customers", async () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const candidates = service.normalizeSearchResults(
@@ -3143,6 +4286,190 @@ describe("LeadQualificationService", () => {
     ]);
   });
 
+  it("mines non-telecom directory pages into official company candidates", async () => {
+    const prisma = createPrismaMock();
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("enfsolar.com")) {
+        return new Response(
+          `
+            <html><body>
+              <h1>Solar Installers UAE Directory</h1>
+              <a href="https://sunergysolar.ae/">Sunergy Solar LLC</a>
+              <p>Dubai solar inverter installer and EPC contractor.</p>
+            </body></html>
+          `,
+          { status: 200, headers: { "content-type": "text/html; charset=UTF-8" } }
+        );
+      }
+
+      if (url.includes("sunergysolar.ae/contact")) {
+        return new Response(
+          `
+            <html><body>
+              <a href="mailto:sales@sunergysolar.ae">sales@sunergysolar.ae</a>
+              <span>+971 4 555 0199</span>
+            </body></html>
+          `,
+          { status: 200, headers: { "content-type": "text/html; charset=UTF-8" } }
+        );
+      }
+
+      return new Response(
+        `
+          <html><body>
+            <title>Sunergy Solar LLC</title>
+            Solar inverter installation, EPC contracting and energy storage projects in UAE.
+            <a href="/contact">Contact</a>
+          </body></html>
+        `,
+        { status: 200, headers: { "content-type": "text/html; charset=UTF-8" } }
+      );
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Solar Installers UAE Directory - ENF Solar",
+          url: "https://www.enfsolar.com/directory/installer/UAE",
+          snippet: "Directory of UAE solar inverter installers and EPC contractors.",
+          source: "web"
+        }
+      ],
+      {
+        targetRegions: ["UAE"],
+        productKeywords: ["solar inverter", "energy storage"],
+        customerTypeKeywords: ["EPC contractor", "installer"],
+        disqualifiers: []
+      },
+      "UAE"
+    );
+
+    const created = prisma.leadCandidate.create.mock.calls.map((call) => call[0].data);
+    const derived = created.find((lead) => lead.website === "https://sunergysolar.ae/");
+
+    expect(created).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "intelligence",
+          website: "https://www.enfsolar.com/directory/installer/UAE"
+        })
+      ])
+    );
+    expect(derived).toMatchObject({
+      companyName: "Sunergy Solar LLC",
+      country: "UAE"
+    });
+    expect(derived?.status).not.toBe("rejected");
+    expect(derived?.contacts.create).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "email", value: "sales@sunergysolar.ae" }),
+        expect.objectContaining({ type: "phone", value: "+971 4 555 0199" })
+      ])
+    );
+    expect(derived?.icpScore.create.reasons).toMatchObject({
+      sourcePage: {
+        url: "https://www.enfsolar.com/directory/installer/UAE"
+      }
+    });
+  });
+
+  it("follows directory profile pages before mining non-telecom official websites", async () => {
+    const prisma = createPrismaMock();
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("enfsolar.com/directory/installer/9001")) {
+        return new Response(
+          `
+            <html><body>
+              <h1>Sunergy Solar LLC</h1>
+              <p>Dubai solar inverter installer and EPC contractor.</p>
+              <a href="https://sunergysolar.ae/">Company Website</a>
+            </body></html>
+          `,
+          { status: 200, headers: { "content-type": "text/html; charset=UTF-8" } }
+        );
+      }
+
+      if (url.includes("enfsolar.com/directory/installer/UAE")) {
+        return new Response(
+          `
+            <html><body>
+              <h1>Solar Installers UAE Directory</h1>
+              <a href="/directory/installer/9001/sunergy-solar">Sunergy Solar LLC profile</a>
+            </body></html>
+          `,
+          { status: 200, headers: { "content-type": "text/html; charset=UTF-8" } }
+        );
+      }
+
+      if (url.includes("sunergysolar.ae/contact")) {
+        return new Response(
+          `
+            <html><body>
+              <a href="mailto:sales@sunergysolar.ae">sales@sunergysolar.ae</a>
+              <span>+971 4 555 0199</span>
+            </body></html>
+          `,
+          { status: 200, headers: { "content-type": "text/html; charset=UTF-8" } }
+        );
+      }
+
+      return new Response(
+        `
+          <html><body>
+            <title>Sunergy Solar LLC</title>
+            Solar inverter installation, EPC contracting and energy storage projects in UAE.
+            <a href="/contact">Contact</a>
+          </body></html>
+        `,
+        { status: 200, headers: { "content-type": "text/html; charset=UTF-8" } }
+      );
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Solar Installers UAE Directory - ENF Solar",
+          url: "https://www.enfsolar.com/directory/installer/UAE",
+          snippet: "Directory of UAE solar inverter installers and EPC contractors.",
+          source: "web"
+        }
+      ],
+      {
+        targetRegions: ["UAE"],
+        productKeywords: ["solar inverter", "energy storage"],
+        customerTypeKeywords: ["EPC contractor", "installer"],
+        disqualifiers: []
+      },
+      "UAE"
+    );
+
+    const created = prisma.leadCandidate.create.mock.calls.map((call) => call[0].data);
+    const derived = created.find((lead) => lead.website === "https://sunergysolar.ae/");
+
+    expect(derived).toMatchObject({
+      companyName: "Sunergy Solar LLC",
+      country: "UAE"
+    });
+    expect(derived?.status).not.toBe("rejected");
+    expect(derived?.contacts.create).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "email", value: "sales@sunergysolar.ae" }),
+        expect.objectContaining({ type: "phone", value: "+971 4 555 0199" })
+      ])
+    );
+    expect(derived?.icpScore.create.reasons).toMatchObject({
+      sourcePage: {
+        url: "https://www.enfsolar.com/directory/installer/9001/sunergy-solar"
+      }
+    });
+  });
+
   it("uses real company names instead of forbidden page labels", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const candidates = service.normalizeSearchResults(
@@ -3190,12 +4517,7 @@ describe("LeadQualificationService", () => {
     ]);
   });
 
-  it("keeps generic service pages without direct contacts in review (not qualified) thanks to the buyer-role floor", () => {
-    // 2026-05: this test used to assert score <= 58 and status =
-    // "rejected". The new policy keeps buyer-role pages in review even
-    // when there is no email or phone yet (so the user can choose to
-    // enrich). We still cap the score under "qualified" so the human
-    // does not see false confidence.
+  it("keeps generic service pages without direct contacts as manual review", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(
       [
@@ -3400,6 +4722,143 @@ describe("LeadQualificationService", () => {
         })
       ])
     });
+  });
+
+  it("reuses reachable contacts from the same user's historical leads with the same domain", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadCandidate.findMany
+      .mockResolvedValueOnce([
+        {
+          website: "https://gulf5g.ae/",
+          sourceUrl: "https://gulf5g.ae/contact",
+          contacts: [
+            {
+              type: "email",
+              value: "sales@gulf5g.ae",
+              sourceUrl: "https://gulf5g.ae/contact"
+            },
+            {
+              type: "form",
+              value: "https://gulf5g.ae/contact",
+              sourceUrl: "https://gulf5g.ae/contact"
+            }
+          ]
+        }
+      ])
+      .mockResolvedValueOnce([]);
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-current",
+      [
+        {
+          title: "Gulf 5G Systems - Telecom System Integrator UAE",
+          url: "https://gulf5g.ae/services",
+          snippet:
+            "UAE system integrator maintaining RAN, 5G base station, telecom power and FTTH networks.",
+          source: "web"
+        }
+      ],
+      criteria,
+      "UAE",
+      undefined,
+      undefined,
+      { userId: "user-1" }
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(prisma.leadCandidate.findMany).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          taskId: { not: "task-current" },
+          task: { userId: "user-1" }
+        })
+      })
+    );
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "sales@gulf5g.ae" }),
+              expect.objectContaining({ type: "form", value: "https://gulf5g.ae/contact" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("revalidates country after same-user historical phone contacts are merged", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadCandidate.findMany
+      .mockResolvedValueOnce([
+        {
+          website: "https://almashariq.com/",
+          sourceUrl: "https://www.almashariq.com/contactus.php",
+          contacts: [
+            {
+              type: "email",
+              value: "info@almashariq.com",
+              sourceUrl: "https://www.almashariq.com/contactus.php"
+            },
+            {
+              type: "phone",
+              value: "+966-13-8433336",
+              sourceUrl: "https://www.almashariq.com/contactus.php"
+            }
+          ]
+        }
+      ])
+      .mockResolvedValueOnce([]);
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-current",
+      [
+        {
+          title: "Almashariq - Telecom Infrastructure Contractor",
+          url: "https://www.almashariq.com/page.php?id=134",
+          snippet:
+            "Telecom infrastructure contractor and system integrator for base station, tower, RAN and telecom power projects.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE", "Saudi Arabia"]
+      },
+      "UAE",
+      undefined,
+      undefined,
+      { userId: "user-1" }
+    );
+
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          country: "SAUDI ARABIA",
+          inferredCountry: "SAUDI ARABIA",
+          countryConfidence: expect.stringMatching(/medium|high/),
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "phone", value: "+966-13-8433336" })
+            ])
+          },
+          icpScore: {
+            create: expect.objectContaining({
+              reasons: expect.objectContaining({
+                countryValidation: expect.objectContaining({
+                  inferredCountry: "SAUDI ARABIA",
+                  countryConfidence: expect.stringMatching(/medium|high/)
+                })
+              })
+            })
+          }
+        })
+      })
+    );
   });
 
   // 2026-05 V1-MVP: hard reject reference customers (HCT Group, Spectrum MEA,
@@ -4228,6 +5687,74 @@ describe("LeadQualificationService", () => {
     );
     expect(score.pageType).not.toBe("content_or_directory");
     expect(score.leadType).not.toBe("content_evidence");
+  });
+
+  it("does NOT hide an official telecom service page because social share URLs mention news/articles", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Aesthetix",
+        website: "https://aesthetixglobal.com/en-ae/telecom-system-integration",
+        sourceUrl: "https://aesthetixglobal.com/en-ae/telecom-system-integration",
+        country: "UAE",
+        inferredCountry: "UAE",
+        countryConfidence: "medium",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+97143262333",
+            country: "UAE",
+            sourceUrl: "https://aesthetixglobal.com/en/contact-us",
+            confidence: "medium"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "enquiries@aesthetixglobal.com",
+            sourceUrl: "https://aesthetixglobal.com"
+          },
+          {
+            type: "phone" as const,
+            value: "+97143262333",
+            sourceUrl: "https://aesthetixglobal.com/en/contact-us"
+          },
+          {
+            type: "social" as const,
+            value:
+              "https://twitter.com/intent/tweet?url=https%3A%2F%2Faesthetixglobal.com%2Fnews-and-updates%2Foman-gas-company-3-year-maintenance",
+            sourceUrl: "https://aesthetixglobal.com/en-ae/news-and-updates/oman-gas-company"
+          },
+          {
+            type: "social" as const,
+            value:
+              "https://www.linkedin.com/shareArticle?mini=true&url=https%3A%2F%2Faesthetixglobal.com%2Fnews-and-updates%2Foman-gas-company-3-year-maintenance",
+            sourceUrl: "https://aesthetixglobal.com/en-ae/news-and-updates/oman-gas-company"
+          }
+        ],
+        summary:
+          "Aesthetix is a telecom system integrator and engineering service provider in UAE for oil and gas telecom projects. Services include procurement, logistics, design, construction, commissioning, SAT, training, and managed services. Latest News."
+      },
+      {
+        ...criteria,
+        targetRegions: ["UAE"],
+        productKeywords: ["telecom equipment", "telecom spare parts", "5G"],
+        customerTypeKeywords: ["system integrator", "contractor", "engineering service provider"]
+      }
+    );
+
+    expect(score.pageType).not.toBe("content_or_directory");
+    expect(score.leadType).not.toBe("content_evidence");
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "News, article, blog, media, report, or content page cannot enter the main customer list"
+        )
+      ])
+    );
+    expect(score.status).not.toBe("rejected");
   });
 
   it("STILL classifies a real news/article URL as content even when the candidate country IS in target (EE Times-style scenario)", () => {

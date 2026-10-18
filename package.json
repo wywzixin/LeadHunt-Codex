@@ -8,6 +8,7 @@
     "dev:web": "pnpm --filter @leadhunt/web dev",
     "dev:api": "pnpm --filter @leadhunt/api dev",
     "build": "pnpm -r build",
+    "package:deploy": "powershell -ExecutionPolicy Bypass -File scripts/package-deploy.ps1",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",

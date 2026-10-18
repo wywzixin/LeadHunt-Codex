@@ -16,6 +16,7 @@ export const INITIAL_TARGET_MARKETS = [
   "United States",
   "Europe",
   "Brazil",
+  "South America",
   "Latin America",
   "Africa"
 ];
@@ -31,6 +32,7 @@ const macroMarketOptions: MarketOption[] = [
   { value: "Europe", label: "欧洲", group: "region", aliases: ["europe"] },
   { value: "Africa", label: "非洲", group: "region", aliases: ["africa"] },
   { value: "North America", label: "北美洲", group: "region", aliases: ["north america"] },
+  { value: "South America", label: "南美洲", group: "region", aliases: ["south america", "south america region"] },
   { value: "Latin America", label: "拉美", group: "region", aliases: ["latin america", "latam"] },
   { value: "Americas", label: "美洲", group: "region", aliases: ["americas"] },
   { value: "Oceania", label: "大洋洲", group: "region", aliases: ["oceania"] }

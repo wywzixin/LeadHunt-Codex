@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable, UnauthorizedException } from "@nestjs/common";
 import { z } from "zod";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { defaultProductProfile } from "./default-profiles.js";
 
 const profileNotesMaxLength = 800;
 
@@ -20,8 +21,18 @@ export class ProductProfileService {
       throw new UnauthorizedException("Authentication required");
     }
 
-    return this.prisma.productProfile.findUnique({
+    const profile = await this.prisma.productProfile.findUnique({
       where: { userId }
+    });
+    if (profile) {
+      return profile;
+    }
+
+    return this.prisma.productProfile.create({
+      data: {
+        userId,
+        ...defaultProductProfile
+      }
     });
   }
 

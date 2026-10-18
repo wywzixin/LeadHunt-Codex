@@ -52,7 +52,7 @@ const navGroups: Array<{ label?: string; items: NavItem[] }> = [
     items: [{ label: "AI 外贸员", href: "/", icon: Bot, letter: "A", badge: "New", featured: true }]
   },
   {
-    label: "线索中心",
+    label: "获客配置",
     items: [
       { label: "产品画像", href: "/product-profile", icon: PackageSearch, letter: "P" },
       { label: "客户画像", href: "/customer-profile", icon: UsersRound, letter: "C" }

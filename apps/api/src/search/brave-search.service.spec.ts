@@ -99,4 +99,69 @@ describe("BraveSearchService", () => {
       })
     );
   });
+
+  it("filters marketplace and content noise while keeping mineable directories", async () => {
+    const prisma = createPrismaMock();
+    const braveClient = createBraveClientMock();
+    braveClient.searchWeb.mockResolvedValueOnce([
+      {
+        title: "Alibaba Solar Supplier",
+        url: "https://seller.en.alibaba.com/company_profile.html",
+        snippet: "marketplace listing",
+        source: "web"
+      },
+      {
+        title: "Tradewheel Solar Buyers",
+        url: "https://www.tradewheel.com/solar-inverter/",
+        snippet: "directory listing",
+        source: "web"
+      },
+      {
+        title: "Local Solar EPC",
+        url: "https://localsolar.example/contact",
+        snippet: "Qatar solar EPC contractor contact",
+        source: "web"
+      },
+      {
+        title: "ENF Solar Directory",
+        url: "https://www.enfsolar.com/directory/installer",
+        snippet: "directory",
+        source: "web"
+      },
+      {
+        title: "PV News",
+        url: "https://www.pv-tech.org/news/example",
+        snippet: "news",
+        source: "web"
+      }
+    ]);
+    braveClient.searchLlmContext.mockResolvedValueOnce([]);
+    const service = new BraveSearchService(prisma as any, braveClient as any);
+
+    const result = await service.searchAndSaveResults("query-1", {
+      query: "solar inverter distributor Qatar contact",
+      country: "ALL",
+      language: "en",
+      count: 10
+    });
+
+    expect(result.count).toBe(2);
+    expect(braveClient.searchLlmContext).toHaveBeenCalled();
+    expect(prisma.searchResult.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          url: "https://localsolar.example/contact",
+          domain: "localsolar.example"
+        }),
+        expect.objectContaining({
+          url: "https://www.enfsolar.com/directory/installer",
+          domain: "enfsolar.com"
+        })
+      ]
+    });
+    expect(prisma.searchQuery.update).toHaveBeenCalledWith({
+      where: { id: "query-1" },
+      data: { resultCount: 2 }
+    });
+  });
 });

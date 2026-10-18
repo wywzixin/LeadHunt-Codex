@@ -29,9 +29,11 @@ const CUSTOMER_PROFILE_NOTES_MAX_LENGTH = 300;
 
 const initialState: CustomerProfileState = {
   targetRegions: INITIAL_TARGET_MARKETS,
-  industryKeywords: "行业关键词、产品应用场景、目标客户行业",
+  industryKeywords:
+    "4G/5G通信设备, 经销商, 现货商, 系统集成商, 通信工程承包商, 铁塔维护, 通信电源, 回传, IBS, 网络运维, 备件替换, 设备翻新, 生命周期延长",
   referenceCustomerUrlsText: "https://spectrummea.com/\nhttps://highcloud.ae/",
-  notes: "我想找会使用、维护、安装、集成、采购或运营这类产品的客户，优先有项目交付、备件补货、维护运维或采购需求。"
+  notes:
+    "我们主要开发海外 4G/5G 通信设备经销商、现货商、系统集成商、通信工程承包商、铁塔/电源/回传/IBS 服务商，以及做网络运维、备件替换、设备翻新和生命周期延长的公司。"
 };
 
 const guideItems = [
@@ -230,7 +232,7 @@ export function CustomerProfileForm() {
               maxLength={CUSTOMER_PROFILE_NOTES_MAX_LENGTH}
               value={form.notes}
               onChange={(event) => updateField("notes", event.target.value)}
-              placeholder="例如：我想找会使用、维护、安装、集成、采购或运营这类产品的客户，优先有项目交付、备件补货、维护运维或采购需求。"
+              placeholder="例如：我们主要开发海外 4G/5G 通信设备经销商、现货商、系统集成商、通信工程承包商、铁塔/电源/回传/IBS 服务商，以及网络运维、备件替换、设备翻新公司。"
             />
             <small>{form.notes.length} / {CUSTOMER_PROFILE_NOTES_MAX_LENGTH}</small>
           </label>

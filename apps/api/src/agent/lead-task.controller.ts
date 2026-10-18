@@ -32,6 +32,11 @@ const approveLeadTaskSchema = z.object({
   leadIds: z.array(z.string().uuid()).min(1).max(500).optional()
 });
 
+const rejectLeadTaskSchema = z.object({
+  leadIds: z.array(z.string().uuid()).min(1).max(500),
+  reason: z.string().trim().max(500).optional()
+});
+
 const executeSearchSchema = z.object({
   limit: z.number().int().min(1).max(500).optional(),
   // 2026-05 Stage 2 follow-up: when set, the backend appends a fresh
@@ -124,6 +129,17 @@ export class LeadTaskController {
     }
 
     return this.agentWorkflowService.approveCandidatesForUser(user.id, taskId, parsed.data);
+  }
+
+  @Post(":taskId/reject")
+  async reject(@Req() request: Request, @Param("taskId") taskId: string, @Body() body: unknown) {
+    const { user } = await this.authService.me(readSessionCookie(request));
+    const parsed = rejectLeadTaskSchema.safeParse(body ?? {});
+    if (!parsed.success) {
+      throw new BadRequestException("Invalid lead rejection payload");
+    }
+
+    return this.agentWorkflowService.rejectCandidatesForUser(user.id, taskId, parsed.data);
   }
 
   @Post(":taskId/pause")

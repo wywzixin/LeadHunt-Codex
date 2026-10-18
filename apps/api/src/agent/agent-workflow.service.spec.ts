@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentWorkflowService,
+  assessSearchQueryLaneCoverage,
+  assessSearchQueryQualityCoverage,
+  buildAdvancedSearchQueriesFromKeywordGroups,
+  buildLaneKQueriesFromKeywordGroups,
+  buildLearnedFollowupQueriesFromQueryLearning,
   splitReferenceCompanyAliases,
   trimReferenceCompanyName,
   resolveSearchQueryConcurrency
@@ -23,6 +28,12 @@ function createPrismaMock() {
     ]),
     $executeRaw: vi.fn().mockResolvedValue(1),
     productProfile: {
+      create: vi.fn().mockResolvedValue({
+        websiteUrl: "https://telecorenet.com/",
+        productPageUrl: "https://telecorenet.com/products",
+        documentUrls: [],
+        notes: "starter product profile"
+      }),
       findUnique: vi.fn().mockResolvedValue({
         websiteUrl: "https://telecorenet.com/",
         productPageUrl: "https://telecorenet.com/products",
@@ -31,6 +42,12 @@ function createPrismaMock() {
       })
     },
     customerProfile: {
+      create: vi.fn().mockResolvedValue({
+        targetRegions: ["UAE", "Saudi Arabia", "Africa"],
+        referenceCustomerUrls: ["https://spectrummea.com/", "https://highcloud.ae/"],
+        crmSampleIds: [],
+        notes: "starter customer profile"
+      }),
       findUnique: vi.fn().mockResolvedValue({
         targetRegions: ["UAE", "Saudi Arabia"],
         referenceCustomerUrls: ["https://spectrummea.com/", "http://highcloud.ae/"],
@@ -159,6 +176,9 @@ function createPrismaMock() {
     agentStep: {
       createMany: vi.fn().mockResolvedValue({ count: 16 }),
       updateMany: vi.fn().mockResolvedValue({ count: 1 })
+    },
+    leadStageEvent: {
+      createMany: vi.fn().mockResolvedValue({ count: 1 })
     }
   };
 }
@@ -226,7 +246,7 @@ function createWebsiteContentMock() {
           domain: "spectrummea.com",
           role: "reference_customer",
           status: "read",
-          title: "Spectrum MEA",
+          title: "Spectrum MEA - Bringing Latest Design",
           wordCount: 90,
           textSample: "Telecom system integrator for microwave backhaul and managed services.",
           evidenceSnippets: [
@@ -703,6 +723,56 @@ describe("AgentWorkflowService", () => {
     });
   });
 
+  it("creates starter profiles and still seeds deterministic queries for a new account", async () => {
+    const prisma = createPrismaMock();
+    prisma.productProfile.findUnique.mockResolvedValue(null);
+    prisma.customerProfile.findUnique.mockResolvedValue(null);
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt: "帮我找5G通信设备相关的客户",
+      targetCount: 30
+    });
+
+    expect(prisma.productProfile.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: "user-1",
+        websiteUrl: "https://telecorenet.com/"
+      })
+    });
+    expect(prisma.customerProfile.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: "user-1",
+        targetRegions: expect.arrayContaining(["UAE", "Saudi Arabia", "Africa"])
+      })
+    });
+    expect(result.searchQueries.length).toBeGreaterThan(0);
+    expect(result.searchQueries.some((query) => query.operatorSource === "lane_k_keyword_combination")).toBe(
+      true
+    );
+    expect(prisma.leadTask.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        inputPayload: expect.objectContaining({
+          profileSignals: expect.objectContaining({
+            profileDefaultsApplied: {
+              productProfile: true,
+              customerProfile: true
+            }
+          })
+        })
+      })
+    });
+  });
+
   it("keeps manually selected target countries in the generated search queries", async () => {
     const prisma = createPrismaMock();
     prisma.customerProfile.findUnique.mockResolvedValue({
@@ -764,7 +834,129 @@ describe("AgentWorkflowService", () => {
     );
   });
 
-  it("keeps macro profile regions auditable while planning only the primary market pool first", async () => {
+  it("spreads broad prompt regions across multiple country pools instead of letting one region consume the batch", async () => {
+    const prisma = createPrismaMock();
+    prisma.customerProfile.findUnique.mockResolvedValue({
+      targetRegions: ["UAE"],
+      referenceCustomerUrls: [],
+      crmSampleIds: [],
+      notes: "Saved profile should not override explicitly broader prompt regions."
+    });
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt:
+        "Find 5G telecom equipment customers in Middle East, Africa, Southeast Asia and Latin America",
+      targetCount: 20
+    });
+    const queryCountries = new Set(result.searchQueries.map((query) => query.country));
+
+    expect(ai.generateSearchStrategy.mock.calls[0]?.[0].targetMarkets).toEqual([
+      "UAE",
+      "Saudi Arabia",
+      "Qatar",
+      "Oman",
+      "Kuwait",
+      "Iraq",
+      "Nigeria",
+      "Kenya",
+      "South Africa",
+      "Egypt",
+      "Brazil",
+      "Chile",
+      "Colombia",
+      "Peru",
+      "Indonesia"
+    ]);
+    expect(queryCountries).toEqual(
+      new Set([
+        "UAE",
+        "Saudi Arabia",
+        "Qatar",
+        "Oman",
+        "Kuwait",
+        "Iraq",
+        "Nigeria",
+        "Kenya",
+        "South Africa",
+        "Egypt",
+        "Brazil",
+        "Chile",
+        "Colombia",
+        "Peru",
+        "Indonesia"
+      ])
+    );
+  });
+
+  it("keeps explicitly requested countries while adding high-priority countries from broad regions", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      undefined,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt:
+        "Find 5G telecom equipment customers in UAE, Saudi Arabia, Qatar, Oman, Afghanistan, Iraq, Middle East, Africa, South America, Russia and Ukraine",
+      targetCount: 30
+    });
+    const queryCountries = new Set(result.searchQueries.map((query) => query.country));
+
+    expect(ai.generateSearchStrategy.mock.calls[0]?.[0].targetMarkets).toEqual([
+      "UAE",
+      "Saudi Arabia",
+      "Qatar",
+      "Oman",
+      "Kuwait",
+      "Iraq",
+      "Nigeria",
+      "Kenya",
+      "South Africa",
+      "Egypt",
+      "Brazil",
+      "Chile",
+      "Afghanistan",
+      "Ukraine",
+      "Russia"
+    ]);
+    expect(queryCountries).toEqual(
+      new Set([
+        "UAE",
+        "Saudi Arabia",
+        "Qatar",
+        "Oman",
+        "Kuwait",
+        "Iraq",
+        "Nigeria",
+        "Kenya",
+        "South Africa",
+        "Egypt",
+        "Brazil",
+        "Chile",
+        "Russia",
+        "Ukraine",
+        "Afghanistan"
+      ])
+    );
+  });
+
+  it("keeps macro profile regions auditable while planning a diverse primary market pool first", async () => {
     const prisma = createPrismaMock();
     prisma.customerProfile.findUnique.mockResolvedValue({
       targetRegions: ["Middle East", "Africa", "Brazil", "Russia", "Ukraine"],
@@ -790,11 +982,43 @@ describe("AgentWorkflowService", () => {
     const queryCountries = result.searchQueries.map((query) => query.country);
 
     const aiInput = ai.generateSearchStrategy.mock.calls[0]?.[0];
-    expect(aiInput?.targetMarkets).toEqual(["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"]);
+    expect(aiInput?.targetMarkets).toEqual([
+      "UAE",
+      "Saudi Arabia",
+      "Qatar",
+      "Oman",
+      "Kuwait",
+      "Iraq",
+      "Nigeria",
+      "Kenya",
+      "South Africa",
+      "Egypt",
+      "Brazil",
+      "Russia",
+      "Ukraine",
+      "Morocco",
+      "Ghana"
+    ]);
     expect(queryCountries).not.toContain("Middle East");
     expect(queryCountries).not.toContain("Africa");
     expect(new Set(queryCountries)).toEqual(
-      new Set(["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"])
+      new Set([
+        "UAE",
+        "Saudi Arabia",
+        "Qatar",
+        "Oman",
+        "Kuwait",
+        "Iraq",
+        "Nigeria",
+        "Kenya",
+        "South Africa",
+        "Egypt",
+        "Brazil",
+        "Russia",
+        "Ukraine",
+        "Morocco",
+        "Ghana"
+      ])
     );
     expect(result.searchQueries.length).toBeGreaterThanOrEqual(20);
     expect(prisma.leadTask.create).toHaveBeenCalledWith({
@@ -802,22 +1026,28 @@ describe("AgentWorkflowService", () => {
         inputPayload: expect.objectContaining({
           profileSignals: expect.objectContaining({
             marketSelection: expect.objectContaining({
-              targetMarkets: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"],
-              secondaryMarkets: expect.arrayContaining([
-                "Bahrain",
-                "Jordan",
+              targetMarkets: [
+                "UAE",
+                "Saudi Arabia",
+                "Qatar",
+                "Oman",
+                "Kuwait",
                 "Iraq",
-                "Iran",
                 "Nigeria",
                 "Kenya",
                 "South Africa",
                 "Egypt",
-                "Morocco",
-                "Ghana",
-                "Tanzania",
                 "Brazil",
                 "Russia",
-                "Ukraine"
+                "Ukraine",
+                "Morocco",
+                "Ghana"
+              ],
+              secondaryMarkets: expect.arrayContaining([
+                "Bahrain",
+                "Jordan",
+                "Iran",
+                "Tanzania"
               ]),
               marketSource: "profile"
             })
@@ -955,7 +1185,15 @@ describe("AgentWorkflowService", () => {
             marketSelection: expect.objectContaining({
               targetMarkets: ["Canada", "Australia"],
               promptMarkets: ["Canada", "Australia"],
-              profileMarkets: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"],
+              profileMarkets: expect.arrayContaining([
+                "UAE",
+                "Saudi Arabia",
+                "Qatar",
+                "Oman",
+                "Kuwait",
+                "Iran",
+                "Russia"
+              ]),
               secondaryMarkets: [],
               marketSource: "prompt"
             })
@@ -1095,10 +1333,8 @@ describe("AgentWorkflowService", () => {
     expect(queryText).toContain('"private 5G solutions"');
     expect(queryText).toContain('"field engineering"');
     expect(queryText).toContain('"telecom power service"');
-    // 2026-05: backend no longer concatenates -site:/-inurl: exclusions
-    // into the query text. Brave does not honor them reliably and they
-    // burn scarce query-length budget; post-search candidate filtering
-    // does the actual rejection. Assert the new behavior here.
+    // The persisted search-plan text stays readable; backend-level
+    // marketplace / OEM exclusions are appended only when calling Brave.
     expect(queryText).not.toContain("-site:alibaba.com");
     expect(queryText).not.toContain("-inurl:.cn");
     expect(queryText).not.toMatch(/-phone\b/i);
@@ -1136,7 +1372,7 @@ describe("AgentWorkflowService", () => {
     expect(result.searchQueries.some((q) => q.templateId?.startsWith("lane_k_"))).toBe(true);
   });
 
-  it("front-loads telecom-specific Lane K queries for tower maintenance buyer searches", async () => {
+  it("front-loads high-yield telecom buyer Lane K queries before procurement lanes", async () => {
     const prisma = createPrismaMock();
     const ai = createLeadHuntAiMock(async (input) => ({
       queries: simpleAiQueriesForMarkets(input.targetMarkets)
@@ -1155,22 +1391,474 @@ describe("AgentWorkflowService", () => {
       targetCount: 30
     });
 
-    const firstLaneKQueries = result.searchQueries
+    const laneKQueries = result.searchQueries.filter(
+      (query) => query.operatorSource === "lane_k_keyword_combination"
+    );
+    const firstLaneKQueries = laneKQueries
       .slice(0, 12)
       .map((query) => query.query)
       .join("\n");
+    const allLaneKQueries = laneKQueries.map((query) => query.query).join("\n");
+    const towerLaneCount = laneKQueries.filter((query) =>
+      /tower contractor|towerco|cell site maintenance|tower maintenance/i.test(query.query)
+    ).length;
+    const procurementLaneCount = laneKQueries.filter((query) =>
+      /procurement|purchasing|vendor registration|supplier registration|RFQ|tender/i.test(
+        query.query
+      )
+    ).length;
 
-    expect(firstLaneKQueries).toMatch(
-      /"tower maintenance" OR "base station maintenance" OR "RAN maintenance"/i
-    );
-    expect(firstLaneKQueries).toMatch(
-      /"telecom contractor" OR "tower contractor" OR "network maintenance company"/i
-    );
-    expect(firstLaneKQueries).toMatch(/"rectifier" OR "-48V" OR "telecom power"/i);
+    expect(firstLaneKQueries).toMatch(/(?:distributor|stockist).*(?:reseller|importer)/i);
+    expect(firstLaneKQueries).toMatch(/"system integrator" OR contractor/i);
+    expect(firstLaneKQueries).toMatch(/telecom spare parts|telecom infrastructure equipment/i);
+    expect(firstLaneKQueries).not.toMatch(/procurement OR purchasing OR "vendor registration"/i);
+    expect(allLaneKQueries).toMatch(/procurement OR purchasing OR "vendor registration"/i);
+    expect(towerLaneCount).toBeGreaterThanOrEqual(2);
+    expect(procurementLaneCount).toBeGreaterThanOrEqual(2);
+    expect(firstLaneKQueries).toMatch(/\bcontact\b/i);
     expect(firstLaneKQueries).toMatch(/\bNigeria\b/i);
     expect(firstLaneKQueries).toMatch(/\bKenya\b/i);
-    expect(firstLaneKQueries).toMatch(/site:\.ng|site:\.ke/i);
+    expect(allLaneKQueries).toMatch(/site:\.ng|site:\.ke/i);
     expect(firstLaneKQueries).not.toMatch(/\b(?:R4850N6|MA5800|MA5608T)\b/i);
+  });
+
+  it("continues telecom Lane K coverage after the first learned-template set is exhausted", () => {
+    const queries = buildLaneKQueriesFromKeywordGroups({
+      keywordGroups: {
+        brandTerms: ["Huawei", "ZTE", "Ericsson", "Nokia", "Eltek"],
+        productTerms: [
+          "RAN equipment",
+          "base station equipment",
+          "telecom spare parts",
+          "rectifier module",
+          "OLT equipment"
+        ],
+        longTailProductTerms: ["Huawei R4850N6", "Ericsson RRU 4428"],
+        customerIntentTerms: [
+          "telecom equipment stockist",
+          "system integrator",
+          "tower contractor",
+          "telecom power maintenance company",
+          "ISP"
+        ],
+        marketTerms: ["UAE", "Saudi Arabia", "Kenya", "Nigeria", "South Africa"],
+        scenarioTerms: [
+          "base station maintenance",
+          "RAN maintenance",
+          "tower maintenance",
+          "telecom power service"
+        ],
+        excludeTerms: []
+      },
+      productProfileAnalysis: {
+        keyProducts: ["RAN equipment", "base station equipment", "rectifier module"],
+        productCategories: ["5G telecom equipment"],
+        targetUseCases: ["base station maintenance", "telecom power service"]
+      },
+      customerProfileAnalysis: {
+        idealCustomerTypes: [
+          "telecom equipment stockist",
+          "system integrator",
+          "tower contractor",
+          "telecom power maintenance company",
+          "ISP"
+        ]
+      },
+      targetMarkets: ["UAE", "Saudi Arabia", "Kenya", "Nigeria", "South Africa"],
+      maxQueries: 45
+    });
+    const textAfterFirstTelecomSet = queries
+      .slice(24)
+      .map((query) => query.query)
+      .join("\n");
+
+    expect(queries.length).toBe(45);
+    expect(textAfterFirstTelecomSet).toMatch(/telecom equipment|network equipment|communication equipment/i);
+    expect(textAfterFirstTelecomSet).toMatch(/system integrator|tower contractor|maintenance company|ISP|vendor registration/i);
+    expect(textAfterFirstTelecomSet).toMatch(/Kenya|Nigeria|South Africa|Saudi Arabia|UAE/i);
+    expect(textAfterFirstTelecomSet).toMatch(/contact|registration|RFQ/i);
+  });
+
+  it("builds generic Lane K queries for non-telecom export products", () => {
+    const queries = buildLaneKQueriesFromKeywordGroups({
+      keywordGroups: {
+        brandTerms: ["Sungrow", "GoodWe"],
+        productTerms: ["solar inverter", "PV combiner box", "energy storage inverter"],
+        longTailProductTerms: ["Sungrow SG125CX inverter"],
+        customerIntentTerms: ["solar EPC contractor", "PV installer", "renewable distributor"],
+        marketTerms: ["Brazil", "Saudi Arabia"],
+        scenarioTerms: ["commercial solar project", "solar farm maintenance"],
+        excludeTerms: ["jobs", "news"]
+      },
+      productProfileAnalysis: {
+        keyProducts: ["solar inverter", "PV combiner box"],
+        productCategories: ["solar power equipment"],
+        targetUseCases: ["commercial solar project", "solar farm maintenance"]
+      },
+      customerProfileAnalysis: {
+        idealCustomerTypes: ["solar EPC contractor", "PV installer", "renewable distributor"]
+      },
+      targetMarkets: ["Brazil", "Saudi Arabia"],
+      maxQueries: 12
+    });
+
+    const text = queries.map((query) => query.query).join("\n");
+    const laneCoverage = assessSearchQueryLaneCoverage(queries);
+    const queryQualityCoverage = assessSearchQueryQualityCoverage(queries);
+
+    expect(queries).toHaveLength(12);
+    expect(laneCoverage.coveredCount).toBeGreaterThanOrEqual(6);
+    expect(queryQualityCoverage.coverage).toBeGreaterThanOrEqual(0.8);
+    expect(queryQualityCoverage.missingCounts.marketAnchor).toBe(0);
+    expect(queryQualityCoverage.missingCounts.contactOrProcurementEntry).toBe(0);
+    expect(laneCoverage.coveredLanes.map((lane) => lane.key)).toEqual(
+      expect.arrayContaining([
+        "channel",
+        "project",
+        "maintenance_mro",
+        "procurement_entry",
+        "local_market",
+        "industry_scenario"
+      ])
+    );
+    expect(text).toMatch(/solar inverter|PV combiner box|energy storage inverter/i);
+    expect(text).toMatch(/distributor|dealer|importer/i);
+    expect(text).toMatch(/EPC|installer|contractor|system integrator/i);
+    expect(text).toMatch(/vendor registration|supplier registration|RFQ|tender|procurement/i);
+    expect(text).toMatch(/maintenance|MRO|field service|repair/i);
+    expect(text).toMatch(/solar inverter distributor Brazil contact/i);
+    expect(text).toMatch(/Brazil solar company inverter contact|Saudi Arabia solar company inverter contact/i);
+    expect(text).not.toMatch(/\b(?:telecom|RAN|base station|tower maintenance|rectifier)\b/i);
+    expect(queries.every((query) => /\b(contact|services|projects|registration|support|catalog|brands)\b/i.test(query.query))).toBe(
+      true
+    );
+  });
+
+  it("front-loads short solar buyer-intent queries for higher search hit rate", () => {
+    const queries = buildLaneKQueriesFromKeywordGroups({
+      prompt:
+        "Find Middle East solar inverter buyers: solar EPC contractors, PV distributors, installers, BESS integrators and vendor registration pages.",
+      keywordGroups: {
+        brandTerms: ["Sungrow", "GoodWe"],
+        productTerms: ["solar inverter", "PV inverter", "BESS"],
+        longTailProductTerms: [],
+        customerIntentTerms: ["solar EPC contractor", "PV installer", "PV distributor"],
+        marketTerms: ["UAE", "Saudi Arabia", "Qatar", "Oman"],
+        scenarioTerms: ["commercial solar project", "microgrid project"],
+        excludeTerms: ["jobs", "news"]
+      },
+      productProfileAnalysis: {
+        keyProducts: ["solar inverter", "PV inverter", "BESS"],
+        productCategories: ["solar power equipment"],
+        targetUseCases: ["commercial solar project", "microgrid project"]
+      },
+      customerProfileAnalysis: {
+        idealCustomerTypes: ["solar EPC contractor", "PV installer", "PV distributor"]
+      },
+      targetMarkets: ["UAE", "Saudi Arabia", "Qatar", "Oman"],
+      maxQueries: 16
+    });
+
+    const text = queries.map((query) => query.query).join("\n");
+
+    expect(queries).toHaveLength(16);
+    expect(text).toMatch(/solar inverter|PV inverter|BESS/i);
+    expect(text).toMatch(/solar EPC contractor|solar installer|solar company/i);
+    expect(text).toMatch(/vendor registration|supplier registration|RFQ|tender/i);
+    expect(text).toMatch(/solar inverter distributor UAE contact/i);
+    expect(text).toMatch(/Qatar solar company inverter contact|Oman solar company inverter contact/i);
+    expect(text).not.toMatch(/-alibaba|-site:alibaba\.com|-manufacturer/i);
+    expect(text).not.toMatch(/\b(?:telecom|RAN|base station|RRU|rectifier|tower contractor)\b/i);
+  });
+
+  it("lets an explicit solar prompt override polluted telecom profile keywords", () => {
+    const prompt =
+      "开发中东和非洲地区的太阳能逆变器买家，重点找太阳能EPC承包商、光伏分销商、系统集成商、储能/BESS集成商、离网/微网解决方案商，以及项目采购入口、vendor registration、RFQ、tender。";
+    const input = {
+      prompt,
+      keywordGroups: {
+        brandTerms: ["Huawei", "ZTE", "Ericsson", "Eltek"],
+        productTerms: [
+          "RAN equipment",
+          "base station equipment",
+          "telecom spare parts",
+          "rectifier module"
+        ],
+        longTailProductTerms: ["Huawei R4850N6", "Ericsson RRU 4428"],
+        customerIntentTerms: [
+          "telecom equipment stockist",
+          "RAN maintenance company",
+          "tower contractor"
+        ],
+        marketTerms: ["UAE", "Saudi Arabia", "Qatar", "Oman"],
+        scenarioTerms: ["base station maintenance", "telecom power maintenance"],
+        excludeTerms: []
+      },
+      productProfileAnalysis: {
+        keyProducts: ["Huawei R4850N6", "Ericsson RRU", "telecom spare parts"],
+        productCategories: ["5G telecom equipment"],
+        targetUseCases: ["RAN maintenance", "base station maintenance"],
+        brands: ["Huawei", "ZTE", "Ericsson"]
+      },
+      customerProfileAnalysis: {
+        idealCustomerTypes: ["telecom system integrator", "tower maintenance contractor"],
+        buyingSignals: ["telecom power maintenance"],
+        industries: ["telecommunications"]
+      },
+      targetMarkets: ["UAE", "Saudi Arabia", "Qatar", "Oman"],
+      maxQueries: 14,
+      keywordPool: {
+        productTerms: ["RAN equipment", "base station equipment", "telecom spare parts"],
+        buyerRoles: ["telecom distributor", "RAN maintenance company"],
+        scenarioTerms: ["base station maintenance"],
+        excludeFromKeywords: []
+      }
+    };
+
+    const laneKText = buildLaneKQueriesFromKeywordGroups(input)
+      .map((query) => query.query)
+      .join("\n");
+    const advancedText = buildAdvancedSearchQueriesFromKeywordGroups({
+      ...input,
+      maxQueries: 8
+    })
+      .map((query) => query.query)
+      .join("\n");
+    const text = `${laneKText}\n${advancedText}`;
+
+    expect(text).toMatch(/solar inverter|PV inverter|photovoltaic inverter|BESS/i);
+    expect(text).toMatch(/EPC contractor|system integrator|distributor|microgrid/i);
+    expect(text).not.toMatch(
+      /\b(?:telecom|RAN|base station|RRU|rectifier|tower contractor|Huawei|ZTE|Ericsson|Eltek)\b/i
+    );
+  });
+
+  it("converts high-yield query learning into follow-up query variants", () => {
+    const queries = buildLearnedFollowupQueriesFromQueryLearning({
+      queryLearning: {
+        highYieldQueries: [
+          {
+            query:
+              '(distributor OR stockist OR reseller OR importer) "RAN equipment" UAE ("contact" OR "brands" OR "catalog")',
+            country: "UAE",
+            effectivenessScore: 0.91
+          }
+        ]
+      },
+      keywordGroups: {
+        brandTerms: [],
+        productTerms: ["RAN equipment", "telecom spare parts"],
+        longTailProductTerms: [],
+        customerIntentTerms: ["distributor", "stockist"],
+        marketTerms: ["UAE", "Saudi Arabia"],
+        scenarioTerms: ["base station maintenance"],
+        excludeTerms: []
+      },
+      targetMarkets: ["UAE", "Saudi Arabia"],
+      maxQueries: 4
+    });
+
+    const text = queries.map((query) => query.query).join("\n");
+
+    expect(queries.length).toBeGreaterThanOrEqual(3);
+    expect(queries.every((query) => query.operatorSource === "query_learning_high_yield")).toBe(
+      true
+    );
+    expect(text).toMatch(/"about us" OR "products"/i);
+    expect(text).toMatch(/Saudi Arabia/);
+    expect(text).toMatch(/RAN equipment/);
+  });
+
+  it("softens exact SKU/model terms before composing Lane K queries", () => {
+    const queries = buildLaneKQueriesFromKeywordGroups({
+      keywordGroups: {
+        brandTerms: ["ABB", "Schneider"],
+        productTerms: ["ABB ACS580 inverter", "Schneider ATV320 drive", "industrial inverter"],
+        longTailProductTerms: [],
+        customerIntentTerms: ["automation distributor", "MRO maintenance company"],
+        marketTerms: ["Germany"],
+        scenarioTerms: ["factory maintenance"],
+        excludeTerms: []
+      },
+      productProfileAnalysis: {
+        keyProducts: ["ABB ACS580 inverter", "Schneider ATV320 drive", "industrial inverter"],
+        productCategories: ["industrial inverter"],
+        targetUseCases: ["factory maintenance"]
+      },
+      customerProfileAnalysis: {
+        idealCustomerTypes: ["automation distributor", "MRO maintenance company"]
+      },
+      targetMarkets: ["Germany"],
+      maxQueries: 8
+    });
+
+    const text = queries.map((query) => query.query).join("\n");
+
+    expect(text).toMatch(/ABB inverter|Schneider drive|industrial inverter/i);
+    expect(text).not.toMatch(/\b(?:ACS580|ATV320)\b/i);
+  });
+
+  it("keeps telecom Lane K queries on product families instead of OEM/model-heavy strings", () => {
+    const queries = buildLaneKQueriesFromKeywordGroups({
+      keywordGroups: {
+        brandTerms: ["Huawei", "ZTE"],
+        productTerms: [
+          "Huawei R4850N6",
+          "Huawei OLT MA5800",
+          "Huawei WBBPf4 board",
+          "Telecom network equipment",
+          "Huawei communication equipment",
+          "ZTE communication equipment",
+          "RRU radio units",
+          "telecom spare parts"
+        ],
+        longTailProductTerms: [],
+        customerIntentTerms: ["telecom distributor", "system integrator", "maintenance company"],
+        marketTerms: ["UAE", "Saudi Arabia"],
+        scenarioTerms: ["base station maintenance"],
+        excludeTerms: []
+      },
+      productProfileAnalysis: {
+        keyProducts: ["Huawei R4850N6", "Huawei WBBPf4 board"],
+        productCategories: ["Telecom network equipment"],
+        targetUseCases: ["base station maintenance"]
+      },
+      customerProfileAnalysis: {
+        idealCustomerTypes: ["telecom distributor", "system integrator", "maintenance company"]
+      },
+      targetMarkets: ["UAE", "Saudi Arabia"],
+      maxQueries: 10
+    });
+
+    const text = queries.map((query) => query.query).join("\n");
+
+    expect(text).toMatch(/rectifier module|OLT equipment|baseband board|remote radio unit|telecom spare parts/i);
+    expect(text).not.toMatch(/\b(?:Huawei|ZTE|R4850N6|MA5800|WBBPf4)\b/i);
+  });
+
+  it("builds telecom advanced fallback queries from product families", () => {
+    const queries = buildAdvancedSearchQueriesFromKeywordGroups({
+      keywordGroups: {
+        brandTerms: ["Huawei", "ZTE"],
+        productTerms: ["Huawei R4850N6", "Huawei WBBPf4 board", "ZTE CCE1 Board"],
+        longTailProductTerms: [],
+        customerIntentTerms: ["telecom distributor", "system integrator", "maintenance company"],
+        marketTerms: ["UAE"],
+        scenarioTerms: ["base station maintenance"],
+        excludeTerms: []
+      },
+      productProfileAnalysis: {
+        keyProducts: ["Huawei R4850N6", "Huawei WBBPf4 board"],
+        productCategories: ["Telecom network equipment"],
+        targetUseCases: ["base station maintenance"]
+      },
+      customerProfileAnalysis: {
+        idealCustomerTypes: ["telecom distributor", "system integrator", "maintenance company"]
+      },
+      targetMarkets: ["UAE"],
+      maxQueries: 8
+    });
+
+    const text = queries.map((query) => query.query).join("\n");
+
+    expect(text).toMatch(/rectifier module|baseband board|RAN equipment|telecom spare parts/i);
+    expect(text).not.toMatch(/\b(?:Huawei|ZTE|R4850N6|WBBPf4|CCE1)\b/i);
+  });
+
+  it("builds advanced fallback queries with generic buyer intent instead of telecom defaults", () => {
+    const queries = buildAdvancedSearchQueriesFromKeywordGroups({
+      keywordGroups: {
+        brandTerms: ["Emerson", "Rotork"],
+        productTerms: ["control valve", "mechanical seal", "industrial pump"],
+        longTailProductTerms: [],
+        customerIntentTerms: ["EPC contractor", "MRO", "industrial distributor"],
+        marketTerms: ["UAE", "Brazil"],
+        scenarioTerms: ["oil gas project", "shutdown maintenance"],
+        excludeTerms: ["jobs", "news"]
+      },
+      productProfileAnalysis: {
+        keyProducts: ["control valve", "mechanical seal"],
+        productCategories: ["industrial valve"],
+        targetUseCases: ["oil gas project", "shutdown maintenance"]
+      },
+      customerProfileAnalysis: {
+        idealCustomerTypes: ["EPC contractor", "MRO", "industrial distributor"]
+      },
+      targetMarkets: ["UAE", "Brazil"],
+      maxQueries: 10
+    });
+
+    const text = queries.map((query) => query.query).join("\n");
+
+    expect(queries).toHaveLength(10);
+    expect(text).toMatch(/control valve|mechanical seal|industrial pump/i);
+    expect(text).toMatch(/distributor|EPC|maintenance|MRO|procurement|vendor registration/i);
+    expect(text).not.toMatch(/\bOR\b/);
+    expect(text).not.toMatch(/\b(?:telecom contractor|tower|RAN|base station|rectifier)\b/i);
+    expect(
+      queries.every((query) =>
+        /\b(contact|services|projects|registration|locations|catalog)\b/i.test(query.query)
+      )
+    ).toBe(true);
+  });
+
+  it("keeps telecom catalog SKUs and accessory noise out of generated buyer queries", () => {
+    const input = {
+      keywordGroups: {
+        brandTerms: ["Alcatel-Lucent", "Ericsson"],
+        productTerms: [
+          "31000 Metal Labels",
+          "Alcatel-Lucent 8DG59243AB",
+          "Alcatel-Lucent 3HE04823AA",
+          "Ericsson KRD 901 208/11",
+          "COTRAN",
+          "KJ-Waterproof insulating tape",
+          "RAN equipment",
+          "telecom spare parts"
+        ],
+        longTailProductTerms: [],
+        customerIntentTerms: [
+          "stockist",
+          "system integrator",
+          "maintenance company",
+          "vendor registration"
+        ],
+        marketTerms: ["UAE", "Saudi Arabia", "Qatar"],
+        scenarioTerms: ["base station maintenance"],
+        excludeTerms: []
+      },
+      productProfileAnalysis: {
+        keyProducts: [
+          "Alcatel-Lucent 8DG59243AB",
+          "COTRAN",
+          "KJ-Waterproof insulating tape"
+        ],
+        productCategories: ["5G telecom equipment"],
+        targetUseCases: ["RAN maintenance"]
+      },
+      customerProfileAnalysis: {
+        idealCustomerTypes: [
+          "stockist",
+          "system integrator",
+          "maintenance company",
+          "vendor registration"
+        ]
+      },
+      targetMarkets: ["UAE", "Saudi Arabia", "Qatar"],
+      maxQueries: 18
+    };
+    const laneKQueries = buildLaneKQueriesFromKeywordGroups(input);
+    const advancedQueries = buildAdvancedSearchQueriesFromKeywordGroups(input);
+    const text = [...laneKQueries, ...advancedQueries].map((query) => query.query).join("\n");
+
+    expect(text).toMatch(/RAN equipment|base station equipment|telecom spare parts/i);
+    expect(text).toMatch(/stockist|system integrator|maintenance company|vendor registration/i);
+    expect(text).toMatch(/tower contractor|towerco|cell site maintenance/i);
+    expect(text).toMatch(/rectifier|telecom power|DC power/i);
+    expect(text).toMatch(/ISP|FTTH|fiber operator|telecom operator/i);
+    expect(text).not.toMatch(
+      /Metal Labels|KJ-Waterproof|insulating tape|COTRAN|Alcatel-Lucent|8DG59243AB|3HE04823AA|KRD 901 208\/11/i
+    );
   });
 
   it("uses off-site reverse customer network queries instead of searching inside the reference site", async () => {
@@ -1196,11 +1884,75 @@ describe("AgentWorkflowService", () => {
       query.templateId?.startsWith("reverse_network_")
     );
 
-    expect(reverseQueries).toHaveLength(4);
+    expect(reverseQueries).toHaveLength(1);
     for (const query of reverseQueries) {
+      expect(query.query).toContain('"Spectrum MEA"');
+      expect(query.query).not.toContain('"Spectrummea"');
       expect(query.query).toContain("-site:spectrummea.com");
+      expect(query.query).not.toMatch(/Saudi Arabi\b|5G telecom -site/i);
+      expect((query.query.match(/"/g) ?? []).length % 2).toBe(0);
       expect(query.query).not.toMatch(/^site:spectrummea\.com\b/i);
     }
+  });
+
+  it("does not create reverse customer queries from domain-only fallback names", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    ai.analyzeCustomerProfile.mockResolvedValueOnce({
+      targetRegions: ["UAE", "Saudi Arabia"],
+      idealCustomerTypes: ["telecom maintenance contractor", "ISP operations"],
+      buyingSignals: ["base station maintenance", "FTTH operations"],
+      referenceCompanies: [],
+      industries: ["telecommunications"],
+      searchKeywords: ["telecom maintenance contractor"],
+      disqualifiers: ["training center"],
+      confidence: 0.8,
+      evidence: ["Mock customer evidence"]
+    });
+    const websiteContent = createWebsiteContentMock();
+    websiteContent.readProfileSites.mockResolvedValueOnce({
+      productSites: [],
+      referenceCustomerSites: [
+        {
+          url: "https://spectrummea.com/",
+          finalUrl: "https://spectrummea.com/",
+          domain: "spectrummea.com",
+          role: "reference_customer",
+          status: "read",
+          title: "Home",
+          wordCount: 20,
+          textSample: "Telecom system integrator.",
+          evidenceSnippets: ["Telecom system integrator."],
+          extractedTerms: {
+            productTerms: [],
+            customerIntentTerms: ["telecom system integrator"],
+            scenarioTerms: [],
+            brandTerms: []
+          },
+          fetchedAt: "2026-05-03T08:00:00.000Z"
+        }
+      ]
+    });
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      websiteContent as any,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt:
+        "Find UAE and Saudi Arabia telecom tower maintenance contractors buying RRU BBU spare parts.",
+      targetCount: 30
+    });
+
+    expect(
+      result.searchQueries.some((query) => query.operatorSource === "reverse_customer_network_mining")
+    ).toBe(false);
+    expect(result.searchQueries.map((query) => query.query).join("\n")).not.toContain("Spectrummea");
   });
 
   it("rejects weak cloud-only reference pivots from GPT search plans", async () => {
@@ -1489,14 +2241,24 @@ describe("AgentWorkflowService", () => {
     expect(prisma.leadTask.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         inputPayload: expect.objectContaining({
-          productProfile: null,
-          customerProfile: null,
+          productProfile: expect.objectContaining({
+            websiteUrl: "https://telecorenet.com/"
+          }),
+          customerProfile: expect.objectContaining({
+            targetRegions: expect.arrayContaining(["UAE", "Saudi Arabia"])
+          }),
           executionPlan: expect.arrayContaining([
             expect.objectContaining({
               step: "analyze_product_profile",
               detail: expect.any(String)
             })
-          ])
+          ]),
+          profileSignals: expect.objectContaining({
+            profileDefaultsApplied: {
+              productProfile: true,
+              customerProfile: true
+            }
+          })
         })
       })
     });
@@ -1621,6 +2383,263 @@ describe("AgentWorkflowService", () => {
     });
   });
 
+  it("allows selected low-score review customers to be approved", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValue({
+      id: "task-1",
+      userId: "user-1",
+      leadCandidates: [
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          companyName: "Low Score Telecom Services",
+          website: "https://low-score.example",
+          country: "Oman",
+          status: "review",
+          createdAt: new Date("2026-04-30T01:00:00.000Z"),
+          contacts: [{ type: "form", value: "https://low-score.example/contact" }],
+          icpScore: { score: 42, grade: "low" }
+        }
+      ]
+    });
+    const service = new AgentWorkflowService(prisma as any);
+
+    const result = await (service as any).applyCandidateApproval("user-1", "task-1", {
+      leadIds: ["22222222-2222-4222-8222-222222222222"]
+    });
+
+    expect(result.approvedLeadIds).toEqual(["22222222-2222-4222-8222-222222222222"]);
+    expect(prisma.leadCandidate.updateMany).toHaveBeenCalledWith({
+      where: {
+        taskId: "task-1",
+        id: { in: ["22222222-2222-4222-8222-222222222222"] }
+      },
+      data: { status: "approved" }
+    });
+  });
+
+  it("feeds approved CRM customers back into query learning as human-accepted yield", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValue({
+      id: "task-1",
+      userId: "user-1",
+      leadCandidates: [
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          companyName: "Qatar Network Field Services",
+          website: "https://qatar-network.example",
+          country: "Qatar",
+          countryConfidence: "medium",
+          countryConflict: false,
+          status: "review",
+          createdAt: new Date("2026-04-30T01:00:00.000Z"),
+          contacts: [{ type: "form", value: "https://qatar-network.example/contact-us" }],
+          icpScore: {
+            score: 52,
+            grade: "review",
+            reasons: {
+              sourceQuery: {
+                id: "query-approved",
+                query: '"telecom field service" Qatar "contact us"',
+                country: "Qatar"
+              }
+            }
+          }
+        }
+      ]
+    });
+    prisma.leadTask.findUnique.mockResolvedValue({
+      inputPayload: {
+        prompt: "Find Qatar telecom maintenance customers",
+        customerProfile: { targetRegions: ["Qatar"] },
+        keywordGroups: {
+          productTerms: ["telecom equipment"],
+          customerIntentTerms: ["field service company"],
+          marketTerms: ["Qatar"]
+        }
+      }
+    });
+    prisma.searchQuery.findMany.mockResolvedValue([
+      {
+        id: "query-approved",
+        query: '"telecom field service" Qatar "contact us"',
+        country: "Qatar",
+        operatorSource: "lane_k_keyword_combination",
+        strategyTemplate: "lane-K-K2",
+        executionStatus: "completed",
+        resultCount: 6,
+        qualifiedCount: 1,
+        effectivenessScore: 0.42,
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      }
+    ]);
+    prisma.leadCandidate.findMany.mockResolvedValue([
+      {
+        status: "approved",
+        country: "Qatar",
+        countryConfidence: "medium",
+        countryConflict: false,
+        contacts: [{ type: "form" }],
+        icpScore: {
+          score: 52,
+          reasons: {
+            sourceQuery: {
+              id: "query-approved",
+              query: '"telecom field service" Qatar "contact us"',
+              country: "Qatar"
+            }
+          }
+        }
+      }
+    ]);
+    const service = new AgentWorkflowService(prisma as any);
+
+    await (service as any).applyCandidateApproval("user-1", "task-1", {
+      leadIds: ["33333333-3333-4333-8333-333333333333"]
+    });
+
+    const queryLearning = prisma.leadTask.update.mock.calls.find(
+      ([input]: any) => input.data?.inputPayload?.profileSignals?.queryLearning
+    )?.[0].data.inputPayload.profileSignals.queryLearning;
+    expect(queryLearning.batchMetrics).toEqual(
+      expect.objectContaining({
+        mainCustomerCount: 1,
+        acceptedMainCustomerCount: 1,
+        highMatchCustomerCount: 0,
+        contactableMainCustomerCount: 1
+      })
+    );
+    expect(queryLearning.highYieldQueries).toEqual([
+      expect.objectContaining({
+        id: "query-approved",
+        acceptedMainCustomerCount: 1,
+        highMatchCount: 0,
+        contactableMainCustomerCount: 1
+      })
+    ]);
+  });
+
+  it("marks invalid customers as rejected and feeds the source query into low-yield learning", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValue({
+      id: "task-1",
+      userId: "user-1",
+      leadCandidates: [
+        {
+          id: "44444444-4444-4444-8444-444444444444",
+          companyName: "Wrong Directory Telecom Blog",
+          website: "https://directory.example",
+          country: "United States",
+          countryConfidence: "high",
+          countryConflict: false,
+          status: "review",
+          createdAt: new Date("2026-04-30T01:00:00.000Z"),
+          crmLead: null,
+          contacts: [],
+          icpScore: {
+            score: 43,
+            grade: "review",
+            reasons: {
+              sourceQuery: {
+                id: "query-noise",
+                query: "telecom equipment supplier Qatar blog",
+                country: "Qatar"
+              }
+            }
+          }
+        }
+      ]
+    });
+    prisma.leadTask.findUnique.mockResolvedValue({
+      inputPayload: {
+        prompt: "Find Qatar telecom equipment customers",
+        customerProfile: { targetRegions: ["Qatar"] },
+        keywordGroups: {
+          productTerms: ["telecom equipment"],
+          customerIntentTerms: ["distributor"],
+          marketTerms: ["Qatar"]
+        }
+      }
+    });
+    prisma.searchQuery.findMany.mockResolvedValue([
+      {
+        id: "query-noise",
+        query: "telecom equipment supplier Qatar blog",
+        country: "Qatar",
+        operatorSource: "advanced_buyer_intent_search",
+        strategyTemplate: "advanced buyer intent template",
+        executionStatus: "completed",
+        resultCount: 8,
+        qualifiedCount: 1,
+        effectivenessScore: 0.52,
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      }
+    ]);
+    prisma.leadCandidate.findMany.mockResolvedValue([
+      {
+        status: "rejected",
+        country: "United States",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [],
+        icpScore: {
+          score: 43,
+          reasons: {
+            sourceQuery: {
+              id: "query-noise",
+              query: "telecom equipment supplier Qatar blog",
+              country: "Qatar"
+            }
+          }
+        }
+      }
+    ]);
+    const service = new AgentWorkflowService(prisma as any);
+
+    const result = await service.rejectCandidatesForUser("user-1", "task-1", {
+      leadIds: ["44444444-4444-4444-8444-444444444444"],
+      reason: "Directory/blog result, not a reachable buyer"
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      rejectedLeadIds: ["44444444-4444-4444-8444-444444444444"],
+      rejectedCount: 1
+    });
+    expect(prisma.leadCandidate.updateMany).toHaveBeenCalledWith({
+      where: {
+        taskId: "task-1",
+        id: { in: ["44444444-4444-4444-8444-444444444444"] }
+      },
+      data: { status: "rejected" }
+    });
+    expect(prisma.leadStageEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          leadId: "44444444-4444-4444-8444-444444444444",
+          fromStage: "review",
+          toStage: "rejected",
+          reason: "Directory/blog result, not a reachable buyer"
+        }
+      ]
+    });
+    const queryLearning = prisma.leadTask.update.mock.calls.find(
+      ([input]: any) => input.data?.inputPayload?.profileSignals?.queryLearning
+    )?.[0].data.inputPayload.profileSignals.queryLearning;
+    expect(queryLearning.batchMetrics).toEqual(
+      expect.objectContaining({
+        mainCustomerCount: 0,
+        rejectedCandidateCount: 1
+      })
+    );
+    expect(queryLearning.lowYieldQueries).toEqual([
+      expect.objectContaining({
+        id: "query-noise",
+        mainCustomerCount: 0,
+        rejectedCandidateCount: 1
+      })
+    ]);
+  });
+
   it("resumes the LangGraph search thread from lead approval to email confirmation", async () => {
     const prisma = createPrismaMock();
     const braveSearch = createBraveSearchMock();
@@ -1704,11 +2723,16 @@ describe("AgentWorkflowService", () => {
       remainingQueries: 0
     });
     expect(braveSearch.searchAndSaveResults).toHaveBeenCalledWith("query-1", {
-      query: "telecom equipment distributor UAE",
+      query: expect.stringContaining("telecom equipment distributor UAE"),
       country: "ALL",
       language: "en",
       count: 20
     });
+    expect(braveSearch.searchAndSaveResults.mock.calls[0]?.[1].query).toContain(
+      "-site:alibaba.com"
+    );
+    expect(braveSearch.searchAndSaveResults.mock.calls[0]?.[1].query).toContain("-alibaba");
+    expect(braveSearch.searchAndSaveResults.mock.calls[0]?.[1].query).toContain("-manufacturer");
     expect(leadQualification.saveCandidates).toHaveBeenCalledWith(
       "task-1",
       expect.any(Array),
@@ -1717,15 +2741,25 @@ describe("AgentWorkflowService", () => {
         productKeywords: expect.arrayContaining(["telecom equipment", "RRU"]),
         customerTypeKeywords: expect.arrayContaining(["distributor"])
       }),
-      "UAE"
+      "UAE",
+      undefined,
+      expect.objectContaining({
+        id: "query-1",
+        query: "telecom equipment distributor UAE",
+        country: "UAE"
+      }),
+      expect.objectContaining({
+        userId: "user-1"
+      })
     );
     expect(prisma.searchQuery.update).toHaveBeenCalledWith({
       where: { id: "query-1" },
-      data: {
+      data: expect.objectContaining({
         executionStatus: "completed",
         resultCount: 1,
-        qualifiedCount: 1
-      }
+        qualifiedCount: 1,
+        effectivenessScore: expect.any(Number)
+      })
     });
     expect(prisma.agentStep.updateMany).toHaveBeenCalledWith({
       where: { taskId: "task-1", nodeName: "brave_search" },
@@ -1770,12 +2804,434 @@ describe("AgentWorkflowService", () => {
 
     expect(prisma.searchQuery.update).toHaveBeenCalledWith({
       where: { id: "query-1" },
-      data: {
+      data: expect.objectContaining({
         executionStatus: "completed",
         resultCount: 1,
-        qualifiedCount: 2
-      }
+        qualifiedCount: 2,
+        effectivenessScore: expect.any(Number)
+      })
     });
+  });
+
+  it("counts existing duplicate matches in per-query learning metrics", async () => {
+    const prisma = createPrismaMock();
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    leadQualification.saveCandidates.mockResolvedValueOnce({
+      createdCount: 0,
+      skippedCount: 1,
+      candidates: [],
+      matchedCandidates: [
+        {
+          id: "existing-1",
+          status: "qualified",
+          country: "UAE",
+          countryConfidence: "high",
+          countryConflict: false,
+          contacts: [{ type: "email" }, { type: "form" }],
+          icpScore: { score: 86 }
+        }
+      ]
+    });
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    expect(prisma.searchQuery.update).toHaveBeenCalledWith({
+      where: { id: "query-1" },
+      data: expect.objectContaining({
+        executionStatus: "completed",
+        resultCount: 1,
+        qualifiedCount: 1,
+        effectivenessScore: expect.any(Number)
+      })
+    });
+  });
+
+  it("writes query-level learning metrics after a search query completes", async () => {
+    const prisma = createPrismaMock();
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    leadQualification.saveCandidates.mockResolvedValueOnce({
+      createdCount: 2,
+      skippedCount: 1,
+      candidates: [
+        {
+          id: "cand-1",
+          status: "qualified",
+          country: "UAE",
+          countryConfidence: "high",
+          contacts: [{ type: "email" }],
+          icpScore: { score: 88 }
+        },
+        {
+          id: "cand-2",
+          status: "review",
+          country: "United States",
+          countryConfidence: "high",
+          contacts: [],
+          icpScore: { score: 64 }
+        }
+      ]
+    });
+    prisma.leadCandidate.findMany = vi.fn().mockResolvedValue([
+      {
+        companyName: "Gulf Telecom",
+        website: "https://gulf-telecom.example",
+        sourceUrl: "https://gulf-telecom.example/contact",
+        status: "qualified",
+        country: "UAE",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email",
+            value: "sales@gulf-telecom.example",
+            sourceUrl: "https://gulf-telecom.example/contact"
+          }
+        ],
+        icpScore: {
+          score: 88,
+          reasons: {
+            sourceQuery: {
+              id: "query-1",
+              query: "telecom equipment distributor UAE",
+              country: "UAE"
+            },
+            reasons: ["Distributor page confirms telecom equipment buyer role."],
+            risks: ["No obvious risk after official-site verification."],
+            aiEvaluation: {
+              buyerType: "distributor",
+              matchedSignals: ["telecom equipment distributor"]
+            }
+          }
+        }
+      },
+      {
+        companyName: "Weak Review Lead",
+        website: null,
+        sourceUrl: null,
+        status: "review",
+        country: "United States",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [],
+        icpScore: {
+          score: 64,
+          reasons: {
+            sourceQuery: {
+              id: "query-1",
+              query: "telecom equipment distributor UAE",
+              country: "UAE"
+            }
+          }
+        }
+      }
+    ]);
+    prisma.searchQuery.findMany = vi.fn().mockResolvedValue([
+      {
+        id: "query-1",
+        query: "telecom equipment distributor UAE",
+        country: "UAE",
+        operatorSource: "lane_k_keyword_combination",
+        strategyTemplate: "lane-K-K2",
+        executionStatus: "completed",
+        resultCount: 1,
+        qualifiedCount: 2,
+        effectivenessScore: 0.78,
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      }
+    ]);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    expect(prisma.searchQuery.update).toHaveBeenCalledWith({
+      where: { id: "query-1" },
+      data: expect.objectContaining({
+        executionStatus: "completed",
+        qualifiedCount: 2,
+        effectivenessScore: expect.any(Number)
+      })
+    });
+    expect(prisma.leadTask.update).toHaveBeenCalledWith({
+      where: { id: "task-1" },
+      data: expect.objectContaining({
+        inputPayload: expect.objectContaining({
+          profileSignals: expect.objectContaining({
+            queryLearning: expect.objectContaining({
+              batchMetrics: expect.objectContaining({
+                mainCustomerCount: 2,
+                highMatchCustomerCount: 1,
+                contactableMainCustomerCount: 1,
+                wrongCountryCount: 1
+              }),
+              targetAssessment: expect.objectContaining({
+                laneCoverage: expect.objectContaining({
+                  coveredCount: 2,
+                  requiredLaneCount: 5
+                }),
+                queryQualityCoverage: expect.objectContaining({
+                  completeCount: 0,
+                  total: 1,
+                  coverage: 0
+                }),
+                customerTrustCoverage: expect.objectContaining({
+                  completeCount: 1,
+                  total: 2,
+                  coverage: 0.5
+                }),
+                normalizedMetrics: expect.objectContaining({
+                  mainCustomersPer30: 60,
+                  highMatchCustomersPer30: 30,
+                  contactCoverage: 0.5,
+                  wrongCountryRatio: 0.5,
+                  coveredLaneCount: 2,
+                  queryQualityCoverage: 0,
+                  customerTrustCoverage: 0.5
+                }),
+                checks: expect.arrayContaining([
+                  expect.objectContaining({
+                    key: "contact_coverage",
+                    status: "fail"
+                  }),
+                  expect.objectContaining({
+                    key: "wrong_country_ratio",
+                    status: "fail"
+                  }),
+                  expect.objectContaining({
+                    key: "lane_coverage",
+                    status: "fail"
+                  }),
+                  expect.objectContaining({
+                    key: "query_quality_coverage",
+                    status: "fail"
+                  }),
+                  expect.objectContaining({
+                    key: "customer_trust_coverage",
+                    status: "fail"
+                  })
+                ])
+              }),
+              queryLaneCoverage: expect.objectContaining({
+                coveredCount: 2,
+                missingLanes: expect.arrayContaining([
+                  expect.objectContaining({ key: "project" }),
+                  expect.objectContaining({ key: "procurement_entry" })
+                ])
+              }),
+              queryQualityCoverage: expect.objectContaining({
+                missingCounts: expect.objectContaining({
+                  contactOrProcurementEntry: 1
+                })
+              }),
+              customerTrustCoverage: expect.objectContaining({
+                missingCounts: expect.objectContaining({
+                  contactSource: 1,
+                  sourcePage: 1
+                })
+              }),
+              highYieldQueries: expect.arrayContaining([
+                expect.objectContaining({
+                  id: "query-1",
+                  mainCustomerCount: 2,
+                  highMatchCount: 1,
+                  contactableMainCustomerCount: 1,
+                  wrongCountryCount: 1
+                })
+              ])
+            })
+          })
+        })
+      })
+    });
+  });
+
+  it("does not treat a single low-score review query as a high-yield follow-up seed", async () => {
+    const prisma = createPrismaMock();
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    leadQualification.saveCandidates.mockResolvedValueOnce({
+      createdCount: 1,
+      skippedCount: 0,
+      candidates: [
+        {
+          id: "cand-1",
+          status: "review",
+          country: "Qatar",
+          countryConfidence: "low",
+          contacts: [{ type: "email" }, { type: "form" }],
+          icpScore: { score: 49 }
+        }
+      ]
+    });
+    prisma.leadCandidate.findMany = vi.fn().mockResolvedValue([
+      {
+        status: "review",
+        country: "Qatar",
+        countryConfidence: "low",
+        countryConflict: false,
+        contacts: [{ type: "email" }, { type: "form" }],
+        icpScore: {
+          score: 49,
+          reasons: {
+            sourceQuery: {
+              id: "query-1",
+              query: '"system integrator" rectifier module Qatar contact',
+              country: "Qatar"
+            }
+          }
+        }
+      }
+    ]);
+    prisma.searchQuery.findMany = vi.fn().mockResolvedValue([
+      {
+        id: "query-1",
+        query: '"system integrator" rectifier module Qatar contact',
+        country: "Qatar",
+        operatorSource: "advanced_buyer_intent_search",
+        strategyTemplate: "advanced buyer intent template",
+        executionStatus: "completed",
+        resultCount: 8,
+        qualifiedCount: 1,
+        effectivenessScore: 0.6,
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      }
+    ]);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    const taskUpdatePayload = prisma.leadTask.update.mock.calls.find(
+      ([input]: any) => input.data?.inputPayload?.profileSignals?.queryLearning
+    )?.[0].data.inputPayload.profileSignals.queryLearning;
+    expect(taskUpdatePayload.highYieldQueries).toEqual([]);
+    expect(taskUpdatePayload.batchMetrics).toEqual(
+      expect.objectContaining({
+        mainCustomerCount: 1,
+        highMatchCustomerCount: 0,
+        contactableMainCustomerCount: 1
+      })
+    );
+  });
+
+  it("counts wrong-country ratio only among main-list customers", async () => {
+    const prisma = createPrismaMock();
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    leadQualification.saveCandidates.mockResolvedValueOnce({
+      createdCount: 3,
+      skippedCount: 0,
+      candidates: [
+        {
+          id: "main-uae",
+          status: "qualified",
+          country: "UAE",
+          countryConfidence: "high",
+          countryConflict: false,
+          contacts: [{ type: "email" }],
+          icpScore: { score: 82 }
+        },
+        {
+          id: "main-us",
+          status: "review",
+          country: "United States",
+          countryConfidence: "high",
+          countryConflict: false,
+          contacts: [{ type: "form" }],
+          icpScore: { score: 62 }
+        },
+        {
+          id: "rejected-us",
+          status: "rejected",
+          country: "United States",
+          countryConfidence: "high",
+          countryConflict: false,
+          contacts: [],
+          icpScore: { score: 12 }
+        }
+      ]
+    });
+    prisma.leadCandidate.findMany = vi.fn().mockResolvedValue([
+      {
+        status: "qualified",
+        country: "UAE",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [{ type: "email" }],
+        icpScore: {
+          score: 82,
+          reasons: { sourceQuery: { id: "query-1", query: "telecom UAE", country: "UAE" } }
+        }
+      },
+      {
+        status: "review",
+        country: "United States",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [{ type: "form" }],
+        icpScore: {
+          score: 62,
+          reasons: { sourceQuery: { id: "query-1", query: "telecom UAE", country: "UAE" } }
+        }
+      },
+      {
+        status: "rejected",
+        country: "United States",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [],
+        icpScore: {
+          score: 12,
+          reasons: { sourceQuery: { id: "query-1", query: "telecom UAE", country: "UAE" } }
+        }
+      }
+    ]);
+    prisma.searchQuery.findMany = vi.fn().mockResolvedValue([
+      {
+        id: "query-1",
+        query: "telecom UAE",
+        country: "UAE",
+        operatorSource: "lane_k_keyword_combination",
+        strategyTemplate: "lane-K-K2",
+        executionStatus: "completed",
+        resultCount: 3,
+        qualifiedCount: 2,
+        effectivenessScore: 0.7,
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      }
+    ]);
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    const queryLearning = prisma.leadTask.update.mock.calls.find(
+      ([input]: any) => input.data?.inputPayload?.profileSignals?.queryLearning
+    )?.[0].data.inputPayload.profileSignals.queryLearning;
+    expect(queryLearning.batchMetrics).toEqual(
+      expect.objectContaining({
+        mainCustomerCount: 2,
+        wrongCountryCount: 1,
+        wrongCountryRatio: 0.5,
+        rejectedCandidateCount: 1
+      })
+    );
   });
 
   it("passes full target-market context to qualification instead of only the query country pool", async () => {
@@ -1848,7 +3304,16 @@ describe("AgentWorkflowService", () => {
           "Ukraine"
         ])
       }),
-      "Oman"
+      "Oman",
+      undefined,
+      expect.objectContaining({
+        id: "query-1",
+        query: "telecom contractor Oman contact",
+        country: "Oman"
+      }),
+      expect.objectContaining({
+        userId: "user-1"
+      })
     );
   });
 
@@ -2383,7 +3848,15 @@ describe("AgentWorkflowService", () => {
           })
         ]),
         expect.any(Object),
-        "UAE"
+        "UAE",
+        undefined,
+        expect.objectContaining({
+          id: "query-1",
+          query: "telecom equipment distributor UAE"
+        }),
+        expect.objectContaining({
+          userId: "user-1"
+        })
       );
     } finally {
       if (originalFlag === undefined) {
@@ -2906,7 +4379,7 @@ describe("AgentWorkflowService", () => {
 
       expect(runSlowSpy).toHaveBeenCalledTimes(1);
       expect(runSlowSpy.mock.calls[0]?.[3]).toHaveLength(16);
-      expect(runSlowSpy.mock.calls[0]?.[4]).toBe(14);
+      expect(runSlowSpy.mock.calls[0]?.[5]).toBe(14);
       expect(result).toEqual({
         appendedCount: 14,
         queryCount: 30,
@@ -2969,6 +4442,52 @@ describe("AgentWorkflowService", () => {
       return prisma;
     }
 
+    it("drains appended continuation queries without resuming the paused graph", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const service = new AgentWorkflowService(
+        prisma as any,
+        createBraveSearchMock() as any,
+        createLeadQualificationMock() as any
+      );
+
+      vi.spyOn(service as any, "appendContinuationSearchQueriesForTask").mockResolvedValue({
+        appendedCount: 2,
+        reason: "appended"
+      });
+      const batchSpy = vi
+        .spyOn(service as any, "executeBraveSearchBatchForTask")
+        .mockResolvedValue({
+          ok: true,
+          executedQueries: 2,
+          successfulQueries: 2,
+          failedQueries: 0,
+          resultCount: 12,
+          createdCandidates: 3,
+          skippedCandidates: 4,
+          fallback: false,
+          errors: [],
+          hasMore: false,
+          remainingQueries: 0
+        });
+
+      const result = await service.executeBraveSearchForTask("user-1", "task-1", {
+        limit: 30,
+        appendIfEmpty: true
+      });
+
+      expect(batchSpy).toHaveBeenCalledWith("user-1", "task-1", { limit: 30 });
+      expect(result).toMatchObject({
+        ok: true,
+        executedQueries: 2,
+        appendedQueries: 2,
+        appendReason: "appended"
+      });
+      expect(prisma.leadTask.update).toHaveBeenCalledWith({
+        where: { id: "task-1" },
+        data: { status: "paused" }
+      });
+    });
+
     it("appends new pending queries when the existing queue is drained", async () => {
       const prisma = buildContinuationPrismaMock();
       const ai = createLeadHuntAiMock(async (input) => ({
@@ -2990,7 +4509,7 @@ describe("AgentWorkflowService", () => {
         .spyOn(service as any, "runSlowPlanningAndAppendGptQueries")
         .mockResolvedValue({
           slowResult: { searchQueries: [], fallbackReasons: [] },
-          appendedCount: 14
+          appendedCount: 11
         });
 
       const result = await (service as any).appendContinuationSearchQueriesForTask(
@@ -2999,21 +4518,30 @@ describe("AgentWorkflowService", () => {
         { limit: 30 }
       );
 
-      expect(runSlowSpy).toHaveBeenCalledTimes(1);
-      // Fixed 30-query batches seed 12 fast Lane K queries + 4 reverse
-      // customer-network queries first, so slow planning receives the
-      // 14-query advanced-search remainder.
-      expect(runSlowSpy.mock.calls[0]?.[3]).toBeDefined();
-      expect(runSlowSpy.mock.calls[0]?.[4]).toBe(14);
+      expect(runSlowSpy).not.toHaveBeenCalled();
       expect(result).toEqual({ appendedCount: 30, reason: "appended" });
       const fastRows = prisma.searchQuery.createMany.mock.calls[0]?.[0].data ?? [];
+      expect(fastRows).toHaveLength(30);
       expect(new Set(fastRows.map((row: any) => row.operatorSource))).toEqual(
-        new Set(["lane_k_keyword_combination", "reverse_customer_network_mining"])
+        new Set([
+          "lane_k_keyword_combination",
+          "reverse_customer_network_mining",
+          "advanced_buyer_intent_search"
+        ])
       );
       // Task gets touched back to running so the polling effect resumes.
       expect(prisma.leadTask.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: "task-1" } })
       );
+      const runningUpdateIndex = prisma.leadTask.update.mock.calls.findIndex(
+        ([input]: any) => input.data?.status === "running"
+      );
+      expect(runningUpdateIndex).toBeGreaterThanOrEqual(0);
+      const runningUpdateOrder = prisma.leadTask.update.mock.invocationCallOrder[
+        runningUpdateIndex
+      ]!;
+      const firstInsertOrder = prisma.searchQuery.createMany.mock.invocationCallOrder[0]!;
+      expect(runningUpdateOrder).toBeLessThan(firstInsertOrder);
     });
 
     it("skips append when there are still pending queries", async () => {
@@ -3068,6 +4596,231 @@ describe("AgentWorkflowService", () => {
       expect(prisma.searchQuery.createMany).toHaveBeenCalled();
     });
 
+    it("does not let historical low-yield query learning block deterministic continuation", async () => {
+      const prisma = buildContinuationPrismaMock();
+      prisma.leadTask.findFirst = vi.fn().mockResolvedValue({
+        id: "task-1",
+        targetCount: 20,
+        inputPayload: {
+          prompt: "Find UAE telecom distributors",
+          targetCount: 20,
+          productProfileAnalysis: {
+            keyProducts: ["RRU"],
+            productCategories: ["Telecom"],
+            websiteUrls: []
+          },
+          customerProfileAnalysis: {
+            idealCustomerTypes: ["distributor"],
+            targetRegions: ["UAE"]
+          },
+          keywordGroups: {
+            productTerms: ["RRU"],
+            customerIntentTerms: ["telecom distributor"],
+            scenarioTerms: ["base station maintenance"],
+            marketTerms: ["UAE"],
+            excludeTerms: []
+          },
+          aiKeywordExpansion: null,
+          profileSignals: {
+            queryLearning: {
+              lowYieldQueries: [
+                {
+                  query: "RRU UAE",
+                  country: "UAE",
+                  effectivenessScore: 0.12,
+                  mainCustomerCount: 0
+                }
+              ]
+            }
+          }
+        }
+      });
+      const ai = createLeadHuntAiMock(async () => ({
+        queries: []
+      }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+      const runSlowSpy = vi
+        .spyOn(service as any, "runSlowPlanningAndAppendGptQueries")
+        .mockResolvedValue({
+          slowResult: {
+            searchQueries: [],
+            fallbackReasons: [],
+            aiQueryCount: 0,
+            gptRefillAttempts: 0,
+            gptRefillAcceptedCount: 0,
+            rejectedAiQueries: []
+          },
+          appendedCount: 14
+        });
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(result.reason).toBe("appended");
+      expect(result.appendedCount).toBe(30);
+      expect(runSlowSpy).not.toHaveBeenCalled();
+      const insertedRows = prisma.searchQuery.createMany.mock.calls.flatMap(
+        (call) => call[0]?.data ?? []
+      );
+      expect(insertedRows).toHaveLength(30);
+      expect(insertedRows.map((row: any) => row.query)).not.toContain("RRU UAE");
+    });
+
+    it("focuses the next continuation batch on proven markets after a weak recent batch", async () => {
+      const prisma = buildContinuationPrismaMock();
+      prisma.leadTask.findFirst = vi.fn().mockResolvedValue({
+        id: "task-1",
+        targetCount: 20,
+        inputPayload: {
+          prompt:
+            "Find telecom equipment buyers in Middle East, Africa, South America, Russia, Ukraine and Afghanistan",
+          targetCount: 20,
+          productProfileAnalysis: {
+            keyProducts: ["RAN equipment", "base station equipment", "telecom spare parts"],
+            productCategories: ["Telecom"],
+            websiteUrls: []
+          },
+          customerProfileAnalysis: {
+            buyerTypes: ["system integrator", "distributor", "maintenance company"],
+            customerScenarios: [],
+            targetMarkets: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kenya", "Russia"]
+          },
+          keywordGroups: {
+            productTerms: ["RAN equipment", "base station equipment", "telecom spare parts"],
+            buyerRoles: ["system integrator", "distributor", "maintenance company"],
+            scenarioTerms: ["base station maintenance", "telecom power service"],
+            marketTerms: [
+              "UAE",
+              "Saudi Arabia",
+              "Qatar",
+              "Oman",
+              "Kuwait",
+              "Iraq",
+              "Nigeria",
+              "Kenya",
+              "South Africa",
+              "Egypt",
+              "Brazil",
+              "Russia",
+              "Ukraine",
+              "Afghanistan"
+            ],
+            excludeTerms: []
+          },
+          aiKeywordExpansion: null,
+          profileSignals: {
+            marketSelection: {
+              secondaryMarkets: ["Chile", "Colombia"]
+            },
+            queryLearning: {
+              highYieldQueries: [
+                {
+                  query: "telecom system integrator Kenya contact",
+                  country: "Kenya",
+                  mainCustomerCount: 4,
+                  highMatchCount: 2,
+                  contactableMainCustomerCount: 4,
+                  effectivenessScore: 0.8
+                },
+                {
+                  query: "telecom contractor Saudi Arabia contact",
+                  country: "Saudi Arabia",
+                  mainCustomerCount: 5,
+                  highMatchCount: 2,
+                  contactableMainCustomerCount: 3,
+                  effectivenessScore: 0.75
+                },
+                {
+                  query: "telecom infrastructure UAE contact",
+                  country: "UAE",
+                  mainCustomerCount: 3,
+                  highMatchCount: 1,
+                  contactableMainCustomerCount: 2,
+                  effectivenessScore: 0.74
+                }
+              ],
+              lowYieldQueries: [
+                {
+                  query: "telecom power contractor Afghanistan contact",
+                  country: "Afghanistan",
+                  mainCustomerCount: 0,
+                  effectivenessScore: 0.03
+                },
+                {
+                  query: "fiber optic network contractor Russia contact",
+                  country: "Russia",
+                  mainCustomerCount: 0,
+                  effectivenessScore: 0.03
+                },
+                {
+                  query: "FTTH contractor Ukraine contact",
+                  country: "Ukraine",
+                  mainCustomerCount: 0,
+                  effectivenessScore: 0.03
+                }
+              ]
+            }
+          }
+        }
+      });
+      prisma.searchQuery.findMany = vi.fn().mockResolvedValue(
+        Array.from({ length: 30 }, (_, index) => ({
+          query: `weak recent query ${index + 1}`,
+          country: index % 3 === 0 ? "Afghanistan" : index % 3 === 1 ? "Russia" : "Ukraine",
+          strategyTemplate: "lane-K-K2",
+          executionStatus: "completed",
+          qualifiedCount: 0,
+          createdAt: new Date(`2026-05-28T00:${String(index).padStart(2, "0")}:00.000Z`)
+        }))
+      );
+      const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(result).toEqual({ appendedCount: 30, reason: "appended" });
+      const insertedRows = prisma.searchQuery.createMany.mock.calls.flatMap(
+        (call) => call[0]?.data ?? []
+      );
+      const insertedText = insertedRows.map((row: any) => `${row.country} ${row.query}`).join("\n");
+      expect(insertedText).toMatch(/Kenya|Saudi Arabia|UAE/);
+      expect(insertedText).not.toMatch(/\b(?:Afghanistan|Russia|Ukraine)\b/);
+      const continuationOptimization = prisma.leadTask.update.mock.calls.find(
+        ([input]: any) => input.data?.inputPayload?.profileSignals?.continuationOptimization
+      )?.[0].data.inputPayload.profileSignals.continuationOptimization;
+      expect(continuationOptimization).toMatchObject({
+        action: "focus_high_yield_markets",
+        reason: "recent_batch_low_yield",
+        recentBatchQueryCount: 30,
+        recentBatchMainCustomerCount: 0
+      });
+      expect(continuationOptimization.selectedMarkets).toEqual(
+        expect.arrayContaining(["Kenya", "Saudi Arabia", "UAE"])
+      );
+      expect(continuationOptimization.avoidedMarkets).toEqual(
+        expect.arrayContaining(["Afghanistan", "Russia", "Ukraine"])
+      );
+    });
+
     it("keeps deterministic continuation queries when the slow-planning orchestrator throws", async () => {
       const prisma = buildContinuationPrismaMock();
       const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
@@ -3117,7 +4870,7 @@ describe("AgentWorkflowService", () => {
         { limit: 30 }
       );
 
-      expect(result).toEqual({ appendedCount: 16, reason: "appended" });
+      expect(result).toEqual({ appendedCount: 30, reason: "appended" });
       expect(prisma.leadTask.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: "task-1" } })
       );
@@ -3142,11 +4895,7 @@ describe("AgentWorkflowService", () => {
       ).rejects.toThrow("Lead task not found");
     });
 
-    // 2026-05 Stage 2 follow-up: when the AI returns more than the
-    // continuation limit (e.g. 35 queries), runSlowPlanning's slice
-    // cap must trim it before runSlowPlanningAndAppendGptQueries
-    // dedupes + inserts. Verifies the desiredQueryCount=30 path.
-    it("inserts at most `limit` queries when slow planning returns more than that", async () => {
+    it("inserts at most `limit` deterministic queries without waiting for slow planning", async () => {
       const prisma = buildContinuationPrismaMock();
       const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
       const service = new AgentWorkflowService(
@@ -3196,10 +4945,7 @@ describe("AgentWorkflowService", () => {
         { limit: 30 }
       );
 
-      // desiredQueryCount is the advanced-search remainder after the
-      // fixed 12 fast Lane K + 4 reverse customer queries are inserted.
-      expect(runSlowSpy).toHaveBeenCalledTimes(1);
-      expect((runSlowSpy.mock.calls[0]?.[0] as any)?.desiredQueryCount).toBe(14);
+      expect(runSlowSpy).not.toHaveBeenCalled();
 
       expect(result.reason).toBe("appended");
       expect(result.appendedCount).toBe(30);

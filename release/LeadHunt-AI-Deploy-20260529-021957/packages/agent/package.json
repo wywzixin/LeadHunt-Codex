@@ -1,0 +1,26 @@
+{
+  "name": "@leadhunt/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsc -w -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run src --passWithNoTests"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.42",
+    "@langchain/langgraph": "^1.2.9",
+    "@leadhunt/shared": "workspace:*"
+  }
+}

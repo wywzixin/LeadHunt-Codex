@@ -45,9 +45,11 @@ export type NormalizedLeadCandidate = {
   countryConflict?: boolean;
   countryConflictCountries?: string[];
   sourceUrl: string;
+  sourcePageUrl?: string | null;
+  sourcePageTitle?: string | null;
   summary: string | null;
   contacts: Array<{
-    type: "email" | "phone" | "social";
+    type: "email" | "phone" | "social" | "form";
     value: string;
     sourceUrl: string;
   }>;
@@ -114,11 +116,35 @@ export type CandidateAiEvaluator = (
   candidate: NormalizedLeadCandidate
 ) => Promise<CandidateBuyerEvaluation | null>;
 
+export type SourceQueryAttribution = {
+  id: string;
+  query: string;
+  country?: string | null;
+};
+
+export type SaveCandidateOptions = {
+  userId?: string;
+};
+
 type ExistingLead = {
   id: string;
   companyName: string;
   website: string | null;
+  country?: string | null;
+  countryConfidence?: string | null;
+  countryConflict?: boolean | null;
+  status?: string | null;
   contacts: Array<{ type: string; value: string; sourceUrl?: string | null }>;
+  icpScore?: { score?: number | null; reasons?: unknown } | null;
+};
+
+type PreparedLeadCandidate = {
+  candidate: NormalizedLeadCandidate;
+  icp: IcpScoreDraft;
+  ruleIcp: IcpScoreDraft;
+  aiEvaluation: CandidateBuyerEvaluation | null;
+  storedCompanyName: string;
+  sourceQuery?: SourceQueryAttribution;
 };
 
 type PageQualityAssessment = {
@@ -168,9 +194,14 @@ type EvidenceLeadClassification = {
 
 // Contact probing balances recall with task runtime: keep the timeout tight,
 // but visit enough high-value direct and linked pages for multilingual sites.
-const contactProbeTimeoutMs = 8000;
+const contactProbeTimeoutMs = 10000;
 const contactProbePageLimit = 16;
 const contactLinkedProbePageLimit = 8;
+const directoryMiningPageLimit = 8;
+const directoryMiningCandidateLimit = 24;
+const directoryMiningCandidatesPerPage = 5;
+const directoryMiningProfilePageLimit = 12;
+const directoryMiningProfilesPerPage = 4;
 const maxAiCandidateEvaluationsPerBatch = 15;
 
 @Injectable()
@@ -192,7 +223,7 @@ export class LeadQualificationService {
       candidate.companyName,
       candidate.website,
       candidate.country,
-      candidate.summary,
+      stripSearchContext(candidate.summary ?? ""),
       candidate.contacts.map((contact) => contact.value).join(" ")
     ]
       .filter(Boolean)
@@ -245,15 +276,31 @@ export class LeadQualificationService {
       hasTargetCustomerType ||
       hasInfrastructureCustomerSignal ||
       hasGenericBuyerIntentSignal;
-    const hasDirectContact = candidate.contacts.some(
-      (contact) => contact.type === "email" || contact.type === "phone"
-    );
+    const hasDirectContact = hasReachableContactSignal(candidate.contacts);
     const buyerServicePage = looksLikeBuyerSideCompanyPage(candidate);
     const hasGenericServiceBuyerSignal = hasAny(text, genericServiceBuyerGateTerms);
     const hasCompanyNameQualityIssue =
       isForbiddenCompanyName(candidate.companyName) ||
       looksLikePseudoCompanyName(candidate.companyName) ||
       looksLikeSiteBuilderCredit(candidate.companyName);
+    const consumerRetailOffTargetReject =
+      criteriaIndicatesTelecom(criteria) &&
+      !criteriaTargetsConsumerElectronics(criteria) &&
+      hasAny(text, consumerElectronicsTerms) &&
+      !hasSpecificProductSignal;
+    const telecomEvidenceMissing =
+      criteriaIndicatesTelecom(criteria) &&
+      !hasTelecomContext(text) &&
+      !hasAny(text, specificTelecomProductTerms);
+    const telecomEvidenceMissingReject =
+      telecomEvidenceMissing &&
+      !buyerServicePage &&
+      !hasBuyerRoleSignal &&
+      !hasTargetCustomerType &&
+      !hasUseCaseCustomerSignal &&
+      !hasInfrastructureCustomerSignal;
+    const telecomOffTargetProductHits = detectTelecomOffTargetProductConflict(text, criteria);
+    let genericServiceBuyerNeedsEvidence = false;
 
     score += pageQuality.scoreAdjustment;
     reasons.push(...pageQuality.reasons);
@@ -281,6 +328,31 @@ export class LeadQualificationService {
       forcedStatus = "rejected";
       risks.push(
         `Off-industry signal: candidate looks like ${offIndustryBucketReject} content unrelated to the target product/customer`
+      );
+    }
+
+    if (consumerRetailOffTargetReject) {
+      forcedStatus = "rejected";
+      risks.push(
+        "Consumer-electronics or phone-accessory page is not a 5G/RAN/base-station infrastructure buyer"
+      );
+    }
+
+    if (telecomEvidenceMissing) {
+      if (telecomEvidenceMissingReject) {
+        forcedStatus = "rejected";
+      }
+      risks.push(
+        "Telecom task but candidate page has no telecom, RAN, base-station, fiber, ISP, tower, or telecom-power evidence"
+      );
+    }
+
+    if (telecomOffTargetProductHits.length) {
+      forcedStatus = "rejected";
+      risks.push(
+        `Off-target product/service evidence for a telecom task: ${telecomOffTargetProductHits
+          .slice(0, 4)
+          .join(", ")}`
       );
     }
 
@@ -335,6 +407,19 @@ export class LeadQualificationService {
     const countryConflictOnlyOffTarget = countryConflictHasOnlyOffTargetEvidence(
       countryValidation,
       criteria.targetRegions
+    );
+    const contactCountries = inferredContactCountries(candidate.contacts);
+    const contactCountriesMatchTarget = contactCountries.some((country) =>
+      matchesTargetRegion(country, criteria.targetRegions)
+    );
+    const contactCountriesMatchQuery =
+      Boolean(candidate.queryCountry) &&
+      contactCountries.some((country) => matchesTargetRegion(country, [candidate.queryCountry!]));
+    const contactCountriesOnlyOffTarget = Boolean(
+      contactCountries.length &&
+        hasTargetMarketConstraint &&
+        !contactCountriesMatchTarget &&
+        !contactCountriesMatchQuery
     );
 
     if (
@@ -420,6 +505,14 @@ export class LeadQualificationService {
       risks.push("Country not verified from address or phone; passing through unconfirmed");
     }
 
+    if (contactCountriesOnlyOffTarget) {
+      verifiedOffTargetCountryReject = true;
+      forcedStatus = "rejected";
+      risks.push(
+        `Contact phone country is outside the selected target markets: ${contactCountries.join(", ")}`
+      );
+    }
+
     const contactScore = contactCompletenessScore(candidate.contacts);
     if (contactScore > 0) {
       score += contactScore;
@@ -477,7 +570,7 @@ export class LeadQualificationService {
       pageType !== "procurement_document" && isRiskyDiscoveryPage(candidate) && !buyerServicePage;
     if (!hasDirectContact) {
       score = Math.min(score, 74);
-      risks.push("No usable email or phone found yet");
+      risks.push("No usable email, phone, contact form, or social entry found yet");
     }
 
     if (riskyDiscoveryPage) {
@@ -506,9 +599,10 @@ export class LeadQualificationService {
       // contact is enough to enter review. We still keep the score cap
       // for completely empty official-text pages so they do not jump to
       // qualified by accident.
-      score = Math.min(score, 49);
+      score = Math.min(score, 54);
+      genericServiceBuyerNeedsEvidence = true;
       risks.push(
-        "Generic service / maintenance page needs official-site context and a direct contact before entering the main customer list"
+        "Generic service / maintenance page needs manual ICP validation before outreach"
       );
     }
 
@@ -532,6 +626,14 @@ export class LeadQualificationService {
       forcedStatus = "intelligence";
       risks.push(
         "Procurement/RFQ result is intelligence only; it is kept out of the main customer list and outreach flow"
+      );
+    }
+
+    if (hasProcurementIntent(text) && !hasSearchContextSignal) {
+      score = Math.min(score, 49);
+      forcedStatus = "intelligence";
+      risks.push(
+        "Generic procurement/vendor-registration page has no target product context; keep as intelligence, not a main customer"
       );
     }
 
@@ -621,6 +723,88 @@ export class LeadQualificationService {
     }
     // ---- end customer-role floor ----
 
+    const reachablePriorityBuyer =
+      forcedStatus !== "intelligence" &&
+      forcedStatus !== "rejected" &&
+      pageType === "official_company_site" &&
+      hasDirectContact &&
+      targetCountryVerified &&
+      (hasBuyerRoleSignal || hasTargetCustomerType) &&
+      (hasSpecificProductSignal || hasProductKeywordSignal);
+    if (reachablePriorityBuyer && score >= 68) {
+      score = Math.max(score, 75);
+      reasons.push(
+        "Priority reachable buyer: official site, target country, buyer role, product context, and direct contact are all present"
+      );
+    }
+
+    const reachableInfrastructureBuyer =
+      forcedStatus !== "intelligence" &&
+      forcedStatus !== "rejected" &&
+      pageType === "official_company_site" &&
+      hasDirectContact &&
+      targetCountryVerified &&
+      score >= 64 &&
+      (hasBuyerRoleSignal || hasTargetCustomerType || hasUseCaseCustomerSignal) &&
+      hasInfrastructureCustomerSignal &&
+      hasIndustryContextSignal;
+    if (reachableInfrastructureBuyer && score < 75) {
+      score = 75;
+      reasons.push(
+        "Reachable infrastructure buyer: official site, target country, telecom/infrastructure buyer role, and direct contact are present"
+      );
+    }
+
+    const sourceQueryMatchesTargetMarket =
+      Boolean(candidate.queryCountry) &&
+      matchesTargetRegion(candidate.queryCountry!, criteria.targetRegions);
+    const reachableUnverifiedMarketBuyer =
+      forcedStatus !== "intelligence" &&
+      forcedStatus !== "rejected" &&
+      pageType === "official_company_site" &&
+      hasDirectContact &&
+      targetCountryUnverified &&
+      sourceQueryMatchesTargetMarket &&
+      !targetCountryMismatch &&
+      !countryValidation.countryConflict &&
+      !contactCountriesOnlyOffTarget &&
+      !genericServiceBuyerNeedsEvidence &&
+      !telecomEvidenceMissing &&
+      (hasBuyerRoleSignal || hasTargetCustomerType || hasUseCaseCustomerSignal) &&
+      (hasSpecificProductSignal || hasProductKeywordSignal);
+    if (reachableUnverifiedMarketBuyer && score >= 68) {
+      score = Math.max(score, 75);
+      reasons.push(
+        "Priority reachable buyer with unverified country: official site, source-query target market, buyer role, product context, and direct contact are present"
+      );
+      risks.push(
+        "Target country is inferred from the source query or page context; verify before outreach"
+      );
+    }
+
+    if (genericServiceBuyerNeedsEvidence) {
+      score = Math.min(score, 54);
+    }
+
+    if (!hasDirectContact && targetCountryUnverified) {
+      if (
+        !buyerServicePage &&
+        !hasBuyerRoleSignal &&
+        !hasTargetCustomerType &&
+        !hasUseCaseCustomerSignal
+      ) {
+        score = Math.min(score, 49);
+      }
+      risks.push(
+        "No reachable contact entry and target country is unverified; keep as review unless another hard reject applies"
+      );
+    }
+
+    if (targetCountryUnverified && score >= 75 && !reachableUnverifiedMarketBuyer) {
+      score = 74;
+      risks.push("High-match cap applied until target country is verified from official evidence");
+    }
+
     // 2026-05 Stage 2 follow-up: verified-off-target candidates must
     // never come back above the main-pool threshold even after
     // contactScore + buyer-role floor have run. Cap right before
@@ -635,6 +819,35 @@ export class LeadQualificationService {
     if (offIndustryBucketReject) {
       score = Math.min(score, 39);
     }
+    if (consumerRetailOffTargetReject) {
+      score = Math.min(score, 39);
+    }
+    const weakTelecomNoContactReject =
+      forcedStatus !== "intelligence" &&
+      forcedStatus !== "rejected" &&
+      telecomEvidenceMissing &&
+      !hasDirectContact &&
+      targetCountryUnverified &&
+      !hasSpecificProductSignal;
+    if (weakTelecomNoContactReject) {
+      forcedStatus = "rejected";
+      risks.push(
+        "No telecom evidence, no reachable contact entry, and target country is unverified; treating as weak telecom-match noise"
+      );
+    }
+    if (telecomEvidenceMissing && !telecomEvidenceMissingReject && !weakTelecomNoContactReject) {
+      score = Math.min(score, 68);
+      risks.push(
+        "No explicit telecom evidence on the candidate page; capped at review until manually validated"
+      );
+    }
+    if (
+      telecomEvidenceMissingReject ||
+      weakTelecomNoContactReject ||
+      telecomOffTargetProductHits.length
+    ) {
+      score = Math.min(score, 39);
+    }
 
     const finalScore = clamp(Math.round(score), 0, 100);
     const grade = finalScore >= 75 ? "high" : finalScore >= 50 ? "medium" : "low";
@@ -644,6 +857,15 @@ export class LeadQualificationService {
       pageType === "supplier_or_storefront" ||
       pageType === "third_party_profile" ||
       pageType === "non_procurement_document";
+    const reviewableLowConfidenceCandidate =
+      finalScore >= 35 ||
+      buyerServicePage ||
+      hasBuyerRoleSignal ||
+      hasTargetCustomerType ||
+      hasUseCaseCustomerSignal ||
+      hasInfrastructureCustomerSignal ||
+      (pageType === "official_company_site" &&
+        (hasDirectContact || hasProductKeywordSignal || hasSpecificProductSignal));
     // Simplified 4-state machine (2026-05). Old states map as follows:
     //   needs_country_review / country_conflict_review → review
     //   evidence_review                                → rejected
@@ -662,8 +884,13 @@ export class LeadQualificationService {
       status = "rejected";
     } else if (finalScore >= 75) {
       status = "qualified";
-    } else if (finalScore >= 50) {
+    } else if (finalScore >= 50 || reviewableLowConfidenceCandidate) {
       status = "review";
+      if (finalScore < 50) {
+        risks.push(
+          "Low ICP score but retained for manual review; verify fit before outreach"
+        );
+      }
     } else {
       status = "rejected";
     }
@@ -687,10 +914,18 @@ export class LeadQualificationService {
     results: BraveSearchResult[],
     criteria: IcpScoringCriteria,
     defaultCountry?: string,
-    aiEvaluator?: CandidateAiEvaluator
+    aiEvaluator?: CandidateAiEvaluator,
+    sourceQuery?: SourceQueryAttribution,
+    options: SaveCandidateOptions = {}
   ) {
-    return this.withTaskCandidateSaveLock(taskId, () =>
-      this.saveCandidatesUnlocked(taskId, results, criteria, defaultCountry, aiEvaluator)
+    return this.saveCandidatesUnlocked(
+      taskId,
+      results,
+      criteria,
+      defaultCountry,
+      aiEvaluator,
+      sourceQuery,
+      options
     );
   }
 
@@ -719,21 +954,26 @@ export class LeadQualificationService {
     results: BraveSearchResult[],
     criteria: IcpScoringCriteria,
     defaultCountry?: string,
-    aiEvaluator?: CandidateAiEvaluator
+    aiEvaluator?: CandidateAiEvaluator,
+    sourceQuery?: SourceQueryAttribution,
+    options: SaveCandidateOptions = {}
   ) {
     const allCandidates = results.map((result) =>
       normalizeResult(result, { taskId, defaultCountry })
     );
-    const normalized = dedupeCandidates(allCandidates);
-    const existing = await this.prisma.leadCandidate.findMany({
-      where: { taskId },
-      include: { contacts: true }
-    });
-    const existingLeadByKey = buildExistingLeadKeyMap(existing);
-    const existingKeys = new Set(existingLeadByKey.keys());
-    const created = [];
-    let skipped = allCandidates.length - normalized.length;
+    const directoryCandidates = await mineDirectoryCandidates(
+      results,
+      { taskId, defaultCountry },
+      criteria
+    );
+    const rawCandidates = [...allCandidates, ...directoryCandidates];
+    const normalized = dedupeCandidates(rawCandidates);
+    const historicalContactsByDomain = options.userId
+      ? await this.loadHistoricalContactsByDomain(taskId, options.userId, normalized)
+      : new Map<string, NormalizedLeadCandidate["contacts"]>();
+    let skipped = rawCandidates.length - normalized.length;
     let aiEvaluationsUsed = 0;
+    const prepared: PreparedLeadCandidate[] = [];
 
     for (const candidate of normalized) {
       if (shouldHardRejectCandidate(candidate, criteria)) {
@@ -745,11 +985,63 @@ export class LeadQualificationService {
       const enrichedCandidate = inferMissingCandidateCountry(
         canProbeContact ? await enrichCandidateContacts(candidate) : candidate
       );
-      if (shouldHardRejectCandidate(enrichedCandidate, criteria)) {
+      const candidateWithHistoricalContacts = inferMissingCandidateCountry(
+        mergeHistoricalContacts(enrichedCandidate, historicalContactsByDomain)
+      );
+      if (shouldHardRejectCandidate(candidateWithHistoricalContacts, criteria)) {
         skipped += 1;
         continue;
       }
 
+      const ruleIcp = this.scoreCandidate(candidateWithHistoricalContacts, criteria);
+      const shouldUseAi =
+        Boolean(aiEvaluator) &&
+        aiEvaluationsUsed < maxAiCandidateEvaluationsPerBatch &&
+        shouldEvaluateCandidateWithAi(ruleIcp, candidateWithHistoricalContacts, criteria);
+      const aiEvaluation = shouldUseAi
+        ? await safelyEvaluateCandidate(aiEvaluator!, candidateWithHistoricalContacts)
+        : null;
+      if (shouldUseAi) {
+        aiEvaluationsUsed += 1;
+      }
+      const icp = aiEvaluation ? mergeAiEvaluationWithRuleScore(ruleIcp, aiEvaluation) : ruleIcp;
+      const storedCompanyName = chooseStoredCompanyName(enrichedCandidate, aiEvaluation);
+
+      prepared.push({
+        candidate: candidateWithHistoricalContacts,
+        icp,
+        ruleIcp,
+        aiEvaluation,
+        storedCompanyName,
+        sourceQuery
+      });
+    }
+
+    const persisted = await this.withTaskCandidateSaveLock(taskId, () =>
+      this.persistPreparedCandidates(taskId, prepared)
+    );
+
+    return {
+      createdCount: persisted.created.length,
+      skippedCount: skipped + persisted.skipped,
+      candidates: persisted.created,
+      matchedCandidates: [...persisted.created, ...persisted.matched]
+    };
+  }
+
+  private async persistPreparedCandidates(taskId: string, prepared: PreparedLeadCandidate[]) {
+    const existing = await this.prisma.leadCandidate.findMany({
+      where: { taskId },
+      include: { contacts: true, icpScore: true }
+    });
+    const existingLeadByKey = buildExistingLeadKeyMap(existing);
+    const existingKeys = new Set(existingLeadByKey.keys());
+    const created = [];
+    const matched: ExistingLead[] = [];
+    let skipped = 0;
+
+    for (const item of prepared) {
+      const enrichedCandidate = item.candidate;
       const key = candidateKey(enrichedCandidate);
       const emailKeys = enrichedCandidate.contacts
         .filter((contact) => contact.type === "email")
@@ -777,24 +1069,12 @@ export class LeadQualificationService {
             existingLeadByKey.set(contactKey(contact), existingLead);
           }
         }
+        matched.push(existingLead);
         skipped += 1;
         continue;
       }
 
-      const ruleIcp = this.scoreCandidate(enrichedCandidate, criteria);
-      const shouldUseAi =
-        Boolean(aiEvaluator) &&
-        aiEvaluationsUsed < maxAiCandidateEvaluationsPerBatch &&
-        shouldEvaluateCandidateWithAi(ruleIcp, enrichedCandidate, criteria);
-      const aiEvaluation = shouldUseAi
-        ? await safelyEvaluateCandidate(aiEvaluator!, enrichedCandidate)
-        : null;
-      if (shouldUseAi) {
-        aiEvaluationsUsed += 1;
-      }
-      const icp = aiEvaluation ? mergeAiEvaluationWithRuleScore(ruleIcp, aiEvaluation) : ruleIcp;
-      const storedCompanyName = chooseStoredCompanyName(enrichedCandidate, aiEvaluation);
-
+      const { icp, ruleIcp, aiEvaluation, storedCompanyName, sourceQuery } = item;
       const record = await this.prisma.leadCandidate.create({
         data: {
           taskId,
@@ -842,6 +1122,19 @@ export class LeadQualificationService {
                 },
                 aiEvaluation,
                 ruleScore: ruleIcp.score,
+                sourceQuery: sourceQuery
+                  ? {
+                      id: sourceQuery.id,
+                      query: sourceQuery.query,
+                      country: sourceQuery.country ?? null
+                    }
+                  : null,
+                sourcePage: enrichedCandidate.sourcePageUrl
+                  ? {
+                      url: enrichedCandidate.sourcePageUrl,
+                      title: enrichedCandidate.sourcePageTitle ?? null
+                    }
+                  : null,
                 leadType: icp.leadType ?? null,
                 intelligenceType: icp.intelligenceType ?? null,
                 reviewLabels: icp.reviewLabels ?? [],
@@ -866,12 +1159,96 @@ export class LeadQualificationService {
       }
     }
 
-    return {
-      createdCount: created.length,
-      skippedCount: skipped,
-      candidates: created
-    };
+    return { created, matched, skipped };
   }
+
+  private async loadHistoricalContactsByDomain(
+    taskId: string,
+    userId: string,
+    candidates: NormalizedLeadCandidate[]
+  ) {
+    const domains = uniqueStrings(
+      candidates
+        .map((candidate) => domainFromUrl(candidate.website ?? candidate.sourceUrl))
+        .filter((domain): domain is string =>
+          Boolean(domain && isHistoricalContactReusableDomain(domain))
+        )
+    ).slice(0, 24);
+    const contactsByDomain = new Map<string, NormalizedLeadCandidate["contacts"]>();
+    if (!domains.length) {
+      return contactsByDomain;
+    }
+
+    const historicalLeads = await this.prisma.leadCandidate.findMany({
+      where: {
+        taskId: { not: taskId },
+        task: { userId },
+        contacts: { some: { type: { in: ["email", "phone", "social", "form"] } } },
+        OR: domains.flatMap((domain) => [
+          { website: { contains: domain, mode: "insensitive" as const } },
+          { sourceUrl: { contains: domain, mode: "insensitive" as const } }
+        ])
+      },
+      select: {
+        website: true,
+        sourceUrl: true,
+        contacts: {
+          select: { type: true, value: true, sourceUrl: true },
+          where: { type: { in: ["email", "phone", "social", "form"] } },
+          take: 24
+        }
+      },
+      take: 80
+    });
+
+    for (const lead of historicalLeads) {
+      const leadUrl = lead.website ?? lead.sourceUrl;
+      if (!leadUrl) continue;
+      const leadDomain = domainFromUrl(leadUrl);
+      if (!leadDomain || !domains.includes(leadDomain)) continue;
+      const existing = contactsByDomain.get(leadDomain) ?? [];
+      contactsByDomain.set(
+        leadDomain,
+        dedupeContacts([
+          ...existing,
+          ...lead.contacts.map((contact) => ({
+            type: contact.type as "email" | "phone" | "social" | "form",
+            value: contact.value,
+            sourceUrl: contact.sourceUrl ?? lead.website ?? lead.sourceUrl ?? ""
+          }))
+        ]).slice(0, 16)
+      );
+    }
+
+    return contactsByDomain;
+  }
+}
+
+function isHistoricalContactReusableDomain(domain: string) {
+  return !(
+    isBlockedContentDomain(domain) ||
+    isBlockedMarketplaceDomain(domain) ||
+    isHardRejectedDiscoveryDomain(domain) ||
+    isDirectoryIntelligenceDomain(domain) ||
+    isB2bBuyerIntelligenceDomain(domain)
+  );
+}
+
+function mergeHistoricalContacts(
+  candidate: NormalizedLeadCandidate,
+  historicalContactsByDomain: Map<string, NormalizedLeadCandidate["contacts"]>
+) {
+  const domain = domainFromUrl(candidate.website ?? candidate.sourceUrl);
+  const historicalContacts = domain ? historicalContactsByDomain.get(domain) ?? [] : [];
+
+  if (!historicalContacts.length) {
+    return candidate;
+  }
+
+  return {
+    ...candidate,
+    contacts: dedupeContacts([...candidate.contacts, ...historicalContacts])
+  };
 }
 
 function shouldEvaluateCandidateWithAi(
@@ -931,15 +1308,13 @@ function shouldEvaluateCandidateWithAi(
     candidate.website,
     candidate.country,
     candidate.sourceUrl,
-    candidate.summary,
+    stripSearchContext(candidate.summary ?? ""),
     candidate.contacts.map((contact) => contact.value).join(" ")
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  const hasDirectContact = candidate.contacts.some(
-    (contact) => contact.type === "email" || contact.type === "phone"
-  );
+  const hasDirectContact = hasReachableContactSignal(candidate.contacts);
   const hasBuyerOrProductSignal =
     hasAny(text, buyerRoleTerms) ||
     hasAny(text, buyerUseCaseTerms) ||
@@ -979,6 +1354,9 @@ function mergeAiEvaluationWithRuleScore(
     "supplier_or_competitor",
     "procurement_intelligence"
   ]);
+  const aiHardReject =
+    rejectTypes.has(ai.resultType) || ai.decision === "reject" || aiCompanyNameRisk;
+  const hardMergedRisk = hasMergedHardRejectRisk([...ruleIcp.risks, ...ai.risks]);
 
   if (rejectTypes.has(ai.resultType)) {
     score = Math.min(score, 44);
@@ -988,6 +1366,12 @@ function mergeAiEvaluationWithRuleScore(
     ai.resultType === "target_buyer" &&
     ai.decision === "qualified" &&
     ai.confidence >= 0.72
+  ) {
+    score = Math.max(score, 75);
+  } else if (
+    ai.resultType === "possible_buyer" &&
+    ai.confidence >= 0.65 &&
+    ruleIcp.score >= 75
   ) {
     score = Math.max(score, 75);
   }
@@ -1009,11 +1393,16 @@ function mergeAiEvaluationWithRuleScore(
   let status: IcpScoreDraft["status"];
   if (ruleIcp.status === "intelligence" || ai.resultType === "procurement_intelligence") {
     status = "intelligence";
-  } else if (aiCompanyNameRisk) {
+  } else if (aiHardReject || hardMergedRisk) {
     status = "rejected";
   } else if (finalScore >= 75) {
     status = "qualified";
-  } else if (finalScore >= 50) {
+  } else if (
+    finalScore >= 50 ||
+    ruleIcp.status === "review" ||
+    ai.resultType === "possible_buyer" ||
+    ai.resultType === "target_buyer"
+  ) {
     status = "review";
   } else {
     status = "rejected";
@@ -1031,12 +1420,35 @@ function mergeAiEvaluationWithRuleScore(
     ...(ai.resultType === "supplier_or_competitor"
       ? ["AI marked this result as supplier or competitor; not a buyer lead"]
       : []),
-    ...(aiCompanyNameRisk ? ["AI flagged the company name as unreliable"] : [])
+    ...(aiCompanyNameRisk ? ["AI flagged the company name as unreliable"] : []),
+    ...(status === "review" && finalScore < 50
+      ? ["Low ICP score but retained for manual review; verify fit before outreach"]
+      : [])
   ]);
+  const evidenceRiskCap = scoreCapFromMergedEvidenceRisks(risks, ruleIcp, ai);
+  const mergedFinalScore =
+    evidenceRiskCap === null ? finalScore : clamp(Math.min(finalScore, evidenceRiskCap), 0, 100);
+  const mergedGrade = mergedFinalScore >= 75 ? "high" : mergedFinalScore >= 50 ? "medium" : "low";
+  const ruleEvidenceOnlyLead =
+    ruleIcp.leadType === "content_evidence" || ruleIcp.leadType === "government_information";
+  const mergedStatus =
+    ruleIcp.status === "intelligence" || ai.resultType === "procurement_intelligence"
+      ? "intelligence"
+      : aiHardReject
+        ? "rejected"
+        : hardMergedRisk
+          ? "rejected"
+        : ruleEvidenceOnlyLead
+          ? "rejected"
+          : mergedFinalScore >= 75
+            ? "qualified"
+            : mergedFinalScore >= 50 || status === "review"
+              ? "review"
+              : "rejected";
 
   return {
-    score: finalScore,
-    grade,
+    score: mergedFinalScore,
+    grade: mergedGrade,
     reasons,
     risks,
     leadType:
@@ -1050,8 +1462,89 @@ function mergeAiEvaluationWithRuleScore(
       (ai.resultType === "procurement_intelligence" ? ["procurement_intelligence"] : undefined),
     extractableCompanies: ruleIcp.extractableCompanies,
     pageType: ruleIcp.pageType,
-    status
+    status: mergedStatus
   };
+}
+
+function hasMergedHardRejectRisk(risks: string[]) {
+  const text = risks.join("\n").toLowerCase();
+  return (
+    text.includes("verified candidate country is outside the selected target markets") ||
+    (text.includes("located in ") && text.includes("outside the stated priority target regions")) ||
+    text.includes("off-industry signal:") ||
+    text.includes("off-target product/service evidence for a telecom task") ||
+    text.includes("consumer-electronics or phone-accessory") ||
+    text.includes("company name looks like a page title") ||
+    text.includes("no evidence of telecom system integration")
+  );
+}
+
+function scoreCapFromMergedEvidenceRisks(
+  risks: string[],
+  ruleIcp?: IcpScoreDraft,
+  ai?: CandidateBuyerEvaluation
+) {
+  const riskText = risks.join(" | ").toLowerCase();
+  let cap: number | null = null;
+  const applyCap = (value: number) => {
+    cap = cap === null ? value : Math.min(cap, value);
+  };
+
+  if (ruleIcp?.leadType === "content_evidence" || ruleIcp?.leadType === "government_information") {
+    applyCap(49);
+  }
+
+  if (
+    /cannot enter the main customer list|not an official company website|directory\/profile page|third-party.*not.*official/.test(
+      riskText
+    )
+  ) {
+    applyCap(64);
+  }
+
+  if (
+    /telecom task but candidate page has no telecom|no explicit telecom evidence|capped at review until manually validated|generic service \/ maintenance page needs manual icp validation/.test(
+      riskText
+    )
+  ) {
+    applyCap(68);
+  }
+
+  if (
+    /telecom task but candidate page has no telecom/.test(riskText) &&
+    /off-target product\/service evidence/.test(riskText)
+  ) {
+    applyCap(49);
+  }
+
+  if (
+    /(?:company|candidate|lead|business)\s+(?:is\s+)?(?:located|based|headquartered)\s+[^|.]{0,100}\boutside\s+(?:the\s+)?(?:stated|selected|requested|target)/.test(
+      riskText
+    ) ||
+    /\blocated\s+in\s+[^|.]{1,100}\boutside\s+(?:the\s+)?(?:stated|selected|requested|priority|target)/.test(
+      riskText
+    ) ||
+    /\bbased\s+in\s+[^|.]{1,100}\bwhile\b[^|.]{0,140}\b(?:requested|stated|selected|target)\s+(?:target\s+)?regions?\b/.test(
+      riskText
+    )
+  ) {
+    applyCap(39);
+  }
+
+  if (
+    /telecom task but candidate page has no telecom/.test(riskText) &&
+    ai &&
+    ai.fitScore < 50 &&
+    ai.resultType !== "target_buyer"
+  ) {
+    applyCap(49);
+  }
+
+  if (/no usable email or phone found yet/.test(riskText)) {
+    applyCap(74);
+  }
+
+  return cap;
 }
 
 function chooseStoredCompanyName(
@@ -1093,6 +1586,405 @@ function normalizeResult(
     summary: result.snippet || null,
     contacts
   });
+}
+
+async function mineDirectoryCandidates(
+  results: BraveSearchResult[],
+  options: LeadNormalizationOptions,
+  criteria: IcpScoringCriteria
+): Promise<NormalizedLeadCandidate[]> {
+  const sources = results
+    .filter((result) => shouldMineDirectoryResult(result, criteria))
+    .slice(0, directoryMiningPageLimit);
+
+  if (!sources.length) {
+    return [];
+  }
+
+  const pages = await fetchProbePages(sources.map((source) => source.url));
+  const htmlByUrl = new Map(pages.map((page) => [page.url, page.html]));
+  const candidates: NormalizedLeadCandidate[] = [];
+  const profileLinks: Array<{ source: BraveSearchResult; url: string }> = [];
+
+  for (const source of sources) {
+    const html = htmlByUrl.get(source.url) ?? "";
+    const extracted = extractDirectoryDerivedCandidates(
+      source,
+      html,
+      options,
+      criteria
+    ).slice(0, directoryMiningCandidatesPerPage);
+    candidates.push(...extracted);
+    profileLinks.push(
+      ...extractDirectoryProfilePageLinks(html, source.url)
+        .slice(0, directoryMiningProfilesPerPage)
+        .map((url) => ({ source, url }))
+    );
+
+    if (candidates.length >= directoryMiningCandidateLimit) {
+      break;
+    }
+  }
+
+  if (candidates.length < directoryMiningCandidateLimit && profileLinks.length) {
+    const limitedProfileLinks = uniqueDirectoryProfileLinks(profileLinks).slice(
+      0,
+      directoryMiningProfilePageLimit
+    );
+    const profilePages = await fetchProbePages(limitedProfileLinks.map((profile) => profile.url));
+    const profileHtmlByUrl = new Map(profilePages.map((page) => [page.url, page.html]));
+
+    for (const profile of limitedProfileLinks) {
+      const html = profileHtmlByUrl.get(profile.url) ?? "";
+      if (!html) {
+        continue;
+      }
+
+      const profileText = htmlToSearchableText(html).slice(0, 1400);
+      const profileSource: BraveSearchResult = {
+        ...profile.source,
+        url: profile.url,
+        snippet: uniqueStrings([profile.source.snippet ?? "", profileText])
+          .filter(Boolean)
+          .join("\n")
+      };
+      const extracted = extractDirectoryDerivedCandidates(
+        profileSource,
+        html,
+        options,
+        criteria
+      ).slice(0, directoryMiningCandidatesPerPage);
+      candidates.push(...extracted);
+
+      if (candidates.length >= directoryMiningCandidateLimit) {
+        break;
+      }
+    }
+  }
+
+  return dedupeCandidates(candidates).slice(0, directoryMiningCandidateLimit);
+}
+
+function shouldMineDirectoryResult(result: BraveSearchResult, criteria: IcpScoringCriteria) {
+  const domain = domainFromUrl(result.url);
+  const path = pathFromUrl(result.url);
+  const text = [result.title, result.snippet, result.url].filter(Boolean).join(" ").toLowerCase();
+
+  if (domain && (isNewsMediaDomain(domain) || isMarketResearchDomain(domain))) {
+    return false;
+  }
+
+  if (
+    domain &&
+    (isDirectoryIntelligenceDomain(domain) ||
+      (isB2bBuyerIntelligenceDomain(domain) && hasB2bBuyerIntelligenceSignal(text, path)))
+  ) {
+    return hasSearchContext(text, criteria) || hasAny(text, directoryDocumentTerms);
+  }
+
+  return looksLikeDirectoryEvidence(path, text) && hasSearchContext(text, criteria);
+}
+
+function extractDirectoryDerivedCandidates(
+  source: BraveSearchResult,
+  html: string,
+  options: LeadNormalizationOptions,
+  criteria: IcpScoringCriteria
+): NormalizedLeadCandidate[] {
+  const sourceDomain = domainFromUrl(source.url);
+  const text = [
+    source.title,
+    source.snippet,
+    source.url,
+    html ? htmlToSearchableText(html).slice(0, 16000) : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const signals = uniqueDirectoryCompanySignals([
+    ...extractOutboundCompanyLinkSignals(html, source.url),
+    ...extractPlainUrlCompanySignals(text, source.url)
+  ]).filter((signal) =>
+    isMineableOfficialCompanyUrl(signal.url, sourceDomain, criteria)
+  );
+
+  return signals.map((signal) => {
+    const website = normalizeWebsite(signal.url);
+    const domainCompany = website ? companyFromDomain(website) : null;
+    const titleCompany = extractDirectoryCompanyNameFromTitle(source.title);
+    const signalCompany = signal.label ? cleanupCompanyName(signal.label) : "";
+    const companyName = chooseBestCompanyName(
+      domainCompany ?? titleCompany ?? source.title,
+      website,
+      [signalCompany, titleCompany ?? "", domainCompany ?? ""]
+    );
+    const summary = uniqueStrings([
+      source.snippet ?? "",
+      signal.context ?? "",
+      `Derived from directory/intelligence page: ${source.url}`
+    ]).join("\n");
+
+    return applyCountryValidation({
+      taskId: options.taskId,
+      companyName,
+      website,
+      country: null,
+      queryCountry: normalizeQueryCountry(options.defaultCountry),
+      inferredCountry: null,
+      sourceUrl: website ?? signal.url,
+      sourcePageUrl: source.url,
+      sourcePageTitle: source.title,
+      summary,
+      contacts: extractContacts([source.snippet, signal.context].filter(Boolean).join(" "), source.url)
+    });
+  });
+}
+
+type DirectoryCompanySignal = {
+  url: string;
+  label?: string;
+  context?: string;
+};
+
+function extractOutboundCompanyLinkSignals(html: string, baseUrl: string): DirectoryCompanySignal[] {
+  if (!html) {
+    return [];
+  }
+
+  const signals: DirectoryCompanySignal[] = [];
+  const anchorPattern =
+    /<a\b([^>]*?)\bhref\s*=\s*(["'])([\s\S]*?)\2([^>]*)>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchorPattern.exec(html)) !== null) {
+    const href = decodeHtmlEntities(match[3] ?? "").trim();
+    const resolved = resolveDirectoryOutboundUrl(href, baseUrl);
+    if (!resolved) {
+      continue;
+    }
+
+    const label = htmlToSearchableText(match[5] ?? "").slice(0, 120);
+    const before = html.slice(Math.max(0, match.index - 240), match.index);
+    const after = html.slice(anchorPattern.lastIndex, anchorPattern.lastIndex + 240);
+    signals.push({
+      url: resolved,
+      label,
+      context: htmlToSearchableText(`${before} ${match[0]} ${after}`).slice(0, 600)
+    });
+  }
+
+  return signals;
+}
+
+function extractDirectoryProfilePageLinks(html: string, baseUrl: string) {
+  if (!html) {
+    return [];
+  }
+
+  const baseDomain = domainFromUrl(baseUrl);
+  if (!baseDomain) {
+    return [];
+  }
+
+  const links: string[] = [];
+  const anchorPattern =
+    /<a\b([^>]*?)\bhref\s*=\s*(["'])([\s\S]*?)\2([^>]*)>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchorPattern.exec(html)) !== null) {
+    const href = decodeHtmlEntities(match[3] ?? "").trim();
+    if (!href || /^(?:mailto:|tel:|javascript:|#)/i.test(href)) {
+      continue;
+    }
+
+    try {
+      const parsed = new URL(href, baseUrl);
+      parsed.hash = "";
+      const domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
+      if (!domainMatches(domain, baseDomain)) {
+        continue;
+      }
+
+      const path = parsed.pathname.toLowerCase();
+      const label = htmlToSearchableText(match[5] ?? "").slice(0, 160);
+      const before = html.slice(Math.max(0, match.index - 180), match.index);
+      const after = html.slice(anchorPattern.lastIndex, anchorPattern.lastIndex + 180);
+      const context = htmlToSearchableText(`${before} ${match[0]} ${after}`).slice(0, 500);
+      if (!looksLikeDirectoryProfilePath(path, `${label} ${context}`)) {
+        continue;
+      }
+
+      links.push(parsed.toString());
+    } catch {
+      // Ignore malformed directory links.
+    }
+  }
+
+  return uniqueStrings(links).filter((url) => normalizeUrlKey(url) !== normalizeUrlKey(baseUrl));
+}
+
+function looksLikeDirectoryProfilePath(path: string, text: string) {
+  if (
+    !path ||
+    /\.(?:pdf|docx?|xlsx?|pptx?|jpg|jpeg|png|webp|gif|svg|css|js)$/i.test(path) ||
+    /(?:\/search|\/tag\/|\/category\/|\/news|\/blog|\/article|\/login|\/register)/i.test(path)
+  ) {
+    return false;
+  }
+
+  return (
+    /\/(?:company|companies|supplier|suppliers|installer|installers|member|members|profile|listing|listings|directory)\/.+/i.test(
+      path
+    ) ||
+    /\b(?:company profile|view profile|company website|website|contact supplier|installer profile)\b/i.test(
+      text
+    )
+  );
+}
+
+function uniqueDirectoryProfileLinks(links: Array<{ source: BraveSearchResult; url: string }>) {
+  const seen = new Set<string>();
+  const output: Array<{ source: BraveSearchResult; url: string }> = [];
+  for (const link of links) {
+    const key = normalizeUrlKey(link.url);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(link);
+  }
+  return output;
+}
+
+function normalizeUrlKey(url: string) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "").toLowerCase();
+  } catch {
+    return url.replace(/\/$/, "").toLowerCase();
+  }
+}
+
+function extractPlainUrlCompanySignals(text: string, baseUrl: string): DirectoryCompanySignal[] {
+  const matches = text.match(/(?:https?:\/\/|www\.)[^\s<>"')]+/gi) ?? [];
+  return matches
+    .map((raw) => raw.replace(/[),.;:]+$/g, ""))
+    .map((raw) => (raw.toLowerCase().startsWith("www.") ? `https://${raw}` : raw))
+    .map((url) => resolveDirectoryOutboundUrl(url, baseUrl))
+    .filter((url): url is string => Boolean(url))
+    .map((url) => ({ url, context: text.slice(0, 600) }));
+}
+
+function resolveDirectoryOutboundUrl(href: string, baseUrl: string) {
+  if (!href || /^(?:mailto:|tel:|javascript:|#)/i.test(href)) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(href, baseUrl);
+    const embedded = extractEmbeddedTargetUrl(parsed);
+    if (embedded) {
+      return embedded;
+    }
+
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function extractEmbeddedTargetUrl(url: URL) {
+  const params = [
+    "url",
+    "u",
+    "target",
+    "to",
+    "dest",
+    "destination",
+    "redirect",
+    "redirect_url",
+    "redirectUrl",
+    "website",
+    "web",
+    "link",
+    "out"
+  ];
+
+  for (const param of params) {
+    const value = url.searchParams.get(param);
+    if (!value) {
+      continue;
+    }
+    const decoded = decodeHtmlEntities(value);
+    try {
+      const parsed = new URL(decoded);
+      parsed.hash = "";
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        return parsed.toString();
+      }
+    } catch {
+      // Ignore non-URL tracking parameters.
+    }
+  }
+
+  return null;
+}
+
+function isMineableOfficialCompanyUrl(
+  url: string,
+  sourceDomain: string | null,
+  criteria: IcpScoringCriteria
+) {
+  const domain = domainFromUrl(url);
+  const path = pathFromUrl(url);
+  if (!domain || (sourceDomain && domainMatches(domain, sourceDomain))) {
+    return false;
+  }
+
+  if (!/^https?:\/\//i.test(url) || /\.(?:pdf|docx?|xlsx?|pptx?|jpg|jpeg|png|webp|gif|svg)$/i.test(path)) {
+    return false;
+  }
+
+  if (
+    isBlockedContentDomain(domain) ||
+    isBlockedMarketplaceDomain(domain) ||
+    isDirectoryIntelligenceDomain(domain) ||
+    isB2bBuyerIntelligenceDomain(domain) ||
+    isProcurementIntelligenceDomain(domain) ||
+    isNewsMediaDomain(domain) ||
+    isMarketResearchDomain(domain) ||
+    isVendorOemDomain(domain) ||
+    isOwnDomain(domain, criteria.ownDomains ?? [])
+  ) {
+    return false;
+  }
+
+  if (directoryMiningUtilityDomains.some((blockedDomain) => domainMatches(domain, blockedDomain))) {
+    return false;
+  }
+
+  return true;
+}
+
+function uniqueDirectoryCompanySignals(signals: DirectoryCompanySignal[]) {
+  const seen = new Set<string>();
+  const output: DirectoryCompanySignal[] = [];
+  for (const signal of signals) {
+    const domain = domainFromUrl(signal.url);
+    if (!domain || seen.has(domain)) {
+      continue;
+    }
+    seen.add(domain);
+    output.push(signal);
+  }
+  return output;
+}
+
+function extractDirectoryCompanyNameFromTitle(title: string) {
+  const firstPart = title
+    .split(/\s(?:[-:|]|\u2013|\u2014)\s/)
+    .map(cleanupCompanyName)
+    .find((part) => part && !looksLikeContentTitle(part));
+  return firstPart || null;
 }
 
 function dedupeCandidates(candidates: NormalizedLeadCandidate[]) {
@@ -1273,6 +2165,7 @@ function isForbiddenCompanyName(value: string) {
     // Contracting W.L.L."). Broadened to allow any printable chars.
     /^by\s+.{2,80}$/i.test(value.trim()) ||
     looksLikeSiteBuilderCredit(value) ||
+    looksLikeAssetOrIconTitle(value) ||
     /\b(?:tagline|awesome image|blog category|article author|pdf)\b/i.test(value) ||
     // 2026-05 V1-MVP+: article/listicle titles that got extracted as
     // company names. These patterns are never real company names:
@@ -1291,6 +2184,10 @@ function isForbiddenCompanyName(value: string) {
     // Copyright / year patterns that leak from footer extraction
     /\b(?:copyright|©)\s*\d{4}/i.test(value) ||
     /^\d{4}\s/.test(value.trim()) ||
+    /^\d+\s*yr$/i.test(value.trim()) ||
+    /^account\s+suspended$/i.test(value.trim()) ||
+    /^i\.?\s*t\.?\s*&\s*telecommunication projects$/i.test(value.trim()) ||
+    /^dustrial$/i.test(value.trim()) ||
     // Image alt text / placeholder patterns
     /^(?:image|img|photo|banner|logo|icon)\s*\d*/i.test(value.trim())
   );
@@ -1313,6 +2210,10 @@ function isLikelyCompanyName(value: string, domainCompany: string | null) {
 
   if (domainCompany && normalizeCompanyKey(name) === normalizeCompanyKey(domainCompany)) {
     return true;
+  }
+
+  if (looksLikeAssetOrIconTitle(name)) {
+    return false;
   }
 
   if (generalCompanyEntityTerms.some((term) => lower.includes(term))) {
@@ -1346,6 +2247,17 @@ function looksLikeProductTitle(value: string) {
         "networking equipment",
         "hardware repair"
       ]))
+  );
+}
+
+function looksLikeAssetOrIconTitle(value: string) {
+  const lower = cleanupCompanyName(value).toLowerCase();
+  return (
+    /\b(?:artificial intelligence|ai|vector|illustration|svg|png|jpg|stock photo)\s+(?:icon|image|logo|illustration)\b/i.test(
+      lower
+    ) ||
+    /^(?:image|img|photo|banner|logo|icon)\s*\d*/i.test(lower) ||
+    /\b(?:icon|image|logo|illustration|thumbnail|banner)\s*$/i.test(lower)
   );
 }
 
@@ -1611,6 +2523,15 @@ function collectCountryEvidence(candidate: NormalizedLeadCandidate): CountryEvid
   return dedupeCountryEvidence(evidence);
 }
 
+function inferredContactCountries(contacts: NormalizedLeadCandidate["contacts"]) {
+  return uniqueCountries(
+    contacts
+      .filter((contact) => contact.type === "phone")
+      .map((contact) => inferCountryFromPhone(contact.value))
+      .filter((country): country is string => Boolean(country))
+  );
+}
+
 function phoneHasAddressContext(candidate: NormalizedLeadCandidate, phoneValue: string) {
   const summary = stripSearchContext(candidate.summary ?? "");
   if (!summary) {
@@ -1634,8 +2555,43 @@ function normalizeQueryCountry(country: string | undefined) {
   return country && !isMacroTargetRegion(country) ? normalizeCountry(country) : null;
 }
 
+function markSearchSnippetLines(value: string | null | undefined) {
+  return (value ?? "")
+    .split(/[\r\n]+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) =>
+      /^(?:search result snippet|official page text):/i.test(line)
+        ? line
+        : `Search result snippet: ${line}`
+    );
+}
+
 function stripSearchContext(value: string) {
-  return value.replace(/\bQuery context:\s*.*$/gis, "").trim();
+  const withoutQueryContext = value.replace(/\bQuery context:\s*.*$/gis, "").trim();
+  if (!withoutQueryContext) {
+    return "";
+  }
+
+  const lines = withoutQueryContext
+    .split(/[\r\n]+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const hasOfficialPageText = lines.some((line) => /^official page text:/i.test(line));
+  const evidenceLines = hasOfficialPageText
+    ? lines.filter((line) => !/^search result snippet:/i.test(line))
+    : lines;
+
+  return evidenceLines
+    .map((line) =>
+      line
+        .replace(/^official page text:\s*/i, "")
+        .replace(/^search result snippet:\s*/i, "")
+        .trim()
+    )
+    .filter(Boolean)
+    .join("\n")
+    .trim();
 }
 
 function extractCountryEvidenceFromOfficialText(text: string, sourceUrl: string) {
@@ -1799,7 +2755,8 @@ function extractContacts(text: string, sourceUrl: string): NormalizedLeadCandida
   const contacts = [
     ...extractEmails(text).map((value) => ({ type: "email" as const, value, sourceUrl })),
     ...extractPhoneContacts(text, sourceUrl),
-    ...extractSocialUrls(text).map((value) => ({ type: "social" as const, value, sourceUrl }))
+    ...extractSocialUrls(text).map((value) => ({ type: "social" as const, value, sourceUrl })),
+    ...extractContactEntryUrlContacts(sourceUrl)
   ];
   const seen = new Set<string>();
 
@@ -1910,9 +2867,11 @@ function extractObfuscatedEmails(text: string) {
 function normalizeEmailCandidate(email: string) {
   return trimEmailToKnownTld(
     safeDecodeURIComponent(email)
+      .replace(/^https?:\/\//i, "")
       .replace(/[),.;:]+$/g, "")
       .replace(/[\\/"'<>]+$/g, "")
       .replace(/^mailto:/i, "")
+      .replace(/^https?:\/\//i, "")
       .trim()
       .toLowerCase()
   );
@@ -2108,30 +3067,50 @@ async function enrichCandidateContacts(
   const pages = await fetchProbePages(urls);
   const linkedUrls: string[] = [];
 
-  for (const { url, html } of pages) {
+  for (const { url, ok, status, html } of pages) {
     if (!html) {
       continue;
     }
+    const protectedContactPage = isProtectedContactResponse(status, html);
+    if (!ok && !protectedContactPage) {
+      continue;
+    }
     const text = htmlToSearchableText(html).slice(0, 20000);
+    if (protectedContactPage) {
+      contacts.push(...extractContactFormEntries(url, html, text, status));
+      continue;
+    }
     snippets.push(text.slice(0, 800));
     companyNameCandidates.push(...extractCompanyNamesFromOfficialHtml(html, url));
     contacts.push(...extractContactsFromHtml(html, url));
     contacts.push(...extractContacts(text, url));
+    contacts.push(...extractContactFormEntries(url, html, text, status));
     linkedUrls.push(...extractContactLinks(html, url));
   }
+
+  contacts.push(...extractDiscoveredContactEntryLinks(linkedUrls));
 
   const linkedPages = await fetchProbePages(
     linkedUrls.filter((url) => !urls.includes(url)).slice(0, contactLinkedProbePageLimit)
   );
-  for (const { url, html } of linkedPages) {
+  for (const { url, ok, status, html } of linkedPages) {
     if (!html) {
       continue;
     }
+    const protectedContactPage = isProtectedContactResponse(status, html);
+    if (!ok && !protectedContactPage) {
+      continue;
+    }
     const text = htmlToSearchableText(html).slice(0, 20000);
+    if (protectedContactPage) {
+      contacts.push(...extractContactFormEntries(url, html, text, status));
+      continue;
+    }
     snippets.push(text.slice(0, 800));
     companyNameCandidates.push(...extractCompanyNamesFromOfficialHtml(html, url));
     contacts.push(...extractContactsFromHtml(html, url));
     contacts.push(...extractContacts(text, url));
+    contacts.push(...extractContactFormEntries(url, html, text, status));
   }
 
   const companyName = chooseBestCompanyName(
@@ -2143,7 +3122,13 @@ async function enrichCandidateContacts(
     ...candidate,
     companyName,
     summary:
-      [candidate.summary, ...snippets].filter(Boolean).join("\n").slice(0, 5000) ||
+      [
+        ...markSearchSnippetLines(candidate.summary),
+        ...snippets.map((snippet) => `Official page text: ${snippet}`)
+      ]
+        .filter(Boolean)
+        .join("\n")
+        .slice(0, 5000) ||
       candidate.summary,
     contacts: dedupeContacts(contacts)
   };
@@ -2294,7 +3279,12 @@ function shouldProbeContactPages(candidate: NormalizedLeadCandidate) {
 
   const domain = domainFromUrl(candidate.website) ?? domainFromUrl(candidate.sourceUrl);
   const path = pathFromUrl(candidate.sourceUrl);
-  const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
+  const text = [
+    candidate.companyName,
+    candidate.website,
+    candidate.sourceUrl,
+    stripSearchContext(candidate.summary ?? "")
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -2421,7 +3411,11 @@ function looksLikeTier1MobileOperator(
       // Check if this is a vendor/procurement page — if so, let it
       // through to the intelligence classification path.
       const path = pathFromUrl(candidate.sourceUrl).toLowerCase();
-      const text = [candidate.companyName, candidate.sourceUrl, candidate.summary]
+      const text = [
+        candidate.companyName,
+        candidate.sourceUrl,
+        stripSearchContext(candidate.summary ?? "")
+      ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -2686,7 +3680,12 @@ function shouldHardRejectCandidate(
   const domain = candidate.website
     ? domainFromUrl(candidate.website)
     : domainFromUrl(candidate.sourceUrl);
-  const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
+  const text = [
+    candidate.companyName,
+    candidate.website,
+    candidate.sourceUrl,
+    stripSearchContext(candidate.summary ?? "")
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -2812,6 +3811,9 @@ function shouldHardRejectCandidate(
   }
 
   if (pageType === "third_party_profile") {
+    if (candidate.sourcePageUrl && !hasOfficialVerificationEvidence(candidate)) {
+      return false;
+    }
     return true;
   }
 
@@ -2866,7 +3868,12 @@ function isRiskyDiscoveryPage(candidate: NormalizedLeadCandidate) {
     ? domainFromUrl(candidate.website)
     : domainFromUrl(candidate.sourceUrl);
   const path = pathFromUrl(candidate.sourceUrl);
-  const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
+  const text = [
+    candidate.companyName,
+    candidate.website,
+    candidate.sourceUrl,
+    stripSearchContext(candidate.summary ?? "")
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -2893,7 +3900,7 @@ function looksLikeBuyerSideCompanyPage(candidate: NormalizedLeadCandidate) {
     candidate.companyName,
     candidate.website,
     candidate.sourceUrl,
-    candidate.summary,
+    stripSearchContext(candidate.summary ?? ""),
     candidate.country,
     candidate.contacts.map((contact) => contact.value).join(" ")
   ]
@@ -2906,6 +3913,9 @@ function looksLikeBuyerSideCompanyPage(candidate: NormalizedLeadCandidate) {
   }
 
   if (
+    looksLikeArticlePath(path) ||
+    looksLikeThirdPartyDirectoryPage(candidate) ||
+    looksLikeUnverifiedDirectoryDerivedCandidate(candidate) ||
     looksLikeStorefrontPath(path) ||
     looksLikeNonCustomerProductPage(candidate) ||
     looksLikeIndustryOrganizationOrEventPage(candidate) ||
@@ -2947,7 +3957,12 @@ function looksLikeDirectCompanyEvidence(candidate: NormalizedLeadCandidate) {
     ? domainFromUrl(candidate.website)
     : domainFromUrl(candidate.sourceUrl);
   const path = pathFromUrl(candidate.sourceUrl);
-  const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
+  const text = [
+    candidate.companyName,
+    candidate.website,
+    candidate.sourceUrl,
+    stripSearchContext(candidate.summary ?? "")
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -2957,6 +3972,8 @@ function looksLikeDirectCompanyEvidence(candidate: NormalizedLeadCandidate) {
   }
 
   if (
+    looksLikeThirdPartyDirectoryPage(candidate) ||
+    looksLikeUnverifiedDirectoryDerivedCandidate(candidate) ||
     looksLikeArticlePath(path) ||
     looksLikeContentTitle(candidate.companyName) ||
     looksLikeNonCustomerProductPage(candidate) ||
@@ -3024,8 +4041,26 @@ function contactPagePathCandidates(...urls: string[]) {
     }
   }
 
-  // The 4 contact-page forms users actually click on most modern sites.
-  const topRootContactPaths = ["/contact", "/contact-us", "/contacts", "/contactus"];
+  // High-yield contact / procurement entry points users actually click
+  // on modern B2B sites. Keep the procurement/RFQ variants early because
+  // contactProbePageLimit is intentionally small.
+  const primaryRootContactPaths = [
+    "/contact",
+    "/contact-us",
+    "/contacts",
+    "/contactus"
+  ];
+  const procurementRootContactPaths = [
+    "/request-a-quote",
+    "/quote",
+    "/rfq",
+    "/inquiry",
+    "/enquiry",
+    "/vendor-registration",
+    "/supplier-registration",
+    "/procurement"
+  ];
+  const topRootContactPaths = [...primaryRootContactPaths, ...procurementRootContactPaths];
 
   // English-locale variants right after the root contact paths. Winncom
   // exposes /en/contacts, while NESIC keeps contact data on about.php?lang=en.
@@ -3038,9 +4073,9 @@ function contactPagePathCandidates(...urls: string[]) {
   ];
 
   const observedPrefixContactPaths = [...observedPrefixes].flatMap((prefix) =>
-    topRootContactPaths.map((suffix) => `${prefix}${suffix}`)
+    primaryRootContactPaths.map((suffix) => `${prefix}${suffix}`)
   );
-  const wpContactPaths = topRootContactPaths.map((suffix) => `/wp${suffix}`);
+  const wpContactPaths = primaryRootContactPaths.map((suffix) => `/wp${suffix}`);
 
   // Trailing-slash and .html variants of the root contact paths, plus common
   // verbal forms ("get in touch", "reach us", "connect").
@@ -3052,6 +4087,22 @@ function contactPagePathCandidates(...urls: string[]) {
     "/contact.html",
     "/contact-us.html",
     "/contactus.html",
+    "/inquiry/",
+    "/enquiry/",
+    "/inquiries",
+    "/inquiries/",
+    "/enquiries",
+    "/enquiries/",
+    "/send-inquiry",
+    "/send-inquiry/",
+    "/send-enquiry",
+    "/send-enquiry/",
+    "/request-info",
+    "/request-info/",
+    "/request-information",
+    "/request-information/",
+    "/request-quote",
+    "/request-quote/",
     "/get-in-touch",
     "/get-in-touch/",
     "/getintouch",
@@ -3090,6 +4141,26 @@ function contactPagePathCandidates(...urls: string[]) {
     "/request-a-quote/",
     "/quote",
     "/quote/",
+    "/rfq",
+    "/rfq/",
+    "/vendor-registration",
+    "/vendor-registration/",
+    "/supplier-registration",
+    "/supplier-registration/",
+    "/procurement",
+    "/procurement/",
+    "/tender",
+    "/tender/",
+    "/tenders",
+    "/tenders/",
+    "/partners",
+    "/partners/",
+    "/become-a-partner",
+    "/become-a-partner/",
+    "/dealers",
+    "/dealers/",
+    "/distributors",
+    "/distributors/",
     "/sales",
     "/sales/",
     "/support",
@@ -3101,9 +4172,10 @@ function contactPagePathCandidates(...urls: string[]) {
   ];
 
   const candidates: string[] = [
-    ...topRootContactPaths,
-    ...enLocaleContactPaths,
+    ...primaryRootContactPaths,
     ...observedPrefixContactPaths,
+    ...procurementRootContactPaths,
+    ...enLocaleContactPaths,
     ...wpContactPaths,
     ...rootContactVariants,
     ...[...observedPrefixes].flatMap((prefix) =>
@@ -3135,6 +4207,27 @@ function installBasePathPrefix(url: string) {
         "getintouch",
         "reach-us",
         "connect",
+        "inquiry",
+        "inquiries",
+        "enquiry",
+        "enquiries",
+        "send-inquiry",
+        "send-enquiry",
+        "request-info",
+        "request-information",
+        "request-quote",
+        "request-a-quote",
+        "quote",
+        "rfq",
+        "vendor-registration",
+        "supplier-registration",
+        "procurement",
+        "tender",
+        "tenders",
+        "partners",
+        "become-a-partner",
+        "dealers",
+        "distributors",
         "our-team",
         "team",
         "our-offices",
@@ -3163,7 +4256,7 @@ function installBasePathPrefix(url: string) {
 
 async function fetchProbePages(urls: string[]) {
   const uniqueUrls = uniqueStrings(urls);
-  const results: Array<{ url: string; html: string }> = [];
+  const results: Array<{ url: string; ok: boolean; status: number; html: string }> = [];
   const concurrency = 4;
   let nextIndex = 0;
 
@@ -3172,7 +4265,7 @@ async function fetchProbePages(urls: string[]) {
       const currentIndex = nextIndex;
       nextIndex += 1;
       const url = uniqueUrls[currentIndex]!;
-      results[currentIndex] = { url, html: await fetchText(url) };
+      results[currentIndex] = { url, ...(await fetchText(url)) };
     }
   }
 
@@ -3220,6 +4313,91 @@ function extractContactLinks(html: string, baseUrl: string) {
   return uniqueStrings(urls).slice(0, 12);
 }
 
+function extractContactFormEntries(
+  url: string,
+  html: string,
+  text: string,
+  status = 200
+): NormalizedLeadCandidate["contacts"] {
+  const contactEntryUrl = looksLikeContactEntryUrl(url);
+  if (
+    (!contactEntryUrl && !looksLikeContactFormHtml(html, text)) ||
+    (contactEntryUrl && !isContactEntryProbeUsable(status, html))
+  ) {
+    return [];
+  }
+
+  return [
+    {
+      type: "form",
+      value: url,
+      sourceUrl: url
+    }
+  ];
+}
+
+function extractDiscoveredContactEntryLinks(urls: string[]): NormalizedLeadCandidate["contacts"] {
+  return uniqueStrings(urls)
+    .filter((url) => looksLikeContactEntryUrl(url) && isHttpUrl(url))
+    .slice(0, 8)
+    .map((url) => ({
+      type: "form" as const,
+      value: url,
+      sourceUrl: url
+    }));
+}
+
+function isContactEntryProbeUsable(status: number, html: string) {
+  return (status >= 200 && status < 400) || isProtectedContactResponse(status, html);
+}
+
+function isProtectedContactResponse(status: number, html: string) {
+  return (
+    [401, 403, 429, 503].includes(status) &&
+    /(?:access to this site has been limited|wordfence|cloudflare|attention required|forbidden|rate limit|too many requests|checking your browser)/i.test(
+      html
+    )
+  );
+}
+
+function looksLikeContactEntryUrl(value: string) {
+  const path = pathFromUrl(value);
+  return /(?:^|\/)(?:contact|contact-us|contacts|contactus|get-in-touch|getintouch|reach-us|connect|inquiry|inquiries|enquiry|enquiries|send-inquiry|send-enquiry|request-info|request-information|request-a-quote|request-quote|quote|rfq|sales|support|vendor|vendor-registration|supplier|supplier-registration|procurement|tender|tenders|partner|partners|become-a-partner|dealer|dealers|distributor|distributors)(?:\/|$)/i.test(
+    path
+  );
+}
+
+function looksLikeContactFormHtml(html: string, text: string) {
+  const lowerText = text.toLowerCase();
+  return (
+    /<form\b/i.test(html) &&
+    hasAny(lowerText, [
+      "contact us",
+      "get in touch",
+      "send message",
+      "submit enquiry",
+      "submit inquiry",
+      "request a quote",
+      "request quote",
+      "request information",
+      "rfq",
+      "send enquiry",
+      "send inquiry",
+      "enquire now",
+      "inquire now",
+      "contact form",
+      "vendor registration",
+      "supplier registration",
+      "procurement",
+      "tender",
+      "become a partner",
+      "dealer application",
+      "distributor application",
+      "sales team"
+    ])
+  );
+}
+
 function hasMeaningfulContactSearchParams(url: URL) {
   return ["lang", "language", "locale"].some((param) => url.searchParams.has(param));
 }
@@ -3242,19 +4420,19 @@ type ContactProbeFetchResult = {
   html: string;
 };
 
-async function fetchText(url: string) {
+async function fetchText(url: string): Promise<ContactProbeFetchResult> {
   const first = await fetchTextOnce(url);
   if (first.ok) {
-    return first.html;
+    return first;
   }
 
   const sucuriCookie = extractSucuriChallengeCookie(first.html);
   if (!sucuriCookie) {
-    return "";
+    return first;
   }
 
   const second = await fetchTextOnce(url, sucuriCookie);
-  return second.ok ? second.html : "";
+  return second.ok ? second : first;
 }
 
 async function fetchTextOnce(url: string, cookie?: string): Promise<ContactProbeFetchResult> {
@@ -3395,6 +4573,22 @@ function hasAny(text: string, terms: string[]) {
   return terms.some((term) => text.includes(term.toLowerCase()));
 }
 
+function hasAnyWholeTerm(text: string, terms: string[]) {
+  return terms.some((term) => hasWholeTerm(text, term));
+}
+
+function hasWholeTerm(text: string, term: string) {
+  const normalizedTerm = term.toLowerCase().trim();
+  if (!normalizedTerm) {
+    return false;
+  }
+  const pattern = new RegExp(
+    `(^|[^a-z0-9])${escapeRegex(normalizedTerm).replace(/\s+/g, "\\s+")}(?=$|[^a-z0-9])`,
+    "i"
+  );
+  return pattern.test(text);
+}
+
 // 2026-05 Stage 2 follow-up (P2): negation-aware variant of
 // text.includes for the disqualifier penalty path. We walk every
 // occurrence of `term` in `text` and check if the run of words
@@ -3450,11 +4644,11 @@ function containsOutsideNegationContext(text: string, term: string) {
 }
 
 function hasTelecomContext(text: string) {
-  if (hasAny(text, telecomIndustryTerms)) {
+  if (hasAnyWholeTerm(text, telecomIndustryTerms)) {
     return true;
   }
 
-  return /\bnetwork\b/.test(text) && hasAny(text, networkTelecomQualifiers);
+  return /\bnetwork\b/.test(text) && hasAnyWholeTerm(text, networkTelecomQualifiers);
 }
 
 function hasSearchContext(text: string, criteria: IcpScoringCriteria) {
@@ -3465,7 +4659,9 @@ function hasSearchContext(text: string, criteria: IcpScoringCriteria) {
   ].filter((term) => term.trim().length >= 2);
 
   return (
-    hasAny(text, criteriaTerms) || (criteriaIndicatesTelecom(criteria) && hasTelecomContext(text))
+    hasAny(text, criteriaTerms) ||
+    (criteriaIndicatesTelecom(criteria) && hasTelecomContext(text)) ||
+    (criteriaIndicatesSolar(criteria) && hasSolarContext(text))
   );
 }
 
@@ -3482,9 +4678,52 @@ function criteriaIndicatesTelecom(criteria: IcpScoringCriteria) {
   return hasTelecomContext(criteriaText) || hasAny(criteriaText, specificTelecomProductTerms);
 }
 
+function criteriaIndicatesSolar(criteria: IcpScoringCriteria) {
+  const criteriaText = [
+    ...criteria.productKeywords,
+    ...criteria.customerTypeKeywords,
+    ...(criteria.brandTerms ?? [])
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return hasSolarContext(criteriaText);
+}
+
+function hasSolarContext(text: string) {
+  return /\b(?:solar|pv|photovoltaic|bess|ess|energy storage|battery storage|solar inverter|pv inverter|hybrid inverter|microgrid|off[-\s]?grid|renewable energy)\b/i.test(
+    text
+  );
+}
+
+function criteriaTargetsConsumerElectronics(criteria: IcpScoringCriteria) {
+  const criteriaText = [
+    ...criteria.productKeywords,
+    ...criteria.customerTypeKeywords,
+    ...(criteria.brandTerms ?? [])
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return hasAny(criteriaText, consumerElectronicsTerms);
+}
+
 function isSpecificProductTerm(term: string) {
   const normalized = term.toLowerCase();
-  return specificTelecomProductTerms.some((specificTerm) => normalized.includes(specificTerm));
+  if (specificTelecomProductTerms.some((specificTerm) => normalized.includes(specificTerm))) {
+    return true;
+  }
+  if (genericProductKeywordTerms.has(normalized)) {
+    return false;
+  }
+  return (
+    hasSolarContext(normalized) ||
+    /\b(?:inverter|battery|storage|combiner|module|controller|charger|pump|valve|motor|bearing|compressor|sensor|meter|transformer|cable|connector)\b/i.test(
+      normalized
+    )
+  );
 }
 
 function matchesTargetRegion(country: string, targetRegions: string[]) {
@@ -3564,7 +4803,7 @@ function classifyCandidatePage(
     candidate.companyName,
     candidate.website,
     candidate.sourceUrl,
-    candidate.summary,
+    stripSearchContext(candidate.summary ?? ""),
     candidate.country,
     candidate.contacts.map((contact) => contact.value).join(" ")
   ]
@@ -3592,6 +4831,30 @@ function classifyCandidatePage(
     return "procurement_document";
   }
 
+  if (
+    domain &&
+    isBlockedContentDomain(domain) &&
+    !isGovernmentInformationDomain(domain) &&
+    !isProcurementIntelligenceDomain(domain)
+  ) {
+    return "content_or_directory";
+  }
+
+  if (domain && looksLikeProcurementDomain(domain)) {
+    return "procurement_document";
+  }
+
+  if (looksLikeProcurementPath(path)) {
+    return "procurement_document";
+  }
+
+  if (
+    looksLikeThirdPartyDirectoryPage(candidate) ||
+    looksLikeUnverifiedDirectoryDerivedCandidate(candidate)
+  ) {
+    return hasProcurementIntent(text) ? "procurement_document" : "third_party_profile";
+  }
+
   if (domain && isBrandOemDomain(domain, criteria)) {
     return "brand_oem_site";
   }
@@ -3601,6 +4864,9 @@ function classifyCandidatePage(
   }
 
   if (isSupplierOrStorefrontPage(text, path)) {
+    if (looksLikeDownstreamChannelBuyer(candidate, criteria)) {
+      return "official_company_site";
+    }
     return "supplier_or_storefront";
   }
 
@@ -3761,11 +5027,30 @@ function escapeRegex(input: string): string {
 }
 
 function hasProcurementIntent(text: string) {
-  if (hasAny(text, strongProcurementIntentTerms)) {
+  const normalizedText = text.replace(/[-_/]+/g, " ");
+  if (
+    hasAny(text, strongProcurementIntentTerms) ||
+    hasAny(normalizedText, strongProcurementIntentTerms)
+  ) {
     return true;
   }
 
-  return /\bprocurement\b/i.test(text) && hasAny(text, procurementContextTerms);
+  return (
+    /\bprocurement\b/i.test(normalizedText) &&
+    (hasAny(text, procurementContextTerms) || hasAny(normalizedText, procurementContextTerms))
+  );
+}
+
+function looksLikeProcurementPath(path: string) {
+  return /(?:^|\/|-)(?:procurement|purchasing|tenders?|rfq|rfp|bidding|e[-_]?sourcing|supplier[-_]?registration|vendor[-_]?registration|supplier[-_]?portal|vendor[-_]?portal|become[-_]?supplier|active[-_]?tenders?)(?:\/|-|$)/i.test(
+    path
+  );
+}
+
+function looksLikeProcurementDomain(domain: string) {
+  return /^(?:e[-_]?sourcing|procurement|purchasing|supplier|vendor|tender|rfq|rfp)[.-]/i.test(
+    domain
+  );
 }
 
 function isSupplierOrStorefrontPage(text: string, path: string) {
@@ -3795,6 +5080,59 @@ function isSupplierOrStorefrontPage(text: string, path: string) {
   return signalCount >= 2;
 }
 
+function looksLikeDownstreamChannelBuyer(
+  candidate: NormalizedLeadCandidate,
+  criteria: IcpScoringCriteria
+) {
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
+  const text = [
+    candidate.companyName,
+    candidate.website,
+    candidate.sourceUrl,
+    stripSearchContext(candidate.summary ?? ""),
+    candidate.country,
+    candidate.contacts.map((contact) => contact.value).join(" ")
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (
+    !domain ||
+    isBlockedContentDomain(domain) ||
+    isBlockedMarketplaceDomain(domain) ||
+    isVendorOemDomain(domain) ||
+    isOwnDomain(domain, criteria.ownDomains ?? []) ||
+    hasNonTargetChinaSupplierSignal(candidate, criteria)
+  ) {
+    return false;
+  }
+
+  const hasChannelSignal =
+    hasAny(text, downstreamChannelBuyerTerms) ||
+    hasAny(text, criteria.customerTypeKeywords.filter(isChannelCustomerTerm));
+  if (!hasChannelSignal || !hasSearchContext(text, criteria)) {
+    return false;
+  }
+
+  const hasPureManufacturerSignal =
+    hasAny(text, ["manufacturer", "manufacturers", "factory", "oem", "odm"]) &&
+    !hasAny(text, downstreamChannelBuyerTerms.filter((term) => term !== "supplier"));
+  if (hasPureManufacturerSignal) {
+    return false;
+  }
+
+  return true;
+}
+
+function isChannelCustomerTerm(term: string) {
+  return /\b(?:distributor|dealer|reseller|importer|stockist|wholesale|wholesaler|trading|supplier)\b/i.test(
+    term
+  );
+}
+
 function hasBuyerSideSignal(text: string) {
   return (
     hasAny(text, buyerUseCaseTerms) ||
@@ -3817,7 +5155,7 @@ function classifyEvidenceLead(
     candidate.companyName,
     candidate.website,
     candidate.sourceUrl,
-    candidate.summary,
+    stripSearchContext(candidate.summary ?? ""),
     candidate.country,
     candidate.contacts.map((contact) => contact.value).join(" ")
   ]
@@ -3872,6 +5210,14 @@ function classifyEvidenceLead(
       "policy alert",
       "commission restricts"
     ]);
+  const officialCustomerServicePage =
+    pageType === "official_company_site" &&
+    !isDocument &&
+    !looksLikeArticlePath(path) &&
+    !isProcurement &&
+    !(domain ? isGovernmentInformationDomain(domain) : false) &&
+    (isOfficialMainCustomerPage(candidate, pageType) || looksLikeBuyerSideCompanyPage(candidate)) &&
+    (hasRelevantSearchContext || hasBuyerSideSignal(text));
 
   if (domain && isOperatorVendorRegistrationPage(domain, path, text)) {
     return intelligenceClassification(
@@ -3941,6 +5287,10 @@ function classifyEvidenceLead(
     !usefulDocumentIntelligence &&
     !allowedProcurementDirectory
   ) {
+    return null;
+  }
+
+  if (officialCustomerServicePage && !hardContentNoise) {
     return null;
   }
 
@@ -4084,6 +5434,107 @@ function looksLikeDirectoryEvidence(path: string, text: string) {
   );
 }
 
+function looksLikeThirdPartyDirectoryPage(candidate: NormalizedLeadCandidate) {
+  const domain = candidate.website
+    ? domainFromUrl(candidate.website)
+    : domainFromUrl(candidate.sourceUrl);
+  const path = pathFromUrl(candidate.sourceUrl);
+  const text = candidateSignalText(candidate);
+
+  if (candidate.sourcePageUrl && hasOfficialVerificationEvidence(candidate)) {
+    return false;
+  }
+
+  if (domain && isDirectoryIntelligenceDomain(domain)) {
+    return true;
+  }
+
+  if (domain && isBlockedMarketplaceDomain(domain) && hasDirectoryNoiseSignal(text)) {
+    return true;
+  }
+
+  const directoryPath =
+    /\/(?:directory|directories|listing|listings)(?:[\/.-]|$)/i.test(path) ||
+    /(?:^|\/)directory\.html?$/i.test(path);
+  return directoryPath || hasHardDirectoryNoiseSignal(text);
+}
+
+function looksLikeDirectorySourcePage(candidate: NormalizedLeadCandidate) {
+  if (!candidate.sourcePageUrl) {
+    return false;
+  }
+
+  const sourceDomain = domainFromUrl(candidate.sourcePageUrl);
+  const text = [
+    candidate.sourcePageUrl,
+    candidate.sourcePageTitle,
+    stripSearchContext(candidate.summary ?? "")
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return Boolean(
+    (sourceDomain &&
+      (isDirectoryIntelligenceDomain(sourceDomain) ||
+        isB2bBuyerIntelligenceDomain(sourceDomain) ||
+        isBlockedMarketplaceDomain(sourceDomain))) ||
+      hasDirectoryNoiseSignal(text)
+  );
+}
+
+function looksLikeUnverifiedDirectoryDerivedCandidate(candidate: NormalizedLeadCandidate) {
+  if (!looksLikeDirectorySourcePage(candidate)) {
+    return false;
+  }
+
+  return !hasOfficialVerificationEvidence(candidate);
+}
+
+function hasOfficialVerificationEvidence(candidate: NormalizedLeadCandidate) {
+  if (/^official page text:/im.test(candidate.summary ?? "")) {
+    return true;
+  }
+
+  const websiteDomain = candidate.website ? domainFromUrl(candidate.website) : null;
+  if (!websiteDomain) {
+    return false;
+  }
+
+  return candidate.contacts.some((contact) => {
+    if (contact.type !== "email" && contact.type !== "phone") {
+      return false;
+    }
+    const sourceDomain = domainFromUrl(contact.sourceUrl);
+    return Boolean(sourceDomain && domainMatches(sourceDomain, websiteDomain));
+  });
+}
+
+function extractContactEntryUrlContacts(
+  sourceUrl: string
+): NormalizedLeadCandidate["contacts"] {
+  return looksLikeContactEntryUrl(sourceUrl) && isHttpUrl(sourceUrl)
+    ? [{ type: "form" as const, value: sourceUrl, sourceUrl }]
+    : [];
+}
+
+function isHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function hasDirectoryNoiseSignal(text: string) {
+  return hasAny(text, directoryNoiseTerms);
+}
+
+function hasHardDirectoryNoiseSignal(text: string) {
+  return hasAny(text, hardDirectoryNoiseTerms);
+}
+
 function extractMentionedCompanySignals(text: string) {
   const companies: string[] = [];
   for (const [name, pattern] of extractableCompanySignalPatterns) {
@@ -4108,7 +5559,7 @@ function assessPageQuality(
     candidate.companyName,
     candidate.website,
     candidate.sourceUrl,
-    candidate.summary,
+    stripSearchContext(candidate.summary ?? ""),
     candidate.country,
     candidate.contacts.map((contact) => contact.value).join(" ")
   ]
@@ -4121,9 +5572,7 @@ function assessPageQuality(
   let negativeScore = 0;
   const isDocument = looksLikeDocumentPath(path);
   const hasCompanyOrDirectoryPath = looksLikeCompanyOrDirectoryPath(path);
-  const hasDirectContact = candidate.contacts.some(
-    (contact) => contact.type === "email" || contact.type === "phone"
-  );
+  const hasDirectContact = hasReachableContactSignal(candidate.contacts);
   const hasDirectCompanyEvidence = looksLikeDirectCompanyEvidence(candidate);
   const buyerServicePage = looksLikeBuyerSideCompanyPage(candidate);
 
@@ -4384,7 +5833,12 @@ function looksLikeArticlePath(path: string) {
 
 function looksLikeKnowledgeContentPage(candidate: NormalizedLeadCandidate) {
   const path = pathFromUrl(candidate.sourceUrl);
-  const text = [candidate.companyName, candidate.website, candidate.sourceUrl, candidate.summary]
+  const text = [
+    candidate.companyName,
+    candidate.website,
+    candidate.sourceUrl,
+    stripSearchContext(candidate.summary ?? "")
+  ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -4539,7 +5993,9 @@ function candidateSignalText(candidate: NormalizedLeadCandidate) {
     candidate.companyName,
     candidate.website,
     candidate.sourceUrl,
-    candidate.summary,
+    candidate.sourcePageUrl,
+    candidate.sourcePageTitle,
+    stripSearchContext(candidate.summary ?? ""),
     candidate.country,
     candidate.inferredCountry,
     candidate.queryCountry,
@@ -4564,8 +6020,13 @@ function contactCompletenessScore(contacts: NormalizedLeadCandidate["contacts"])
   let score = 0;
   if (types.has("email")) score += 10;
   if (types.has("phone")) score += 5;
+  if (types.has("form")) score += 6;
   if (types.has("social")) score += 3;
   return Math.min(score, 15);
+}
+
+function hasReachableContactSignal(contacts: NormalizedLeadCandidate["contacts"]) {
+  return contacts.some((contact) => ["email", "phone", "form", "social"].includes(contact.type));
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -4674,6 +6135,22 @@ const specificTelecomProductTerms = [
   "gnodeb"
 ];
 
+const genericProductKeywordTerms = new Set([
+  "equipment",
+  "product",
+  "products",
+  "component",
+  "components",
+  "solution",
+  "solutions",
+  "system",
+  "systems",
+  "service",
+  "services",
+  "spare parts",
+  "parts"
+]);
+
 const buyerRoleTerms = [
   "internet service provider",
   "broadband provider",
@@ -4725,6 +6202,9 @@ const buyerRoleTerms = [
   "reseller",
   "importer",
   "system integrator",
+  "systems integrator",
+  "master systems integrator",
+  "master turnkey systems integrator",
   "telecom system integrator",
   "wireless system integrator",
   "das integrator",
@@ -4791,6 +6271,10 @@ const buyerUseCaseTerms = [
   "rectifier replacement",
   "mobile network operator",
   "telecom operator",
+  "telecom service provider",
+  "telecom service providers",
+  "telecommunication service provider",
+  "telecommunication service providers",
   "network operator",
   "isp network operations",
   "wisp",
@@ -4856,6 +6340,13 @@ const infrastructureCustomerTerms = [
   "telecom contractor",
   "wireless contractor",
   "system integrator",
+  "systems integrator",
+  "master systems integrator",
+  "master turnkey systems integrator",
+  "telecom service provider",
+  "telecom service providers",
+  "telecommunication service provider",
+  "telecommunication service providers",
   "turnkey design",
   "turnkey design/build",
   "design/build",
@@ -4870,7 +6361,9 @@ const infrastructureCustomerTerms = [
   "managed private 5g",
   "5g as a service",
   "mission-critical communications",
-  "critical communications"
+  "critical communications",
+  "ict project",
+  "ict projects"
 ];
 
 const genericBuyerIntentTerms = [
@@ -4912,6 +6405,7 @@ const genericServiceBuyerGateTerms = [
   "service provider",
   "network services",
   "system integrator",
+  "systems integrator",
   "field service",
   "field services",
   "managed services",
@@ -5009,6 +6503,21 @@ const storefrontSellerTerms = [
   "e-commerce"
 ];
 
+const downstreamChannelBuyerTerms = [
+  "distributor",
+  "authorized distributor",
+  "official distributor",
+  "dealer",
+  "reseller",
+  "importer",
+  "stockist",
+  "wholesaler",
+  "wholesale supplier",
+  "trading company",
+  "equipment trading",
+  "solution provider"
+];
+
 const genericItServiceTerms = [
   "it infrastructure",
   "it solutions",
@@ -5035,7 +6544,66 @@ const consumerElectronicsTerms = [
   "repair parts",
   "lcd screen",
   "consumer electronics",
-  "retail electronics"
+  "retail electronics",
+  "mobile phone retail"
+];
+
+const telecomOffTargetProductTerms = [
+  "air curtain",
+  "air curtains",
+  "air conditioner",
+  "air conditioning",
+  "compressor",
+  "hvac",
+  "auto spare parts",
+  "automotive spare parts",
+  "car spare parts",
+  "genuine auto",
+  "aftermarket auto",
+  "fmcg",
+  "fast-moving consumer goods",
+  "food distributor",
+  "horeca",
+  "consumer goods",
+  "retail businesses",
+  "medical equipment",
+  "surgical solutions",
+  "clinical diagnostics",
+  "hospital information system",
+  "hikvision",
+  "video surveillance",
+  "security camera",
+  "security cameras",
+  "cctv",
+  "access control",
+  "force testing",
+  "testing software",
+  "test instruments",
+  "materials testing",
+  "measurement instruments",
+  "bearing",
+  "bearings",
+  "koyo",
+  "jtekt",
+  "cranes",
+  "riggers",
+  "heavy equipment",
+  "exhibition",
+  "exhibitor",
+  "expo",
+  "trade show",
+  "spielwarenmesse",
+  "household expo",
+  "prod expo",
+  "baby products",
+  "toys",
+  "household goods",
+  "business setup",
+  "company formation",
+  "pro services",
+  "document clearing",
+  "certificate attestation",
+  "visa services"
 ];
 
 const chinaSupplierDomains = [
@@ -5378,6 +6946,19 @@ function detectOffIndustryBucket(
   return null;
 }
 
+function detectTelecomOffTargetProductConflict(text: string, criteria: IcpScoringCriteria) {
+  if (!criteriaIndicatesTelecom(criteria)) {
+    return [];
+  }
+
+  const lowerText = text.toLowerCase();
+  if (hasTelecomContext(lowerText) || hasAny(lowerText, specificTelecomProductTerms)) {
+    return [];
+  }
+
+  return telecomOffTargetProductTerms.filter((term) => lowerText.includes(term));
+}
+
 const strongProcurementIntentTerms = [
   "tender",
   "rfq",
@@ -5419,6 +7000,13 @@ const thirdPartyProfileDomains = [
   "zoominfo.com",
   "rocketreach.co",
   "apollo.io",
+  "protenders.com",
+  "techbehemoths.com",
+  "themanifest.com",
+  "clutch.co",
+  "goodfirms.co",
+  "sortlist.com",
+  "designrush.com",
   "dnb.com",
   "dnb.co.uk",
   "dunandbradstreet.com",
@@ -5452,10 +7040,35 @@ const knownBrandOemDomains = [
   "celona.io",
   "wispzone.com",
   "ispshop.com.br",
+  "3m.com",
+  "3mae.ae",
+  "broadcom.com",
+  "se.com",
+  "schneider-electric.com",
+  "hager.com",
+  "ubnt.com",
+  "ui.com",
   "cogentdistribution.com",
   "lightyear.ai",
   "l-p.com",
   "yxfiber-sfp.com",
+  // Solar / ESS OEMs and global brand sites. For export buyer
+  // prospecting these are sellers or competitors, not channel/project
+  // customers in the target market.
+  "goodwe.com",
+  "sungrowpower.com",
+  "en.sungrowpower.com",
+  "growatt.com",
+  "igrowattinverter.com",
+  "solaxpower.com",
+  "sma.de",
+  "sma-solar.com",
+  "jasolar.com",
+  "hithium.com",
+  "sunwaypv.com",
+  "mustpower.com",
+  "tanfon.com",
+  "tanfonsolar.com",
   // 2026-05: pure telecom-software / BSS/OSS vendors. They sell
   // software to operators, not hardware. They are never buyers of
   // RRU/BBU/OLT/rectifier equipment.
@@ -5499,6 +7112,8 @@ const blockedContentDomains = [
   "nairaland.com",
   "wikipedia.org",
   "wikidata.org",
+  "encyclopedia.pub",
+  "mdpi.com",
   "medium.com",
   "researchgate.net",
   "slideshare.net",
@@ -5544,7 +7159,9 @@ const blockedContentDomains = [
   "aliexpress.com",
   "yellowpages.com",
   "yellowpages.ae",
+  "yellowpages.asia",
   "yello.ae",
+  "machinetools.com",
   // 2026-05 additions: trade media + research firms reliably flagged
   // as noise in the Brave result set; these are evidence pages, not
   // buyer companies, and never produce a real outreach contact.
@@ -5589,6 +7206,7 @@ const blockedContentDomains = [
   "complaintsboard.com",
   "consumeraffairs.com",
   "trustpilot.com",
+  "nperf.com",
   // Free-host / template-site platforms. Real B2B companies do not
   // build their public site on these; nearly every result is either
   // an SEO content page, a course landing page, or a pseudo-company.
@@ -5613,6 +7231,8 @@ const alwaysHardRejectedContentDomains = [
   "reddit.com",
   "wikipedia.org",
   "wikidata.org",
+  "encyclopedia.pub",
+  "mdpi.com",
   "slideshare.net",
   "scribd.com",
   "pdfcoffee.com"
@@ -5638,7 +7258,8 @@ const discardedEmailDomains = [
   "test.com",
   "mywebsite.com",
   "site.com",
-  "tecnologia.com"
+  "tecnologia.com",
+  "latofonts.com"
 ];
 
 const discardedEmailLocalParts = new Set([
@@ -5669,9 +7290,21 @@ const procurementIntelligenceDomains = [
 const directoryIntelligenceDomains = [
   "yellowpages.com",
   "yellowpages.ae",
+  "yellowpages.asia",
+  "yellowpages-uae.com",
   "yellowpages.co.za",
   "yellowpages.com.ng",
   "dubaiyellowpages.com",
+  "reachuae.com",
+  "atninfo.com",
+  "uaecontact.com",
+  "uaedirectory.com",
+  "saudiyp.com",
+  "saudidir.com",
+  "qatardirectory.com",
+  "qataryp.com",
+  "omanyp.com",
+  "kuwaityp.com",
   "saudidirectory.com",
   "yello.ae",
   "yellosa.co.za",
@@ -5680,7 +7313,38 @@ const directoryIntelligenceDomains = [
   "kompass.com",
   "europages.com",
   "europages.co.uk",
-  "telecom.directory"
+  "enfsolar.com",
+  "telecom.directory",
+  "protenders.com",
+  "techbehemoths.com",
+  "themanifest.com",
+  "clutch.co",
+  "goodfirms.co",
+  "sortlist.com",
+  "designrush.com",
+  "exporteers.com",
+  "marketscreener.com",
+  "machinetools.com"
+];
+
+const directoryMiningUtilityDomains = [
+  "google.com",
+  "google.ae",
+  "googleapis.com",
+  "gstatic.com",
+  "googleusercontent.com",
+  "bing.com",
+  "yahoo.com",
+  "duckduckgo.com",
+  "apple.com",
+  "apps.apple.com",
+  "play.google.com",
+  "goo.gl",
+  "bit.ly",
+  "tinyurl.com",
+  "wa.me",
+  "whatsapp.com",
+  "maps.google.com"
 ];
 
 const b2bBuyerIntelligenceDomains = [
@@ -5898,6 +7562,39 @@ const directoryDocumentTerms = [
   "catalog"
 ];
 
+const directoryNoiseTerms = [
+  "yellow pages",
+  "company directory",
+  "member directory",
+  "members directory",
+  "supplier directory",
+  "vendor directory",
+  "trade directory",
+  "business directory",
+  "b2b marketplace",
+  "directory listing",
+  "list of companies",
+  "list of suppliers",
+  "extractable companies",
+  "derived from directory/intelligence page",
+  "buyer platform",
+  "buyers and sellers are directly connected"
+];
+
+const hardDirectoryNoiseTerms = [
+  "yellow pages",
+  "company directory",
+  "supplier directory",
+  "vendor directory",
+  "trade directory",
+  "business directory",
+  "b2b marketplace",
+  "directory listing",
+  "list of companies",
+  "list of suppliers",
+  "buyers and sellers are directly connected"
+];
+
 const officialCustomerPagePathTerms = [
   "/about",
   "/contact",
@@ -5962,6 +7659,7 @@ const blockedMarketplaceDomains = [
   "europages.com",
   "yellowpages.ae",
   "yellowpages.com",
+  "yellowpages.asia",
   "yellowpages.co.za",
   "yellowpages.com.ng",
   "yello.ae",
@@ -6102,6 +7800,14 @@ const contactLinkPathTerms = [
   "get-in-touch",
   "quote",
   "request",
+  "rfq",
+  "vendor",
+  "supplier",
+  "procurement",
+  "tender",
+  "partner",
+  "dealer",
+  "distributor",
   "sales",
   "support",
   "office",
@@ -6560,6 +8266,12 @@ const forbiddenCompanyNameTerms = new Set([
   "sign in",
   "sign up",
   "register",
+  "vendor registration",
+  "supplier registration",
+  "vendor portal",
+  "supplier portal",
+  "procurement portal",
+  "tenders and procurement",
   "home",
   "homepage",
   "pdf",

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Bell,
   Building2,
   CheckCircle2,
@@ -66,6 +67,7 @@ const crmPageSize = 5;
 // and broke on ultrawide / HiDPI / window-drag. Reverted to a fixed 30
 // per page so users see the same data set across devices.
 const workbenchPoolPageSize = 30;
+const plannedBatchQueryCount = 30;
 const taskPollIntervalMs = 2500;
 const maxTaskPollAttempts = 720;
 
@@ -97,6 +99,26 @@ type ProfileSignals = {
     profileMarkets?: string[];
     marketSource?: "prompt" | "profile" | "merged" | "none" | string;
   };
+  profileIndustryAlignment?: {
+    productProfileConflicts?: boolean;
+    customerProfileConflicts?: boolean;
+    action?: string;
+    message?: string | null;
+  };
+  continuationOptimization?: {
+    action?: "keep_current_markets" | "focus_high_yield_markets" | string;
+    reason?: "normal_continuation" | "recent_batch_low_yield" | string;
+    recentBatchQueryCount?: number;
+    recentBatchMainCustomerCount?: number;
+    selectedMarkets?: string[];
+    avoidedMarkets?: string[];
+    highYieldMarkets?: string[];
+    lowYieldMarkets?: string[];
+  };
+  queryLearning?: {
+    targetAssessment?: QueryLearningTargetAssessment;
+    batchMetrics?: Record<string, number>;
+  };
   aiPlanning?: {
     rejectedQueryCount?: number;
     rejectedQueries?: Array<{ query?: string; country?: string; reason?: string }>;
@@ -120,6 +142,53 @@ type ProfileSignals = {
     queryCount?: number;
     sampleQueries?: Array<{ query?: string; country?: string | null; batchType?: string }>;
   };
+};
+
+type QueryLearningTargetAssessment = {
+  status?: "pass" | "near" | "fail" | "collecting" | string;
+  readinessScore?: number;
+  queryBasis?: number;
+  normalizedMetrics?: {
+    queryBatchSize?: number;
+    mainCustomersPer30?: number;
+    highMatchCustomersPer30?: number;
+    contactCoverage?: number;
+    wrongCountryRatio?: number;
+    rejectedRatio?: number;
+    laneCoverageScore?: number;
+    coveredLaneCount?: number;
+    queryQualityCoverage?: number;
+    customerTrustCoverage?: number;
+  };
+  laneCoverage?: {
+    coveredCount?: number;
+    requiredLaneCount?: number;
+    totalTrackedLanes?: number;
+    coverageScore?: number;
+    coveredLanes?: Array<{ key?: string; label?: string; count?: number }>;
+    missingLanes?: Array<{ key?: string; label?: string }>;
+  };
+  queryQualityCoverage?: {
+    completeCount?: number;
+    total?: number;
+    coverage?: number;
+    missingCounts?: Record<string, number>;
+  };
+  customerTrustCoverage?: {
+    completeCount?: number;
+    total?: number;
+    coverage?: number;
+    missingCounts?: Record<string, number>;
+  };
+  checks?: Array<{
+    key?: string;
+    label?: string;
+    value?: number;
+    target?: string;
+    status?: "pass" | "near" | "fail" | string;
+    action?: string;
+  }>;
+  improvementActions?: string[];
 };
 
 type SiteEvidenceRow = {
@@ -316,6 +385,12 @@ type ApprovalResult = {
   draftCount: number;
 };
 
+type RejectionResult = {
+  ok: boolean;
+  rejectedLeadIds: string[];
+  rejectedCount: number;
+};
+
 type ActivityLog = {
   title: string;
   detail: string;
@@ -362,8 +437,15 @@ type CrmSyncDialogState = {
   title: string;
 };
 
+type CurrentUser = {
+  id?: string;
+  email: string;
+  name?: string | null;
+};
+
 export function AiWorkerClient() {
   const appMessage = useAppMessage();
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [mailOpen, setMailOpen] = useState(false);
   const [crmOpen, setCrmOpen] = useState(false);
   const [crmSyncTargetIds, setCrmSyncTargetIds] = useState<string[] | null>(null);
@@ -405,8 +487,10 @@ export function AiWorkerClient() {
   const [searching, setSearching] = useState(false);
   const searchTriggerInFlightRef = useRef(false);
   const [approving, setApproving] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
   const [mailLead, setMailLead] = useState<MailConfirmationLead | null>(null);
+  const accountName = currentUser ? displayAiWorkerAccountName(currentUser) : "你";
 
   const displayLeads = useMemo(() => buildDisplayLeads(currentTask), [currentTask]);
   const actionableDisplayLeads = useMemo(
@@ -432,7 +516,10 @@ export function AiWorkerClient() {
   // rule stays happy.
   void sentCount;
   void summarizeLeadQualityCounts;
-  const crmRows = useMemo(() => buildCrmRows(actionableDisplayLeads), [actionableDisplayLeads]);
+  const crmRows = useMemo(
+    () => buildCrmRows(actionableDisplayLeads, accountName),
+    [actionableDisplayLeads, accountName]
+  );
   const crmModalRows = useMemo(() => {
     const baseRows = crmSyncTargetIds
       ? crmRows.filter((row) => crmSyncTargetIds.includes(row.id))
@@ -469,6 +556,27 @@ export function AiWorkerClient() {
       })
       .filter((item) => item.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item.email));
   }, [actionableDisplayLeads]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadCurrentUser() {
+      try {
+        const payload = await apiRequest<{ user?: CurrentUser }>("/api/auth/me");
+        if (!cancelled && payload.user) {
+          setCurrentUser(payload.user);
+        }
+      } catch {
+        // Keep the workbench usable if the account request is temporarily unavailable.
+      }
+    }
+
+    void loadCurrentUser();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     // 2026-05 LeadHunt 2.0: poll while the task is active OR while we
@@ -936,8 +1044,51 @@ export function AiWorkerClient() {
     }
   }
 
-  function submitLanding() {
-    void startLeadTask(landingPrompt);
+  async function rejectSelectedLeads(
+    taskId: string,
+    leadIds: string[]
+  ): Promise<RejectionResult | null> {
+    if (!leadIds.length) return null;
+    setRejecting(true);
+    setError("");
+    setStatus(`正在标记无效：已选择 ${leadIds.length} 家客户...`);
+
+    try {
+      const result = await apiRequest<RejectionResult>(`/api/lead-tasks/${taskId}/reject`, {
+        method: "POST",
+        body: JSON.stringify({
+          leadIds,
+          reason: "Marked invalid from customer pool review"
+        })
+      });
+      await refreshTask(taskId).catch(() => undefined);
+      void loadTaskHistory(taskSearch);
+      setLeadDetail((current) =>
+        current && leadIds.includes(current.id) ? null : current
+      );
+      setSelectedLeadId((current) => (current && leadIds.includes(current) ? null : current));
+      setStatus(`已标记无效 ${result.rejectedCount} 家客户；系统会把来源 query 作为低产信号学习。`);
+      appMessage.success("已标记无效", {
+        description: "这些客户已从主客户池移除，并进入 query 效果学习。",
+        duration: 3500
+      });
+      return result;
+    } catch (requestError) {
+      const message = errorMessage(requestError);
+      setError(message);
+      setStatus("标记无效失败；可刷新客户池后重试。");
+      appMessage.error("标记无效失败", {
+        description: "请确认这些客户尚未加入 CRM，或稍后重试。",
+        duration: 4000
+      });
+      return null;
+    } finally {
+      setRejecting(false);
+    }
+  }
+
+  function submitLanding(promptOverride?: string) {
+    void startLeadTask(promptOverride ?? landingPrompt);
   }
 
   function backToLanding() {
@@ -1035,6 +1186,7 @@ export function AiWorkerClient() {
               onHistoryPageChange={(page) => void loadTaskHistory({ page })}
               onDeleteTask={(taskId) => void deleteLeadTask(taskId)}
               deletingTaskId={deletingTaskId}
+              accountName={accountName}
               onContinueSearch={(taskId) => {
                 // Finished pool card "继续搜索 30 条" — load the task's
                 // full state (prompt, market terms, prior queries) into
@@ -1072,6 +1224,7 @@ export function AiWorkerClient() {
               leads={displayLeads}
               loading={poolLoading}
               approving={approving}
+              rejecting={rejecting}
               onBack={() => setView("workbench")}
               onOpenSearchRun={() => {
                 if (currentTask?.id) {
@@ -1089,6 +1242,11 @@ export function AiWorkerClient() {
                   void approveSelectedLeads(currentTask.id, leadIds);
                 }
               }}
+              onBulkReject={(leadIds) => {
+                if (currentTask?.id && leadIds.length > 0) {
+                  void rejectSelectedLeads(currentTask.id, leadIds);
+                }
+              }}
               onOpenLeadDetail={(lead) => {
                 setSelectedLeadId(lead.id);
                 setLeadDetail(lead);
@@ -1096,6 +1254,11 @@ export function AiWorkerClient() {
               onApproveLead={(leadId) => {
                 if (currentTask?.id) {
                   void approveSelectedLeads(currentTask.id, [leadId]);
+                }
+              }}
+              onRejectLead={(leadId) => {
+                if (currentTask?.id) {
+                  void rejectSelectedLeads(currentTask.id, [leadId]);
                 }
               }}
             />
@@ -1368,7 +1531,6 @@ export function AiWorkerClient() {
         {leadDetail ? (
           <LeadDetailModal
             lead={leadDetail}
-            task={currentTask}
             onClose={() => setLeadDetail(null)}
           />
         ) : null}
@@ -1387,16 +1549,15 @@ export function AiWorkerClient() {
 
 function LeadDetailModal({
   lead,
-  task,
   onClose
 }: {
   lead: DisplayLead;
-  task: LeadTask | null;
   onClose: () => void;
 }) {
   const emails = pickFirstContactValue(lead.raw.contacts, "email").all;
   const phones = pickFirstContactValue(lead.raw.contacts, "phone").all;
-  const sourceQueries = leadDetailSourceQueries(lead, task);
+  const socials = pickFirstContactValue(lead.raw.contacts, "social").all;
+  const contactSources = leadDetailContactSources(lead);
   const website = lead.website && lead.website !== "-" ? lead.website : "";
   const sourceUrl =
     lead.sourceUrl && lead.sourceUrl !== "-" ? lead.sourceUrl : lead.raw.sourceUrl || "";
@@ -1458,8 +1619,12 @@ function LeadDetailModal({
               <Mail size={16} aria-hidden="true" />
               <h3>联系方式</h3>
             </div>
-            <DetailList label="邮箱" values={emails} empty="暂无邮箱" />
-            <DetailList label="电话" values={phones} empty="暂无电话" />
+            <div className="leadDetailPanelContent">
+              <DetailList label="邮箱" values={emails} empty="暂无邮箱" />
+              <DetailList label="电话" values={phones} empty="暂无电话" />
+              <DetailList label="社媒入口" values={socials} empty="暂无社媒入口" />
+              <DetailList label="联系方式来源" values={contactSources} empty="暂无联系方式来源" />
+            </div>
           </section>
 
           <section className="leadDetailPanel">
@@ -1467,42 +1632,27 @@ function LeadDetailModal({
               <Globe2 size={16} aria-hidden="true" />
               <h3>官网与来源</h3>
             </div>
-            <div className="leadDetailField">
-              <span>官网</span>
-              {website ? (
-                <a href={websiteHref(website)} target="_blank" rel="noreferrer noopener">
-                  {formatWebsiteShort(website)}
-                </a>
-              ) : (
-                <em>暂无官网</em>
-              )}
-            </div>
-            <div className="leadDetailField">
-              <span>来源页面</span>
-              {sourceUrl ? (
-                <a href={websiteHref(sourceUrl)} target="_blank" rel="noreferrer noopener">
-                  {lead.sourceLabel || formatSourceLinkLabel(sourceUrl)}
-                </a>
-              ) : (
-                <em>暂无来源页面</em>
-              )}
-            </div>
-            <div className="leadDetailField leadDetailQueryField">
-              <span>匹配搜索词</span>
-              {sourceQueries.length ? (
-                <ul className="leadDetailQueryList">
-                  {sourceQueries.map((query) => (
-                    <li key={`${query.query}-${query.country ?? ""}`}>
-                      <strong>
-                        {query.country || lead.raw.queryCountry || lead.country || "全市场"}
-                      </strong>
-                      <span>{query.query}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <em>暂无关联 query</em>
-              )}
+            <div className="leadDetailPanelContent">
+              <div className="leadDetailField">
+                <span>官网</span>
+                {website ? (
+                  <a href={websiteHref(website)} target="_blank" rel="noreferrer noopener">
+                    {formatWebsiteShort(website)}
+                  </a>
+                ) : (
+                  <em>暂无官网</em>
+                )}
+              </div>
+              <div className="leadDetailField">
+                <span>来源页面</span>
+                {sourceUrl ? (
+                  <a href={websiteHref(sourceUrl)} target="_blank" rel="noreferrer noopener">
+                    {lead.sourceLabel || formatSourceLinkLabel(sourceUrl)}
+                  </a>
+                ) : (
+                  <em>暂无来源页面</em>
+                )}
+              </div>
             </div>
           </section>
         </div>
@@ -1546,6 +1696,66 @@ function DetailList({ label, values, empty }: { label: string; values: string[];
       )}
     </div>
   );
+}
+
+function leadDetailContactSources(lead: DisplayLead) {
+  return unique(
+    (lead.raw.contacts ?? [])
+      .map((contact) => {
+        if (!contact.sourceUrl || contact.sourceUrl === "-") return "";
+        return `${contactTypeLabel(contact.type)} · ${formatSourceLinkLabel(contact.sourceUrl)}`;
+      })
+      .filter(Boolean)
+  ).slice(0, 6);
+}
+
+function contactTypeLabel(type?: string | null) {
+  if (type === "email") return "邮箱来源";
+  if (type === "phone") return "电话来源";
+  if (type === "form") return "表单/采购入口来源";
+  if (type === "social") return "社媒入口来源";
+  return "联系方式来源";
+}
+
+function leadDetailMatchReasons(lead: DisplayLead) {
+  const payload = icpReasonPayload(lead.raw.icpScore?.reasons);
+  const reasons = Array.isArray(payload?.reasons)
+    ? payload.reasons.filter((value): value is string => typeof value === "string")
+    : [];
+  const matchedSignals = Array.isArray(payload?.aiEvaluation?.matchedSignals)
+    ? payload.aiEvaluation.matchedSignals.filter(
+        (value): value is string => typeof value === "string"
+      )
+    : [];
+  const buyerType =
+    typeof payload?.aiEvaluation?.buyerType === "string" ? payload.aiEvaluation.buyerType : "";
+
+  return unique([
+    ...matchedSignals.map((signal) => `命中信号：${signal}`),
+    ...(buyerType ? [`客户类型判断：${buyerType}`] : []),
+    ...reasons
+  ]).slice(0, 6);
+}
+
+function leadDetailRiskLabels(lead: DisplayLead) {
+  const payload = icpReasonPayload(lead.raw.icpScore?.reasons);
+  const risks = Array.isArray(payload?.risks)
+    ? payload.risks.filter((value): value is string => typeof value === "string")
+    : [];
+  const reviewLabels = Array.isArray(payload?.reviewLabels)
+    ? payload.reviewLabels.filter((value): value is string => typeof value === "string")
+    : [];
+  const contactCount = lead.raw.contacts?.length ?? 0;
+
+  return unique([
+    ...risks,
+    ...reviewLabels,
+    ...(lead.raw.countryConflict ? ["国家证据冲突"] : []),
+    ...(lead.raw.countryConfidence === "low" || lead.raw.countryConfidence === "unknown"
+      ? ["国家证据弱，需复核"]
+      : []),
+    ...(contactCount === 0 ? ["缺少可触达入口"] : [])
+  ]).slice(0, 8);
 }
 
 function leadDetailCountry(lead: DisplayLead) {
@@ -1598,6 +1808,11 @@ function isLikelyLeadAddress(value: string) {
 }
 
 function leadDetailSourceQueries(lead: DisplayLead, task: LeadTask | null) {
+  const storedSourceQuery = storedLeadSourceQuery(lead);
+  if (storedSourceQuery) {
+    return [storedSourceQuery];
+  }
+
   const queries = task?.searchQueries ?? [];
   if (!queries.length) return [];
 
@@ -1642,6 +1857,22 @@ function leadDetailSourceQueries(lead: DisplayLead, task: LeadTask | null) {
   return selected.slice(0, 3);
 }
 
+function storedLeadSourceQuery(lead: DisplayLead): SearchQuery | null {
+  const payload = icpReasonPayload(lead.raw.icpScore?.reasons);
+  const sourceQuery =
+    payload?.sourceQuery && typeof payload.sourceQuery === "object"
+      ? (payload.sourceQuery as Record<string, unknown>)
+      : null;
+  const query = typeof sourceQuery?.query === "string" ? sourceQuery.query : "";
+  if (!query) return null;
+
+  return {
+    id: typeof sourceQuery?.id === "string" ? sourceQuery.id : undefined,
+    query,
+    country: typeof sourceQuery?.country === "string" ? sourceQuery.country : null
+  };
+}
+
 function hostnameForMatch(value: string | null | undefined) {
   if (!value || value === "-") return "";
   try {
@@ -1678,7 +1909,7 @@ function hostnameForMatch(value: string | null | undefined) {
 type WorkbenchProps = {
   prompt: string;
   onPromptChange: (value: string) => void;
-  onSubmit: () => void;
+  onSubmit: (prompt: string) => void;
   submitting: boolean;
   taskHistory: LeadTaskListItem[];
   taskSummary: LeadTaskSummary | null;
@@ -1696,6 +1927,7 @@ type WorkbenchProps = {
   onHistoryPageChange: (page: number) => void;
   onDeleteTask: (taskId: string) => void;
   deletingTaskId: string | null;
+  accountName: string;
   onContinueSearch?: (taskId: string) => void;
 };
 
@@ -1739,6 +1971,7 @@ function AiWorkerWorkbench({
   onHistoryPageChange,
   onDeleteTask,
   deletingTaskId,
+  accountName,
   onContinueSearch
 }: WorkbenchProps) {
   const greeting = useMemo(() => buildGreeting(), []);
@@ -1900,8 +2133,11 @@ function AiWorkerWorkbench({
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!prompt.trim() || submitting) return;
-    onSubmit();
+    const textarea = event.currentTarget.elements.namedItem("lead-search-prompt");
+    const submittedPrompt = textarea instanceof HTMLTextAreaElement ? textarea.value : prompt;
+    if (!submittedPrompt.trim() || submitting) return;
+    onPromptChange(submittedPrompt);
+    onSubmit(submittedPrompt);
   }
 
   function applyQuickAction(action: WorkbenchQuickAction) {
@@ -1914,7 +2150,7 @@ function AiWorkerWorkbench({
       <header className="aiWorkbenchHead">
         <div className="aiWorkbenchGreeting">
           <h1>
-            {greeting.title}，王亚伟 <span aria-hidden="true">{greeting.emoji}</span>
+            {greeting.title}，{accountName} <span aria-hidden="true">{greeting.emoji}</span>
           </h1>
           <p>{greeting.subtitle}</p>
           <p className="aiWorkbenchTracker">
@@ -1929,6 +2165,7 @@ function AiWorkerWorkbench({
         <h2 className="aiWorkbenchSectionTitle">你想继续找哪类客户？</h2>
         <form className="aiWorkbenchSearchForm" onSubmit={handleSubmit}>
           <textarea
+            name="lead-search-prompt"
             value={prompt}
             onChange={(event) => onPromptChange(event.target.value)}
             placeholder="例如：继续找中东 5G 基站维护客户，优先有邮箱和官网的系统集成商"
@@ -1951,6 +2188,11 @@ function AiWorkerWorkbench({
             </button>
           </div>
         </form>
+
+        <p className="aiWorkbenchProfileHint">
+          <Sparkles size={14} aria-hidden="true" />
+          建议先完善产品画像和客户画像，让 AI 更准确理解产品卖点、目标客户和重点市场
+        </p>
 
         <div className="aiWorkbenchQuickRow" role="group" aria-label="快捷指令">
           {quickActions.map((action) => (
@@ -2306,12 +2548,15 @@ type PoolProps = {
   leads: DisplayLead[];
   loading: boolean;
   approving: boolean;
+  rejecting: boolean;
   onBack: () => void;
   onOpenSearchRun: () => void;
   onContinueSearch: () => void;
   onBulkApprove: (leadIds: string[]) => void;
+  onBulkReject: (leadIds: string[]) => void;
   onOpenLeadDetail: (lead: DisplayLead) => void;
   onApproveLead: (leadId: string) => void;
+  onRejectLead: (leadId: string) => void;
 };
 
 type PoolKpi = {
@@ -2357,6 +2602,7 @@ type PoolTableRow = {
   phoneCount: number;
   phoneFirst: string;
   phoneAll: string[];
+  hasReachableContact: boolean;
   website: string;
   websiteShort: string;
   sourceBatch: string;
@@ -2387,6 +2633,7 @@ const poolContactFilterOptions: PoolFilterOption[] = [
   { value: "", label: "全部" },
   { value: "email", label: "有邮箱" },
   { value: "phone", label: "有电话" },
+  { value: "reachable", label: "有可触达入口" },
   { value: "emailOrPhone", label: "有邮箱或电话" },
   { value: "emailAndPhone", label: "邮箱+电话" },
   { value: "none", label: "无联系方式" }
@@ -2410,12 +2657,15 @@ function AiWorkerPool({
   leads,
   loading,
   approving,
+  rejecting,
   onBack,
   onOpenSearchRun,
   onContinueSearch,
   onBulkApprove,
+  onBulkReject,
   onOpenLeadDetail,
-  onApproveLead
+  onApproveLead,
+  onRejectLead
 }: PoolProps) {
   const poolTitle = useMemo(() => {
     if (taskHistoryItem?.title) {
@@ -2433,6 +2683,13 @@ function AiWorkerPool({
     return mapTaskStatusToPool(taskHistoryItem?.status ?? task?.status ?? "");
   }, [task, taskHistoryItem]);
   const isPoolActive = poolStatus.kind === "active";
+  const targetAssessment = useMemo(
+    () =>
+      task?.inputPayload?.profileSignals?.queryLearning?.targetAssessment ??
+      buildClientTargetAssessment(task, leads),
+    [task, leads]
+  );
+  const assessmentChecks = targetAssessment?.checks ?? [];
 
   // 2026-05 Stage 2: KPIs and the candidate table read ONLY from
   // currentTask.leadCandidates (via the displayLeads prop). When the
@@ -2449,7 +2706,7 @@ function AiWorkerPool({
   // the pool actually contained reachable buyers.
   const highMatch = useMemo(() => leads.filter((lead) => lead.score >= 75).length, [leads]);
   const withContact = useMemo(
-    () => leads.filter((lead) => lead.email !== "—" || lead.phone !== "—").length,
+    () => leads.filter((lead) => hasReachableLeadContact(lead.raw.contacts)).length,
     [leads]
   );
   const pendingCrm = useMemo(
@@ -2825,6 +3082,34 @@ function AiWorkerPool({
         ))}
       </section>
 
+      {targetAssessment ? (
+        <section
+          className={`aiPoolMaturity tone-${maturityAssessmentTone(targetAssessment.status)}`}
+          aria-label="成熟目标验收"
+        >
+          <div className="aiPoolMaturitySummary">
+            <span className="aiPoolMaturityEyebrow">30 query 验收目标</span>
+            <strong>{maturityAssessmentTitle(targetAssessment.status)}</strong>
+            <span>
+              成熟度 {Math.round(targetAssessment.readinessScore ?? 0)} · 基于{" "}
+              {targetAssessment.queryBasis ?? 0} 条已执行 query
+            </span>
+          </div>
+          <div className="aiPoolMaturityChecks">
+            {assessmentChecks.map((check) => (
+              <span
+                key={check.key ?? check.label}
+                className={`aiPoolMaturityCheck state-${maturityAssessmentTone(check.status)}`}
+                title={`目标 ${check.target ?? "-"}`}
+              >
+                {maturityCheckLabel(check.key, check.label)}
+                <strong>{formatMaturityCheckValue(check.key, check.value)}</strong>
+              </span>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       {/* Filter bar */}
       <section className="aiPoolFilters" aria-label="筛选条件" ref={poolFiltersRef}>
         <label className="aiPoolSearchInput">
@@ -3022,7 +3307,21 @@ function AiWorkerPool({
               <Mail size={13} aria-hidden="true" />
               生成邮件
             </button>
-            <button type="button" className="aiPoolBulkAction" disabled title="标记无效功能开发中">
+            <button
+              type="button"
+              className="aiPoolBulkAction danger"
+              disabled={rejecting || selectedPendingCount === 0}
+              title={selectedPendingCount === 0 ? "已加入 CRM 的客户不会在这里标记无效" : undefined}
+              onClick={() => {
+                const pendingIds = new Set(
+                  leads.filter(isPendingCrmCandidate).map((lead) => lead.id)
+                );
+                const targetIds = Array.from(selectedIds).filter((id) => pendingIds.has(id));
+                if (targetIds.length === 0) return;
+                onBulkReject(targetIds);
+                setSelectedIds(new Set());
+              }}
+            >
               <X size={13} aria-hidden="true" />
               标记无效
             </button>
@@ -3269,13 +3568,19 @@ function renderStars(filled: number): string {
 
 function pickFirstContactValue(
   contacts: LeadContact[] | undefined,
-  type: "email" | "phone"
+  type: "email" | "phone" | "social" | "form"
 ): { first: string; all: string[]; count: number } {
   const all = (contacts ?? [])
     .filter((c) => c.type === type)
     .map((c) => c.value)
     .filter((v) => typeof v === "string" && v.length > 0);
   return { first: all[0] ?? "", all, count: all.length };
+}
+
+function hasReachableLeadContact(contacts: LeadContact[] | undefined): boolean {
+  return (contacts ?? []).some((contact) =>
+    ["email", "phone", "social", "form"].includes(String(contact.type ?? "").toLowerCase())
+  );
 }
 
 // Trim a website URL down to a short, readable form: drop the
@@ -3310,6 +3615,439 @@ function percent(part: number, total: number): string {
   return `${((part / total) * 100).toFixed(1)}%`;
 }
 
+function maturityAssessmentTone(status: string | undefined) {
+  if (status === "pass") return "pass";
+  if (status === "near") return "near";
+  if (status === "collecting") return "collecting";
+  return "fail";
+}
+
+function maturityAssessmentTitle(status: string | undefined) {
+  if (status === "pass") return "已达到成熟目标";
+  if (status === "near") return "接近成熟目标";
+  if (status === "collecting") return "数据积累中";
+  return "未达到成熟目标";
+}
+
+function maturityCheckLabel(key: string | undefined, fallback: string | undefined) {
+  switch (key) {
+    case "main_customers_per_30":
+      return "主客户/30";
+    case "high_match_per_30":
+      return "高匹配/30";
+    case "contact_coverage":
+      return "触达率";
+    case "wrong_country_ratio":
+      return "错国家";
+    case "rejected_ratio":
+      return "拒绝率";
+    case "lane_coverage":
+      return "Lane覆盖";
+    case "query_quality_coverage":
+      return "Query质量";
+    case "customer_trust_coverage":
+      return "可信度";
+    default:
+      return fallback ?? "指标";
+  }
+}
+
+function formatMaturityCheckValue(key: string | undefined, value: number | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  if (
+    key === "contact_coverage" ||
+    key === "wrong_country_ratio" ||
+    key === "rejected_ratio" ||
+    key === "query_quality_coverage" ||
+    key === "customer_trust_coverage"
+  ) {
+    return `${(value * 100).toFixed(1)}%`;
+  }
+  if (key === "lane_coverage") {
+    return value.toFixed(0);
+  }
+  return value.toFixed(value % 1 === 0 ? 0 : 1);
+}
+
+const clientSearchQueryLaneDefinitions = [
+  {
+    key: "channel",
+    label: "channel_distributor",
+    pattern:
+      /\b(?:distributors?|stockists?|resellers?|dealers?|importers?|wholesalers?|trading compan(?:y|ies)|channel partners?)\b/i
+  },
+  {
+    key: "project",
+    label: "project_contractor_integrator",
+    pattern:
+      /\b(?:contractors?|installers?|installation compan(?:y|ies)|system integrators?|engineering compan(?:y|ies)|epc|project delivery|turnkey)\b/i
+  },
+  {
+    key: "maintenance_mro",
+    label: "maintenance_mro_service",
+    pattern:
+      /\b(?:maintenance|repair|mro|field service|after-sales|after sales|service compan(?:y|ies)|o&m|managed services?|operations)\b/i
+  },
+  {
+    key: "procurement_entry",
+    label: "procurement_rfq_vendor_entry",
+    pattern:
+      /\b(?:procurement|purchasing|vendor registration|supplier registration|rfq|request for quotation|tender|bid|procurement portal|supplier portal)\b/i
+  },
+  {
+    key: "end_user_operator",
+    label: "operator_terminal_buyer",
+    pattern:
+      /\b(?:operators?|isp|wisp|ftth|fiber operator|utility|utilities|factory|plant|hospital|hotel|mine|mining|oil gas|airport|port|municipality|government|data center|commercial|industrial)\b/i
+  },
+  {
+    key: "local_market",
+    label: "local_market_anchor",
+    pattern: /\b(?:site:\.[a-z]{2}|near me|locations?|branches?|offices?|contact)\b/i
+  },
+  {
+    key: "reference_competitor_channel",
+    label: "reference_competitor_channel",
+    pattern:
+      /\b(?:authorized distributor|authorized dealer|dealer locator|partner locator|channel partner|brands|catalog|case stud(?:y|ies)|clients?|partners?|deployments?|success stories)\b/i
+  },
+  {
+    key: "industry_scenario",
+    label: "industry_scenario",
+    pattern:
+      /\b(?:project|solution provider|applications?|use cases?|solar farm|microgrid|base station|cell site|ran|telecom network|factory maintenance|shutdown maintenance|oil gas project|commercial solar|industrial automation|water treatment|hvac|fire protection)\b/i
+  }
+] as const;
+
+function assessClientSearchQueryLaneCoverage(queries: SearchQuery[] | undefined) {
+  const laneCounts = Object.fromEntries(
+    clientSearchQueryLaneDefinitions.map((lane) => [lane.key, 0])
+  ) as Record<(typeof clientSearchQueryLaneDefinitions)[number]["key"], number>;
+
+  for (const row of queries ?? []) {
+    const text = [row.query, row.strategyTemplate, row.operatorSource].filter(Boolean).join(" ");
+    for (const lane of clientSearchQueryLaneDefinitions) {
+      const hasLaneSignal =
+        lane.pattern.test(text) ||
+        (lane.key === "local_market" && Boolean(row.country && row.country.trim()));
+      if (hasLaneSignal) {
+        laneCounts[lane.key] += 1;
+      }
+    }
+  }
+
+  const coveredLanes = clientSearchQueryLaneDefinitions
+    .filter((lane) => laneCounts[lane.key] > 0)
+    .map((lane) => ({ key: lane.key, label: lane.label, count: laneCounts[lane.key] }));
+  const missingLanes = clientSearchQueryLaneDefinitions
+    .filter((lane) => laneCounts[lane.key] === 0)
+    .map((lane) => ({ key: lane.key, label: lane.label }));
+  const requiredLaneCount = 5;
+  const coveredCount = coveredLanes.length;
+
+  return {
+    coveredCount,
+    requiredLaneCount,
+    totalTrackedLanes: clientSearchQueryLaneDefinitions.length,
+    coverageScore: roundThree(Math.min(1, coveredCount / Math.max(1, requiredLaneCount))),
+    coveredLanes,
+    missingLanes
+  };
+}
+
+const clientQueryBuyerIntentPattern =
+  /\b(?:distributors?|stockists?|resellers?|dealers?|importers?|wholesalers?|trading compan(?:y|ies)|contractors?|installers?|installation compan(?:y|ies)|system integrators?|integrators?|engineering compan(?:y|ies)|epc|maintenance|repair|mro|field service|after-sales|service compan(?:y|ies)|operators?|isp|wisp|ftth|channel partners?)\b/i;
+const clientQueryProcurementEntryPattern =
+  /\b(?:procurement|purchasing|vendor registration|supplier registration|rfq|request for quotation|tender|bid|supplier portal|procurement portal)\b/i;
+const clientQueryEndUserPattern =
+  /\b(?:factory|plant|hospital|hotel|mine|mining|oil gas|airport|port|utility|utilities|municipality|government|data center|commercial|industrial)\b/i;
+const clientQueryReferencePivotPattern =
+  /\b(?:authorized distributor|authorized dealer|dealer locator|partner locator|channel partner|brands|catalog|case stud(?:y|ies)|clients?|partners?|deployments?|success stories)\b/i;
+const clientQueryProductOrScenarioPattern =
+  /\b(?:equipment|spare parts?|parts?|module|system|systems|solution|solutions|inverter|solar|pv|bess|battery|pump|valve|seal|motor|automation|telecom|telecommunications?|network|fiber|ftth|ran|base station|cell site|rectifier|olt|rru|bbu|power|microgrid|project|maintenance|installation|deployment|industrial|commercial|oil gas)\b/i;
+const clientQueryContactEntryPattern =
+  /\b(?:contact|contacts|contact-us|get in touch|get-in-touch|reach us|reach-us|inquiry|inquiries|enquiry|enquiries|quote|request a quote|request-a-quote|sales|support|office|offices|locations?|catalog|brands|services|projects|registration)\b/i;
+const clientQueryMarketAnchorPattern =
+  /\b(?:uae|united arab emirates|saudi arabia|qatar|oman|kuwait|iraq|afghanistan|nigeria|kenya|south africa|egypt|morocco|ghana|tanzania|brazil|chile|colombia|peru|russia|ukraine|indonesia|vietnam|thailand|philippines|malaysia|singapore|dubai|riyadh|doha|muscat|lagos|nairobi|johannesburg|cairo|sao paulo)\b/i;
+const clientQueryNoiseIntentPattern =
+  /\b(?:jobs?|careers?|hiring|recruitment|training|course|courses|news|press release|blog|article|articles|whitepaper|wikipedia|encyclopedia|reddit|youtube|alibaba|made-in-china|globalsources|indiamart|exporthub|tradewheel|market report|industry report|research report)\b/i;
+
+function assessClientSearchQueryQualityCoverage(queries: SearchQuery[] | undefined) {
+  const rows = queries ?? [];
+  let completeCount = 0;
+  const missingCounts = {
+    productOrScenario: 0,
+    buyerIntent: 0,
+    marketAnchor: 0,
+    contactOrProcurementEntry: 0,
+    noiseControlled: 0
+  };
+
+  for (const row of rows) {
+    const query = row.query ?? "";
+    const text = [query, row.strategyTemplate, row.operatorSource].filter(Boolean).join(" ");
+    const hasReferencePivot = clientQueryReferencePivotPattern.test(text);
+    const productOrScenario =
+      clientQueryProductOrScenarioPattern.test(text) ||
+      hasReferencePivot ||
+      /\b[A-Z]{2,}\d{2,}\b/.test(query);
+    const buyerIntent =
+      clientQueryBuyerIntentPattern.test(text) ||
+      clientQueryProcurementEntryPattern.test(text) ||
+      clientQueryEndUserPattern.test(text) ||
+      hasReferencePivot;
+    const marketAnchor = Boolean(
+      (row.country && row.country.trim()) ||
+        /\bsite:\.[a-z]{2}\b/i.test(query) ||
+        clientQueryMarketAnchorPattern.test(query)
+    );
+    const contactOrProcurementEntry =
+      clientQueryContactEntryPattern.test(query) ||
+      clientQueryProcurementEntryPattern.test(query) ||
+      hasReferencePivot;
+    const noiseControlled = !clientQueryHasUncontrolledNoiseIntent(query);
+
+    if (!productOrScenario) missingCounts.productOrScenario += 1;
+    if (!buyerIntent) missingCounts.buyerIntent += 1;
+    if (!marketAnchor) missingCounts.marketAnchor += 1;
+    if (!contactOrProcurementEntry) missingCounts.contactOrProcurementEntry += 1;
+    if (!noiseControlled) missingCounts.noiseControlled += 1;
+
+    if (
+      productOrScenario &&
+      buyerIntent &&
+      marketAnchor &&
+      contactOrProcurementEntry &&
+      noiseControlled
+    ) {
+      completeCount += 1;
+    }
+  }
+
+  return {
+    completeCount,
+    total: rows.length,
+    coverage: roundThree(completeCount / Math.max(1, rows.length)),
+    missingCounts
+  };
+}
+
+function clientQueryHasUncontrolledNoiseIntent(query: string) {
+  const withoutExplicitExclusions = query.replace(
+    /-\s*(?:jobs?|careers?|hiring|recruitment|training|course|courses|news|press release|blog|article|articles|whitepaper|wikipedia|encyclopedia|reddit|youtube|alibaba|made-in-china|globalsources|indiamart|exporthub|tradewheel|market report|industry report|research report)\b/gi,
+    ""
+  );
+  return clientQueryNoiseIntentPattern.test(withoutExplicitExclusions);
+}
+
+type ClientTrustMissingCounts = {
+  sourceQuery: number;
+  sourcePage: number;
+  matchReason: number;
+  riskLabel: number;
+  contactSource: number;
+  customerType: number;
+};
+
+function assessClientCustomerTrustCoverage(leads: DisplayLead[], task: LeadTask | null) {
+  const actionableLeads = leads.filter((lead) => lead.actionable);
+  const total = actionableLeads.length;
+  let completeCount = 0;
+  const missingCounts: ClientTrustMissingCounts = {
+    sourceQuery: 0,
+    sourcePage: 0,
+    matchReason: 0,
+    riskLabel: 0,
+    contactSource: 0,
+    customerType: 0
+  };
+
+  for (const lead of actionableLeads) {
+    const hasSourceQuery = leadDetailSourceQueries(lead, task).length > 0;
+    const hasSourcePage = Boolean(
+      (lead.sourceUrl && lead.sourceUrl !== "-") ||
+        (lead.raw.sourceUrl && lead.raw.sourceUrl !== "-") ||
+        (lead.website && lead.website !== "-")
+    );
+    const hasMatchReason = leadDetailMatchReasons(lead).length > 0;
+    const hasRiskLabel = leadDetailRiskLabels(lead).length > 0;
+    const hasContactSource = leadDetailContactSources(lead).length > 0;
+    const hasCustomerType = Boolean(lead.tag && lead.tag !== "-");
+
+    if (!hasSourceQuery) missingCounts.sourceQuery += 1;
+    if (!hasSourcePage) missingCounts.sourcePage += 1;
+    if (!hasMatchReason) missingCounts.matchReason += 1;
+    if (!hasRiskLabel) missingCounts.riskLabel += 1;
+    if (!hasContactSource) missingCounts.contactSource += 1;
+    if (!hasCustomerType) missingCounts.customerType += 1;
+
+    if (
+      hasSourceQuery &&
+      hasSourcePage &&
+      hasMatchReason &&
+      hasRiskLabel &&
+      hasContactSource &&
+      hasCustomerType
+    ) {
+      completeCount += 1;
+    }
+  }
+
+  return {
+    completeCount,
+    total,
+    coverage: roundThree(completeCount / Math.max(1, total)),
+    missingCounts
+  };
+}
+
+function buildClientTargetAssessment(
+  task: LeadTask | null,
+  leads: DisplayLead[]
+): QueryLearningTargetAssessment | null {
+  if (!task || (!leads.length && !(task.searchQueries?.length ?? 0))) {
+    return null;
+  }
+  const queryCount = task.searchQueries?.length ?? 0;
+  const completedQueryCount =
+    task.searchQueries?.filter((query) => query.executionStatus === "completed").length ?? 0;
+  const queryBasis = Math.max(1, completedQueryCount || queryCount);
+  const per30Factor = 30 / queryBasis;
+  const mainCustomers = leads.filter((lead) => lead.actionable).length;
+  const highMatchCustomers = leads.filter((lead) => lead.actionable && lead.score >= 75).length;
+  const contactableCustomers = leads.filter(
+    (lead) => lead.actionable && hasReachableLeadContact(lead.raw.contacts)
+  ).length;
+  const rejectedCount =
+    task.leadCandidates?.filter((lead) => lead.status === "rejected").length ?? 0;
+  const totalCandidates = Math.max(1, task.leadCandidates?.length ?? leads.length);
+  const wrongCountryCount = leads.filter((lead) => lead.actionable && lead.raw.countryConflict)
+    .length;
+  const mainCustomersPer30 = roundOne(mainCustomers * per30Factor);
+  const highMatchCustomersPer30 = roundOne(highMatchCustomers * per30Factor);
+  const contactCoverage = roundThree(contactableCustomers / Math.max(1, mainCustomers));
+  const wrongCountryRatio = roundThree(wrongCountryCount / Math.max(1, mainCustomers));
+  const rejectedRatio = roundThree(rejectedCount / totalCandidates);
+  const laneCoverage = assessClientSearchQueryLaneCoverage(task.searchQueries);
+  const queryQualityCoverage = assessClientSearchQueryQualityCoverage(task.searchQueries);
+  const customerTrustCoverage = assessClientCustomerTrustCoverage(leads, task);
+  const checks = [
+    clientMaturityCheck(
+      "main_customers_per_30",
+      mainCustomersPer30,
+      ">=10",
+      mainCustomersPer30 >= 10,
+      mainCustomersPer30 >= 8
+    ),
+    clientMaturityCheck(
+      "high_match_per_30",
+      highMatchCustomersPer30,
+      ">=5",
+      highMatchCustomersPer30 >= 5,
+      highMatchCustomersPer30 >= 4
+    ),
+    clientMaturityCheck(
+      "contact_coverage",
+      contactCoverage,
+      ">=0.80",
+      contactCoverage >= 0.8,
+      contactCoverage >= 0.72
+    ),
+    clientMaturityCheck(
+      "wrong_country_ratio",
+      wrongCountryRatio,
+      "<=0.10",
+      wrongCountryRatio <= 0.1,
+      wrongCountryRatio <= 0.15
+    ),
+    clientMaturityCheck(
+      "rejected_ratio",
+      rejectedRatio,
+      "<=0.60",
+      rejectedRatio <= 0.6,
+      rejectedRatio <= 0.7
+    ),
+    clientMaturityCheck(
+      "lane_coverage",
+      laneCoverage.coveredCount,
+      `>=${laneCoverage.requiredLaneCount}`,
+      laneCoverage.coveredCount >= laneCoverage.requiredLaneCount,
+      laneCoverage.coveredCount >= Math.max(1, laneCoverage.requiredLaneCount - 1)
+    ),
+    clientMaturityCheck(
+      "query_quality_coverage",
+      queryQualityCoverage.coverage,
+      ">=0.80",
+      queryQualityCoverage.coverage >= 0.8,
+      queryQualityCoverage.coverage >= 0.7
+    ),
+    clientMaturityCheck(
+      "customer_trust_coverage",
+      customerTrustCoverage.coverage,
+      ">=0.80",
+      customerTrustCoverage.coverage >= 0.8,
+      customerTrustCoverage.coverage >= 0.7
+    )
+  ];
+  const passCount = checks.filter((check) => check.status === "pass").length;
+  const nearCount = checks.filter((check) => check.status === "near").length;
+  const readinessScore = Math.round(((passCount + nearCount * 0.5) / checks.length) * 100);
+  const status =
+    queryBasis < 15
+      ? "collecting"
+      : passCount === checks.length
+        ? "pass"
+        : readinessScore >= 70
+          ? "near"
+          : "fail";
+
+  return {
+    status,
+    readinessScore,
+    queryBasis,
+    normalizedMetrics: {
+      queryBatchSize: 30,
+      mainCustomersPer30,
+      highMatchCustomersPer30,
+      contactCoverage,
+      wrongCountryRatio,
+      rejectedRatio,
+      laneCoverageScore: laneCoverage.coverageScore,
+      coveredLaneCount: laneCoverage.coveredCount,
+      queryQualityCoverage: queryQualityCoverage.coverage,
+      customerTrustCoverage: customerTrustCoverage.coverage
+    },
+    laneCoverage,
+    queryQualityCoverage,
+    customerTrustCoverage,
+    checks
+  };
+}
+
+function clientMaturityCheck(
+  key: string,
+  value: number,
+  target: string,
+  pass: boolean,
+  near: boolean
+) {
+  return {
+    key,
+    label: key,
+    value,
+    target,
+    status: pass ? "pass" : near ? "near" : "fail"
+  };
+}
+
+function roundOne(value: number) {
+  return Math.round(value * 10) / 10;
+}
+
+function roundThree(value: number) {
+  return Math.round(value * 1000) / 1000;
+}
+
 function buildPoolTableRow(lead: DisplayLead): PoolTableRow {
   // Count emails / phones from the raw contact list (not the formatted
   // display string). The display string joins phones with " ; ", so a
@@ -3317,6 +4055,8 @@ function buildPoolTableRow(lead: DisplayLead): PoolTableRow {
   const contacts = lead.raw.contacts ?? [];
   const emails = pickFirstContactValue(contacts, "email");
   const phones = pickFirstContactValue(contacts, "phone");
+  const socials = pickFirstContactValue(contacts, "social");
+  const forms = pickFirstContactValue(contacts, "form");
   const emailCount = emails.count;
   const phoneCount = phones.count;
   const crmStage = lead.raw.crmLead?.stage ?? null;
@@ -3349,6 +4089,8 @@ function buildPoolTableRow(lead: DisplayLead): PoolTableRow {
     phoneCount,
     phoneFirst: phones.first,
     phoneAll: phones.all,
+    hasReachableContact:
+      emailCount > 0 || phoneCount > 0 || socials.count > 0 || forms.count > 0,
     website: lead.website || "—",
     websiteShort: formatWebsiteShort(lead.website),
     sourceBatch: lead.source || "第 1 批",
@@ -3407,9 +4149,10 @@ function matchesPoolScoreFilter(score: number, filter: string): boolean {
 function matchesPoolContactFilter(row: PoolTableRow, filter: string): boolean {
   if (filter === "email") return row.hasEmail;
   if (filter === "phone") return row.hasPhone;
+  if (filter === "reachable") return row.hasReachableContact;
   if (filter === "emailOrPhone") return row.hasEmail || row.hasPhone;
   if (filter === "emailAndPhone") return row.hasEmail && row.hasPhone;
-  if (filter === "none") return !row.hasEmail && !row.hasPhone;
+  if (filter === "none") return !row.hasReachableContact;
   return true;
 }
 
@@ -3548,8 +4291,20 @@ function AiWorkerConversation({
     currentTask?.status ?? (searching ? "running" : "pending")
   );
   const targetMarkets = useMemo(() => taskTargetMarkets(currentTask), [currentTask]);
-  const countryChips =
-    targetMarkets.length > 0 ? targetMarkets.slice(0, 6) : ["UAE", "Saudi Arabia", "Qatar", "Oman"];
+  const profileIndustryAlignment = currentTask?.inputPayload?.profileSignals?.profileIndustryAlignment;
+  const hasProfileIndustryConflict = Boolean(
+    profileIndustryAlignment?.productProfileConflicts ||
+      profileIndustryAlignment?.customerProfileConflicts
+  );
+  const continuationOptimization =
+    currentTask?.inputPayload?.profileSignals?.continuationOptimization;
+  const continuationOptimizationMarkets = continuationOptimization?.selectedMarkets ?? [];
+  const continuationAvoidedMarkets = continuationOptimization?.avoidedMarkets ?? [];
+  const showContinuationOptimization = Boolean(
+    continuationOptimization?.action === "focus_high_yield_markets" &&
+      continuationOptimizationMarkets.length > 0
+  );
+  const countryChips = targetMarkets.slice(0, 6);
   const failedQueryCount = useMemo(
     () =>
       currentTask?.searchQueries?.filter((query) => query.executionStatus === "failed").length ?? 0,
@@ -3604,12 +4359,30 @@ function AiWorkerConversation({
   const executedCount = completedQueryCount + failedQueryCount + runningQueryCount;
   const allBraveQueriesFailed = queryCount > 0 && failedQueryCount === queryCount;
   const hasVisibleRunIssue = allBraveQueriesFailed || strandedQueryCount > 0;
-  const plannedBatchQueryCount = 30;
-  const isPlanningSearchQueries = isRunActive && (creating || searching) && pendingQueryCount === 0;
-  const displayQueryTotal = queryCount + (isPlanningSearchQueries ? plannedBatchQueryCount : 0);
+  const planningStepStatus =
+    currentTask?.agentSteps
+      ?.find((step) => step.nodeName === "plan_search_queries" || step.nodeName === "plan_search")
+      ?.status?.toLowerCase() ?? "";
+  const isStillFillingInitialQueryBatch =
+    !isTerminalTask &&
+    planningStepStatus === "running" &&
+    queryCount > 0 &&
+    queryCount < plannedBatchQueryCount;
+  const isPlanningSearchQueries =
+    isRunActive &&
+    (((creating || searching) && pendingQueryCount === 0) || isStillFillingInitialQueryBatch);
+  const displayQueryTotal = isPlanningSearchQueries
+    ? isStillFillingInitialQueryBatch
+      ? plannedBatchQueryCount
+      : queryCount + plannedBatchQueryCount
+    : queryCount;
+  const runHeaderStatus = isStillFillingInitialQueryBatch
+    ? `已先生成 ${queryCount}/${plannedBatchQueryCount} 条搜索指令，正在补齐并执行已生成部分`
+    : status;
+  const progressDoneCount = isStillFillingInitialQueryBatch ? queryCount : executedCount;
   const progressQueryTotal = displayQueryTotal || queryCount;
   const progressPercent = progressQueryTotal
-    ? Math.min(100, Math.round((executedCount / progressQueryTotal) * 100))
+    ? Math.min(100, Math.round((progressDoneCount / progressQueryTotal) * 100))
     : 0;
   const displayBatchNumber = Math.max(
     1,
@@ -3668,6 +4441,15 @@ function AiWorkerConversation({
               : "任务启动后会先生成搜索指令",
             title: queryCount ? `本轮共生成 ${queryCount} 条搜索指令` : "任务启动后会先生成搜索指令"
           };
+  const planningLoadingDescription = isStillFillingInitialQueryBatch
+    ? `已生成 ${queryCount}/${plannedBatchQueryCount} 条搜索指令，正在补齐剩余指令；已生成部分会继续执行。`
+    : `后端正在生成 ${plannedBatchQueryCount} 条搜索指令，完成后会自动开始搜索。`;
+  const planningEmptyDescription = isStillFillingInitialQueryBatch
+    ? `已生成 ${queryCount}/${plannedBatchQueryCount} 条搜索指令，正在补齐搜索指令，候选客户会在清洗完成时出现在这里。`
+    : `生成 ${plannedBatchQueryCount} 条搜索指令后，客户会在清洗完成时出现在这里。`;
+  const planningFooterDescription = isStillFillingInitialQueryBatch
+    ? `已生成 ${queryCount}/${plannedBatchQueryCount} 条搜索指令，正在补齐搜索指令，候选客户会在搜索后陆续进入列表`
+    : `正在生成 ${plannedBatchQueryCount} 条搜索指令，候选客户会在搜索后陆续进入列表`;
   const showLeadTableLoading =
     currentBatchLeads.length === 0 && (isPlanningSearchQueries || isRunActive);
 
@@ -3689,7 +4471,7 @@ function AiWorkerConversation({
   };
   const runStepPills: RunStep[] = useMemo(() => {
     const stepByName = (name: string) => currentTask?.agentSteps?.find((s) => s.nodeName === name);
-    const planning = stepByName("plan_search");
+    const planning = stepByName("plan_search_queries") ?? stepByName("plan_search");
     const search = stepByName("brave_search");
     const normalize = stepByName("normalize_leads");
     const score = stepByName("score_icp");
@@ -3720,7 +4502,11 @@ function AiWorkerConversation({
     // (legacy tasks never expose a "plan_search" agent step).
     const planningRaw = stateLabelOf(planning);
     const planningState: RunStep["state"] =
-      planningRaw === "pending" && queryCount ? "completed" : planningRaw;
+      planningRaw === "pending" && queryCount >= plannedBatchQueryCount
+        ? "completed"
+        : planningRaw === "pending" && queryCount
+          ? "running"
+          : planningRaw;
     // Brave 搜索: show failure only if every query in the batch failed.
     const searchRaw = stepStateAfterRun(stateLabelOf(search));
     const searchState: RunStep["state"] =
@@ -3832,11 +4618,39 @@ function AiWorkerConversation({
       </header>
 
       {/* 持续搜索批次 — main run card */}
+      {hasProfileIndustryConflict ? (
+        <div className="aiProfileConflictBanner" role="status">
+          <AlertTriangle size={16} aria-hidden="true" />
+          <div>
+            <strong>画像行业与本次任务不一致</strong>
+            <span>
+              系统已按本次搜索内容的行业生成搜索指令，冲突的产品画像或客户画像只保留为风险提示。
+            </span>
+          </div>
+        </div>
+      ) : null}
+
+      {showContinuationOptimization ? (
+        <div className="aiOptimizationBanner" role="status">
+          <Target size={16} aria-hidden="true" />
+          <div>
+            <strong>上一轮搜索产出偏低，已自动切换重点地区</strong>
+            <span>
+              系统将优先搜索 {formatCompactMarketList(continuationOptimizationMarkets)}
+              {continuationAvoidedMarkets.length > 0
+                ? `，暂缓 ${formatCompactMarketList(continuationAvoidedMarkets, 3)}`
+                : ""}
+              ，继续覆盖高产客户类型。
+            </span>
+          </div>
+        </div>
+      ) : null}
+
       <section className="aiSearchRunCard" aria-label="持续搜索批次">
         <header className="aiSearchRunHead">
           <div className="aiSearchRunHeadLeft">
             <h2>持续搜索批次</h2>
-            {isRunActive ? null : isRunComplete && hasVisibleRunIssue ? (
+            {isRunComplete && hasVisibleRunIssue ? (
               <p>
                 {(() => {
                   const parts: string[] = [`${completedQueryCount} 条成功`];
@@ -3846,7 +4660,7 @@ function AiWorkerConversation({
                 })()}
               </p>
             ) : !isRunComplete ? (
-              <p>{status}</p>
+              <p>{runHeaderStatus}</p>
             ) : null}
           </div>
           <div className="aiSearchRunHeadActions">
@@ -3884,8 +4698,10 @@ function AiWorkerConversation({
               <strong className="aiSearchRunHeadlineTitle">
                 {isRunActive
                   ? isPlanningSearchQueries
-                    ? queryCount > 0
-                      ? `正在生成第 ${planningBatchNumber} 批搜索指令...`
+                    ? isStillFillingInitialQueryBatch
+                      ? `已生成 ${queryCount}/${plannedBatchQueryCount} 条，正在补齐搜索指令`
+                      : queryCount > 0
+                        ? `正在生成第 ${planningBatchNumber} 批搜索指令...`
                       : "正在生成搜索指令..."
                     : `第 ${displayBatchNumber} 批正在搜索中...`
                   : isRunComplete
@@ -3916,8 +4732,11 @@ function AiWorkerConversation({
                 />
               </div>
               <p className="aiSearchRunProgressLabel">
-                <strong>{executedCount}</strong>
-                <span>/ {displayQueryTotal || "—"} query 已执行</span>
+                <strong>{progressDoneCount}</strong>
+                <span>
+                  / {displayQueryTotal || "—"} query{" "}
+                  {isStillFillingInitialQueryBatch ? "已生成" : "已执行"}
+                </span>
               </p>
             </div>
             {isRunActive && executedCount > 0 ? (
@@ -4037,7 +4856,7 @@ function AiWorkerConversation({
             title={isPlanningSearchQueries ? "正在生成搜索指令" : "正在搜索候选客户"}
             description={
               isPlanningSearchQueries
-                ? `后端正在生成 ${plannedBatchQueryCount} 条搜索指令，完成后会自动开始搜索。`
+                ? planningLoadingDescription
                 : "正在等待后端搜索、清洗和评分，客户会陆续进入列表。"
             }
           />
@@ -4183,7 +5002,7 @@ function AiWorkerConversation({
                         </strong>
                         <span>
                           {isPlanningSearchQueries
-                            ? `生成 ${plannedBatchQueryCount} 条搜索指令后，客户会在清洗完成时出现在这里。`
+                            ? planningEmptyDescription
                             : isRunActive
                               ? "搜索结果会按客户质量陆续进入列表。"
                               : "任务创建后会先生成搜索指令，再自动执行搜索。"}
@@ -4206,7 +5025,7 @@ function AiWorkerConversation({
           ) : (
             <p className="aiPoolTableFootHint aiPoolTableFootHintMuted">
               {isPlanningSearchQueries
-                ? `正在生成 ${plannedBatchQueryCount} 条搜索指令，候选客户会在搜索后陆续进入列表`
+                ? planningFooterDescription
                 : isRunActive
                   ? "正在搜索并清洗候选客户，结果会陆续进入列表"
                   : "暂无候选客户，任务执行后客户会进入列表"}
@@ -4370,6 +5189,15 @@ async function apiRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
   }
 
   return payload as T;
+}
+
+function displayAiWorkerAccountName(user: CurrentUser) {
+  const name = user.name?.trim();
+  if (name) {
+    return name;
+  }
+
+  return user.email.split("@")[0] || "你";
 }
 
 function resolveApiUrl(url: string) {
@@ -4600,6 +5428,12 @@ function buildActivityLogs({
   const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
   const hasTask = Boolean(currentTask);
   const hasLeads = leads.length > 0;
+  const planningStatus =
+    currentTask?.agentSteps
+      ?.find((step) => step.nodeName === "plan_search_queries" || step.nodeName === "plan_search")
+      ?.status?.toLowerCase() ?? "";
+  const planningStillAppending =
+    planningStatus === "running" && queryCount > 0 && queryCount < plannedBatchQueryCount;
 
   return [
     {
@@ -4618,12 +5452,14 @@ function buildActivityLogs({
     },
     {
       title: "任务规划中",
-      detail: queryCount
+      detail: planningStillAppending
+        ? `已先生成 ${queryCount} 条，正在补齐到 ${plannedBatchQueryCount} 条搜索指令`
+        : queryCount
         ? `已生成 ${queryCount} 条搜索指令`
         : creating
           ? "正在生成执行步骤"
           : "等待画像读取",
-      state: queryCount ? "done" : creating ? "active" : "pending"
+      state: planningStillAppending ? "active" : queryCount ? "done" : creating ? "active" : "pending"
     },
     {
       title: "数据搜索中",
@@ -4752,17 +5588,14 @@ function isMainLeadStatus(status: string | undefined) {
 }
 
 function isDisplayableLeadCandidate(lead: LeadCandidate) {
-  // 2026-05: country verification is no longer a gate. We keep
-  // candidates with unconfirmed country in the main customer list and
+  // 2026-05: country verification and low ICP score are no longer hard
+  // display gates. If a row is still in a main-customer status, keep it
   // show "国家待补充" in the UI; downstream review still lets users
-  // double-check before sending. Score >= 50 + main status + not an
-  // evidence-only or hidden content lead is enough.
-  const score = lead.icpScore?.score ?? 0;
+  // ranking/review instead of silently hiding plausible low-score leads.
   return (
     isMainLeadStatus(lead.status) &&
     !hasEvidenceLeadType(lead) &&
-    !isHiddenEvidenceOrContentLead(lead) &&
-    score >= 50
+    !isHiddenEvidenceOrContentLead(lead)
   );
 }
 
@@ -5116,6 +5949,13 @@ function taskTargetMarkets(task: LeadTask | null) {
     ...(task?.inputPayload?.keywordGroups?.marketTerms ?? []),
     ...((task?.searchQueries ?? []).map((query) => query.country).filter(Boolean) as string[])
   ]);
+}
+
+function formatCompactMarketList(markets: string[], limit = 4) {
+  const visible = markets.map((market) => market.trim()).filter(Boolean).slice(0, limit);
+  if (!visible.length) return "";
+  const remainingCount = Math.max(0, markets.length - visible.length);
+  return remainingCount > 0 ? `${visible.join("、")} 等 ${markets.length} 个地区` : visible.join("、");
 }
 
 function displayLeadPriority(lead: LeadCandidate, targetMarkets: string[]) {
@@ -5597,7 +6437,9 @@ function formatMailSentStatus(result: MailSendResult) {
 
 type IcpReasonPayload = {
   reasons?: unknown;
+  risks?: unknown;
   summary?: unknown;
+  sourceQuery?: unknown;
   leadType?: unknown;
   intelligenceType?: unknown;
   reviewLabels?: unknown;
@@ -5628,15 +6470,6 @@ function buildCustomerBrief(lead: LeadCandidate) {
   if (lead.status === "country_conflict_review") {
     return "国家冲突复核";
   }
-  if (
-    isMainLeadStatus(lead.status) &&
-    (lead.countryConfidence === "low" ||
-      lead.countryConfidence === "unknown" ||
-      lead.countryConflict)
-  ) {
-    return "国家待补充";
-  }
-
   const payload = icpReasonPayload(lead.icpScore?.reasons);
   const aiBrief = customerBriefFromAi(payload?.aiEvaluation);
   if (aiBrief) return aiBrief;
@@ -5848,11 +6681,11 @@ function firstIcpReason(reasons: unknown) {
   return Array.isArray(list) && typeof list[0] === "string" ? list[0] : "";
 }
 
-function buildCrmRows(displayLeads: DisplayLead[]): CrmRow[] {
+function buildCrmRows(displayLeads: DisplayLead[], ownerName = "当前账号"): CrmRow[] {
   return displayLeads.map((lead) => ({
     ...lead,
     industry: lead.tag,
-    owner: "王亚伟"
+    owner: ownerName
   }));
 }
 

@@ -352,7 +352,7 @@ export function MailConfirmationModal({
       name: `${lead.companyName} 开发信模板`,
       subject: draft.subject,
       body: draft.body,
-      owner: "王亚伟",
+      owner: "当前账号",
       createdAt: new Date().toISOString().slice(0, 10),
       summary: "从邮件确认弹窗另存的自建模板。"
     };
