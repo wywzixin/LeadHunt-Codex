@@ -2,15 +2,13 @@
 
 **面向 B2B 出海的 AI 获客与客户经营工作台。**
 
-`LeadHunt2.0-improve` · `TypeScript` · `LangGraph` · `Next.js 16` · `NestJS 11` · `PostgreSQL`
+`TypeScript` · `LangGraph` · `Next.js 16` · `NestJS 11` · `PostgreSQL`
 
 输入目标产品、市场和客户类型，LeadHunt AI 将开发任务转化为可执行的搜索计划，查找海外公司、补充联系方式、判断客户匹配度，并接入邮件开发、CRM 和回复跟进。
 
 项目围绕一条完整的业务链路展开：
 
 **产品与客户画像 → 多策略搜索 → 官网证据与联系方式 → ICP 筛选 → 人工确认 → 邮件触达 → CRM 与回复跟进。**
-
-本页介绍 [**`LeadHunt2.0-improve` 分支**](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve)，重点展示搜索流程优化、客户质量控制和 Agent 的工程实现。源码链接与运行步骤均对应此分支。
 
 ![LeadHunt AI 工作台与客户池库](docs/images/workbench.png)
 
@@ -83,7 +81,7 @@ flowchart TB
 
 关键词按产品、长尾产品、买家意图、市场、应用场景和排除词组织。任务指令与已保存画像存在行业冲突时，执行行业对齐，减少旧画像对新任务的干扰。
 
-对应实现：[网页证据读取](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/agent/website-content.service.ts)、[关键词扩展](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/packages/agent/src/keyword-expansion.ts)、[任务上下文](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/agent/agent-workflow.service.ts)。
+对应实现：[网页证据读取](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/agent/website-content.service.ts)、[关键词扩展](https://github.com/wywzixin/LeadHunt-Codex/blob/main/packages/agent/src/keyword-expansion.ts)、[任务上下文](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/agent/agent-workflow.service.ts)。
 
 ### 2. 快慢两阶段规划，与搜索并行推进
 
@@ -112,7 +110,7 @@ flowchart LR
     Continue --> Queue
 ```
 
-核心入口：`runAutonomousLeadDiscovery`、`buildTaskFastContext`、`runSlowPlanningAndAppendGptQueries`，位于 [AgentWorkflowService](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/agent/agent-workflow.service.ts)。
+核心入口：`runAutonomousLeadDiscovery`、`buildTaskFastContext`、`runSlowPlanningAndAppendGptQueries`，位于 [AgentWorkflowService](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/agent/agent-workflow.service.ts)。
 
 ### 3. 用查询状态驱动并发执行
 
@@ -125,7 +123,7 @@ flowchart LR
 - **请求复用**：Brave 客户端包含短期缓存、请求间隔控制和可重试错误处理。
 - **入库去重**：耗时的网页与 AI 分析先执行，再对任务内的候选持久化进行串行保护。
 
-对应实现：[查询 Worker 与恢复](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/agent/agent-workflow.service.ts)、[Brave 客户端](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/search/brave-search.client.ts)、[候选入库](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/leads/lead-qualification.service.ts)。
+对应实现：[查询 Worker 与恢复](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/agent/agent-workflow.service.ts)、[Brave 客户端](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/search/brave-search.client.ts)、[候选入库](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/leads/lead-qualification.service.ts)。
 
 ### 4. 结合规则、模型与证据判断客户质量
 
@@ -146,7 +144,7 @@ flowchart LR
 
 联系方式同样携带来源 URL，客户详情可追溯到**来源页面、来源查询、匹配理由与风险标签**。
 
-对应实现：[LeadQualificationService](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/leads/lead-qualification.service.ts)、[国家与地区解析](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/packages/agent/src/country-market.ts)。
+对应实现：[LeadQualificationService](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/leads/lead-qualification.service.ts)、[国家与地区解析](https://github.com/wywzixin/LeadHunt-Codex/blob/main/packages/agent/src/country-market.ts)。
 
 ### 5. 将结果质量反馈到下一轮检索
 
@@ -159,17 +157,17 @@ flowchart LR
 - 搜索策略覆盖、查询质量与客户证据完整度。
 - 查询来源、国家和策略的产出差异。
 
-对应实现：[查询效果与继续搜索](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/agent/agent-workflow.service.ts)中的 `updateTaskQueryLearningSignals`、`buildQueryLearningSummary`、`appendContinuationSearchQueriesForTask`。
+对应实现：[查询效果与继续搜索](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/agent/agent-workflow.service.ts)中的 `updateTaskQueryLearningSignals`、`buildQueryLearningSummary`、`appendContinuationSearchQueriesForTask`。
 
 ### 6. 用状态图组织执行、确认与恢复
 
-[工作流定义](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/packages/agent/src/workflow.ts)包含 16 个节点，覆盖任务加载、画像分析、关键词、搜索、客户处理、审核、草稿、邮件发送和后续跟进。业务服务执行具体操作，并记录每一步的输入、输出、错误和状态。
+[工作流定义](https://github.com/wywzixin/LeadHunt-Codex/blob/main/packages/agent/src/workflow.ts)包含 16 个节点，覆盖任务加载、画像分析、关键词、搜索、客户处理、审核、草稿、邮件发送和后续跟进。业务服务执行具体操作，并记录每一步的输入、输出、错误和状态。
 
 流程设置两个关键人工确认点：**客户审核**与**邮件确认**。LangGraph checkpoint 默认持久化到 PostgreSQL，任务可跨请求保留确认状态；测试环境可使用内存存储。
 
 模型输出统一经过 JSON 解析与 Zod Schema 校验。校验失败时，服务携带具体错误再请求一次修正；HTTP 层对限流及服务端错误提供有限重试。画像、关键词、搜索计划、买家评估、邮件改写和回复分类各自具有明确的输出契约。
 
-对应实现：[状态图](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/packages/agent/src/workflow.ts)、[AI 服务与输出修正](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/ai/leadhunt-ai.service.ts)、[结构化 Schema](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/ai/leadhunt-ai.schemas.ts)。
+对应实现：[状态图](https://github.com/wywzixin/LeadHunt-Codex/blob/main/packages/agent/src/workflow.ts)、[AI 服务与输出修正](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/ai/leadhunt-ai.service.ts)、[结构化 Schema](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/ai/leadhunt-ai.schemas.ts)。
 
 ## 邮件与 CRM 如何衔接
 
@@ -184,14 +182,14 @@ flowchart LR
 | 意向识别 | 识别感兴趣、询价、索取目录、拒绝、退订、自动回复等类别，更新客户阶段和跟进任务      |
 | 活动分析 | 汇总发送、回复、意向与邮件打开事件；打开数据作为趋势信号展示                        |
 
-相关源码：[Gmail 服务](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/gmail/gmail-message.service.ts)、[Token 加密](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/gmail/token-encryption.ts)、[CRM](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/crm/crm.service.ts)、[打开事件](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/src/tracking/tracking.service.ts)。
+相关源码：[Gmail 服务](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/gmail/gmail-message.service.ts)、[Token 加密](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/gmail/token-encryption.ts)、[CRM](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/crm/crm.service.ts)、[打开事件](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/src/tracking/tracking.service.ts)。
 
 ## 本地运行
 
 准备 **Node.js 24、pnpm 10.29.3、Docker Compose**，以及模型与 Brave Search 的有效 API 凭据。
 
 ```bash
-git clone --branch LeadHunt2.0-improve --single-branch https://github.com/wywzixin/LeadHunt-Codex.git
+git clone https://github.com/wywzixin/LeadHunt-Codex.git
 cd LeadHunt-Codex
 pnpm install --frozen-lockfile
 cp .env.example .env
@@ -227,16 +225,16 @@ Web 默认运行在 `http://localhost:3000`，API 默认为 `http://localhost:40
 
 | 目录或文件                                                                                                                           | 建议关注                                               |
 | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| [`apps/web/app`](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve/apps/web/app)                                   | 页面、工作台、客户详情、模板与邮件编辑                 |
-| [`apps/api/src/agent`](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve/apps/api/src/agent)                       | 任务创建、快慢规划、并发执行、恢复、质量反馈与人工确认 |
-| [`apps/api/src/leads`](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve/apps/api/src/leads)                       | 候选归一化、联系方式、国家证据与 ICP 规则              |
-| [`apps/api/src/ai`](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve/apps/api/src/ai)                             | 模型客户端、Prompt、JSON Schema 与校验修正             |
-| [`apps/api/src/search`](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve/apps/api/src/search)                     | 搜索策略服务、Brave 请求、缓存与错误处理               |
-| [`apps/api/src/gmail`](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve/apps/api/src/gmail)                       | OAuth、草稿、发送、定时任务和回复同步                  |
-| [`apps/api/prisma/schema.prisma`](https://github.com/wywzixin/LeadHunt-Codex/blob/LeadHunt2.0-improve/apps/api/prisma/schema.prisma) | 任务、查询、客户、评分、草稿、发送及跟进的数据关系     |
-| [`packages/agent/src`](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve/packages/agent/src)                       | LangGraph 状态图、关键词、搜索策略与国家解析           |
-| [`packages/shared/src`](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve/packages/shared/src)                     | 前后端共享定义                                         |
-| [`search`](https://github.com/wywzixin/LeadHunt-Codex/tree/LeadHunt2.0-improve/search)                                               | 高级搜索策略库                                         |
+| [`apps/web/app`](https://github.com/wywzixin/LeadHunt-Codex/tree/main/apps/web/app)                                   | 页面、工作台、客户详情、模板与邮件编辑                 |
+| [`apps/api/src/agent`](https://github.com/wywzixin/LeadHunt-Codex/tree/main/apps/api/src/agent)                       | 任务创建、快慢规划、并发执行、恢复、质量反馈与人工确认 |
+| [`apps/api/src/leads`](https://github.com/wywzixin/LeadHunt-Codex/tree/main/apps/api/src/leads)                       | 候选归一化、联系方式、国家证据与 ICP 规则              |
+| [`apps/api/src/ai`](https://github.com/wywzixin/LeadHunt-Codex/tree/main/apps/api/src/ai)                             | 模型客户端、Prompt、JSON Schema 与校验修正             |
+| [`apps/api/src/search`](https://github.com/wywzixin/LeadHunt-Codex/tree/main/apps/api/src/search)                     | 搜索策略服务、Brave 请求、缓存与错误处理               |
+| [`apps/api/src/gmail`](https://github.com/wywzixin/LeadHunt-Codex/tree/main/apps/api/src/gmail)                       | OAuth、草稿、发送、定时任务和回复同步                  |
+| [`apps/api/prisma/schema.prisma`](https://github.com/wywzixin/LeadHunt-Codex/blob/main/apps/api/prisma/schema.prisma) | 任务、查询、客户、评分、草稿、发送及跟进的数据关系     |
+| [`packages/agent/src`](https://github.com/wywzixin/LeadHunt-Codex/tree/main/packages/agent/src)                       | LangGraph 状态图、关键词、搜索策略与国家解析           |
+| [`packages/shared/src`](https://github.com/wywzixin/LeadHunt-Codex/tree/main/packages/shared/src)                     | 前后端共享定义                                         |
+| [`search`](https://github.com/wywzixin/LeadHunt-Codex/tree/main/search)                                               | 高级搜索策略库                                         |
 
 ## 开发与验证
 
