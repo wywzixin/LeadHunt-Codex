@@ -2,11 +2,13 @@ import { BadRequestException, Inject, Injectable, UnauthorizedException } from "
 import { z } from "zod";
 import { PrismaService } from "../prisma/prisma.service.js";
 
+const profileNotesMaxLength = 800;
+
 const productProfileSchema = z.object({
   websiteUrl: z.string().url(),
   productPageUrl: z.string().url().optional().or(z.literal("")),
   documentUrls: z.array(z.string().url()).optional(),
-  notes: z.string().max(4000).optional()
+  notes: z.string().max(profileNotesMaxLength).optional()
 });
 
 @Injectable()

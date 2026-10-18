@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentWorkflowService, splitReferenceCompanyAliases, resolveSearchQueryConcurrency } from "./agent-workflow.service.js";
+import {
+  AgentWorkflowService,
+  splitReferenceCompanyAliases,
+  trimReferenceCompanyName,
+  resolveSearchQueryConcurrency
+} from "./agent-workflow.service.js";
 
 function createPrismaMock() {
   return {
@@ -11,9 +16,12 @@ function createPrismaMock() {
         updated_at: new Date("2026-05-03T08:01:00.000Z"),
         prompt: "Find UAE telecom distributors and stockists",
         lead_count: 12,
-        query_count: 15
+        query_count: 15,
+        pending_crm_count: 7,
+        pending_email_count: 3
       }
     ]),
+    $executeRaw: vi.fn().mockResolvedValue(1),
     productProfile: {
       findUnique: vi.fn().mockResolvedValue({
         websiteUrl: "https://telecorenet.com/",
@@ -105,6 +113,14 @@ function createPrismaMock() {
         }
       ]),
       updateMany: vi.fn().mockResolvedValue({ count: 1 })
+    },
+    crmLead: {
+      upsert: vi.fn().mockResolvedValue({
+        id: "crm-1",
+        leadId: "11111111-1111-4111-8111-111111111111",
+        stage: "qualified",
+        tags: ["AI 外贸员", "已加入CRM", "已确认"]
+      })
     },
     outreachDraft: {
       findMany: vi.fn().mockResolvedValue([]),
@@ -432,11 +448,39 @@ describe("AgentWorkflowService", () => {
 
   it("lists task history with candidate and query counts", async () => {
     const prisma = createPrismaMock();
+    prisma.$queryRaw
+      .mockResolvedValueOnce([
+        {
+          id: "task-1",
+          status: "running",
+          created_at: new Date("2026-05-03T08:00:00.000Z"),
+          updated_at: new Date("2026-05-03T08:01:00.000Z"),
+          prompt: "Find UAE telecom distributors and stockists",
+          input_payload: {
+            prompt: "Find UAE telecom distributors and stockists",
+            keywordGroups: { marketTerms: ["UAE"] }
+          },
+          lead_count: 12,
+          query_count: 15,
+          pending_crm_count: 7,
+          pending_email_count: 3,
+          total_count: 41
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          task_count: 41,
+          today_lead_count: 12,
+          pending_crm_count: 120,
+          pending_email_count: 8
+        }
+      ]);
     const service = new AgentWorkflowService(prisma as any);
 
     const result = await service.listTasksForUser("user-1", { limit: 30 });
 
     expect(result).toEqual({
+      totalCount: 41,
       tasks: [
         {
           id: "task-1",
@@ -445,13 +489,46 @@ describe("AgentWorkflowService", () => {
           updatedAt: new Date("2026-05-03T08:01:00.000Z"),
           prompt: "Find UAE telecom distributors and stockists",
           title: "Find UAE telecom distributors and st",
+          targetMarkets: ["UAE"],
           leadCount: 12,
-          queryCount: 15
+          queryCount: 15,
+          pendingCrmCount: 7,
+          pendingEmailCount: 3
         }
-      ]
+      ],
+      summary: {
+        taskCount: 41,
+        todayLeadCount: 12,
+        pendingCrmCount: 120,
+        pendingEmailCount: 8
+      }
     });
-    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
     expect(prisma.leadTask.findMany).not.toHaveBeenCalled();
+  });
+
+  it("soft deletes lead tasks without deleting candidates or CRM rows", async () => {
+    const prisma = createPrismaMock();
+    const service = new AgentWorkflowService(prisma as any);
+
+    await expect(service.softDeleteTaskForUser("user-1", "task-1")).resolves.toEqual({
+      ok: true,
+      taskId: "task-1"
+    });
+
+    expect(prisma.$executeRaw).toHaveBeenCalledOnce();
+    expect(prisma.leadTask.update).not.toHaveBeenCalled();
+    expect(prisma.leadCandidate.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects soft delete when the task is already hidden or not owned by the user", async () => {
+    const prisma = createPrismaMock();
+    prisma.$executeRaw.mockResolvedValueOnce(0);
+    const service = new AgentWorkflowService(prisma as any);
+
+    await expect(service.softDeleteTaskForUser("user-1", "task-1")).rejects.toThrow(
+      "Lead task not found"
+    );
   });
 
   it("hides intelligence and evidence leads from customer-list task responses", async () => {
@@ -681,10 +758,7 @@ describe("AgentWorkflowService", () => {
       targetCount: 20
     });
 
-    expect(ai.generateSearchStrategy.mock.calls[0]?.[0].targetMarkets).toEqual([
-      "UAE",
-      "Kuwait"
-    ]);
+    expect(ai.generateSearchStrategy.mock.calls[0]?.[0].targetMarkets).toEqual(["UAE", "Kuwait"]);
     expect(new Set(result.searchQueries.map((query) => query.country))).toEqual(
       new Set(["UAE", "Kuwait"])
     );
@@ -959,9 +1033,9 @@ describe("AgentWorkflowService", () => {
               ? "field engineering"
               : absoluteIndex === 2
                 ? "telecom power service"
-              : absoluteIndex % 3 === 1
-                ? "telecom system integrator"
-                : "base station maintenance company";
+                : absoluteIndex % 3 === 1
+                  ? "telecom system integrator"
+                  : "base station maintenance company";
 
         return {
           id: `Q${String(absoluteIndex + 1).padStart(2, "0")}`,
@@ -1062,7 +1136,112 @@ describe("AgentWorkflowService", () => {
     expect(result.searchQueries.some((q) => q.templateId?.startsWith("lane_k_"))).toBe(true);
   });
 
-  it("asks GPT for a refill when valid long-tail queries are rejected before reaching 20", async () => {
+  it("front-loads telecom-specific Lane K queries for tower maintenance buyer searches", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      createWebsiteContentMock() as any,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt:
+        "Find Nigeria and Kenya telecom tower and base station maintenance contractors buying Huawei ZTE Eltek BBU RRU rectifier -48V spare parts, procurement and O&M contacts.",
+      targetCount: 30
+    });
+
+    const firstLaneKQueries = result.searchQueries
+      .slice(0, 12)
+      .map((query) => query.query)
+      .join("\n");
+
+    expect(firstLaneKQueries).toMatch(
+      /"tower maintenance" OR "base station maintenance" OR "RAN maintenance"/i
+    );
+    expect(firstLaneKQueries).toMatch(
+      /"telecom contractor" OR "tower contractor" OR "network maintenance company"/i
+    );
+    expect(firstLaneKQueries).toMatch(/"rectifier" OR "-48V" OR "telecom power"/i);
+    expect(firstLaneKQueries).toMatch(/\bNigeria\b/i);
+    expect(firstLaneKQueries).toMatch(/\bKenya\b/i);
+    expect(firstLaneKQueries).toMatch(/site:\.ng|site:\.ke/i);
+    expect(firstLaneKQueries).not.toMatch(/\b(?:R4850N6|MA5800|MA5608T)\b/i);
+  });
+
+  it("uses off-site reverse customer network queries instead of searching inside the reference site", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: simpleAiQueriesForMarkets(input.targetMarkets)
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      createWebsiteContentMock() as any,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt:
+        "Find Nigeria and Kenya telecom tower maintenance contractors buying Huawei ZTE Eltek BBU RRU spare parts.",
+      targetCount: 30
+    });
+
+    const reverseQueries = result.searchQueries.filter((query) =>
+      query.templateId?.startsWith("reverse_network_")
+    );
+
+    expect(reverseQueries).toHaveLength(4);
+    for (const query of reverseQueries) {
+      expect(query.query).toContain("-site:spectrummea.com");
+      expect(query.query).not.toMatch(/^site:spectrummea\.com\b/i);
+    }
+  });
+
+  it("rejects weak cloud-only reference pivots from GPT search plans", async () => {
+    const prisma = createPrismaMock();
+    const ai = createLeadHuntAiMock(async (input) => ({
+      queries: [
+        aiSearchQuery(
+          '"Highcloud" ("partner" OR "client") Kenya 5G network equipment',
+          "Kenya",
+          1
+        ),
+        ...simpleAiQueriesForMarkets(input.targetMarkets)
+      ]
+    }));
+    const service = new AgentWorkflowService(
+      prisma as any,
+      undefined,
+      undefined,
+      createWebsiteContentMock() as any,
+      ai as any
+    );
+
+    const result = await service.createTaskWithTimeline("user-1", {
+      prompt:
+        "Find Kenya telecom tower and base station maintenance contractors buying Huawei ZTE Eltek BBU RRU rectifier spare parts.",
+      targetCount: 30
+    });
+
+    const queries = result.searchQueries.map((query) => query.query);
+    const persistedPayload = prisma.leadTask.create.mock.calls[0]?.[0].data.inputPayload;
+    expect(queries.join("\n")).not.toMatch(/"Highcloud"\s+\("partner" OR "client"\)/i);
+    expect(persistedPayload.profileSignals.aiPlanning.rejectedQueries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: "weak_reference_customer_pivot:Highcloud"
+        })
+      ])
+    );
+  });
+
+  it("asks GPT for refills when valid long-tail queries are rejected before reaching 30", async () => {
     const prisma = createPrismaMock();
     const ai = createLeadHuntAiMock(async (input) => {
       if (input.refillContext) {
@@ -1101,8 +1280,8 @@ describe("AgentWorkflowService", () => {
       targetCount: 20
     });
 
-    expect(ai.generateSearchStrategy).toHaveBeenCalledTimes(2);
-    expect(result.searchQueries.length).toBeGreaterThanOrEqual(20);
+    expect(ai.generateSearchStrategy).toHaveBeenCalledTimes(3);
+    expect(result.searchQueries.length).toBeGreaterThanOrEqual(30);
   });
 
   it("asks GPT for a second repair refill when the first refill is still one query short", async () => {
@@ -1392,6 +1571,18 @@ describe("AgentWorkflowService", () => {
       },
       data: { status: "approved" }
     });
+    expect(prisma.crmLead.upsert).toHaveBeenCalledWith({
+      where: { leadId: "11111111-1111-4111-8111-111111111111" },
+      create: {
+        leadId: "11111111-1111-4111-8111-111111111111",
+        stage: "qualified",
+        tags: ["AI 外贸员", "已加入CRM", "已确认"]
+      },
+      update: {
+        stage: "qualified",
+        tags: ["AI 外贸员", "已加入CRM", "已确认"]
+      }
+    });
     expect(prisma.outreachDraft.createMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
@@ -1457,6 +1648,18 @@ describe("AgentWorkflowService", () => {
         id: { in: ["11111111-1111-4111-8111-111111111111"] }
       },
       data: { status: "approved" }
+    });
+    expect(prisma.crmLead.upsert).toHaveBeenCalledWith({
+      where: { leadId: "11111111-1111-4111-8111-111111111111" },
+      create: {
+        leadId: "11111111-1111-4111-8111-111111111111",
+        stage: "qualified",
+        tags: ["AI 外贸员", "已加入CRM", "已确认"]
+      },
+      update: {
+        stage: "qualified",
+        tags: ["AI 外贸员", "已加入CRM", "已确认"]
+      }
     });
     expect(prisma.outreachDraft.createMany).toHaveBeenCalledWith({
       data: [
@@ -1544,6 +1747,37 @@ describe("AgentWorkflowService", () => {
     });
   });
 
+  it("counts review-pool candidates in per-query qualifiedCount", async () => {
+    const prisma = createPrismaMock();
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    leadQualification.saveCandidates.mockResolvedValueOnce({
+      createdCount: 3,
+      skippedCount: 0,
+      candidates: [
+        { id: "cand-1", status: "review" },
+        { id: "cand-2", status: "rejected" },
+        { id: "cand-3", status: "email_sent" }
+      ]
+    });
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    expect(prisma.searchQuery.update).toHaveBeenCalledWith({
+      where: { id: "query-1" },
+      data: {
+        executionStatus: "completed",
+        resultCount: 1,
+        qualifiedCount: 2
+      }
+    });
+  });
+
   it("passes full target-market context to qualification instead of only the query country pool", async () => {
     const prisma = createPrismaMock();
     prisma.leadTask.findFirst.mockResolvedValueOnce({
@@ -1592,6 +1826,11 @@ describe("AgentWorkflowService", () => {
 
     await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
 
+    // 2026-05 Stage 2 follow-up: legacy fixture has no marketSelection
+    // in profileSignals, so buildIcpCriteria falls back to the merge
+    // path. This pins the backwards-compatibility behavior — old
+    // task rows persisted before the marketSource feature existed
+    // must keep merging prompt + profile markets.
     expect(leadQualification.saveCandidates).toHaveBeenCalledWith(
       "task-1",
       expect.any(Array),
@@ -1610,6 +1849,191 @@ describe("AgentWorkflowService", () => {
         ])
       }),
       "Oman"
+    );
+  });
+
+  // 2026-05 Stage 2 follow-up: when the user's prompt explicitly named
+  // markets, marketSelection.marketSource is "prompt" and the
+  // qualification layer should NOT inherit the long-lived
+  // customerProfile.targetRegions. This is what makes the
+  // verified-off-target hard reject actually bite — without it, a
+  // Germany task would still fall back to a saved Middle East/Africa
+  // profile and let Egypt-verified candidates pass as in-target.
+  it("uses prompt markets only when marketSource=prompt, ignoring profile targetRegions", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValueOnce({
+      id: "task-1",
+      userId: "user-1",
+      inputPayload: {
+        customerProfile: {
+          targetRegions: ["Middle East", "Africa", "Brazil"]
+        },
+        keywordGroups: {
+          productTerms: ["telecom equipment"],
+          customerIntentTerms: ["telecom contractor"],
+          marketTerms: ["Germany"]
+        },
+        profileSignals: {
+          marketSelection: {
+            targetMarkets: ["Germany"],
+            promptMarkets: ["Germany"],
+            profileMarkets: ["Middle East", "Africa", "Brazil"],
+            marketSource: "prompt"
+          }
+        }
+      },
+      searchQueries: [
+        {
+          id: "query-1",
+          query: "telecom contractor Germany contact",
+          country: "Germany",
+          createdAt: new Date("2026-04-30T01:00:00.000Z")
+        }
+      ]
+    });
+    prisma.searchQuery.findFirst
+      .mockReset()
+      .mockResolvedValueOnce({
+        id: "query-1",
+        query: "telecom contractor Germany contact",
+        country: "Germany",
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      })
+      .mockResolvedValue(null);
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    const call = leadQualification.saveCandidates.mock.calls[0];
+    const criteria = call?.[2] as { targetRegions?: string[] };
+    expect(criteria?.targetRegions).toEqual(["Germany"]);
+    // Profile macros must not leak through.
+    expect(criteria?.targetRegions).not.toContain("Middle East");
+    expect(criteria?.targetRegions).not.toContain("Africa");
+    expect(criteria?.targetRegions).not.toContain("Brazil");
+  });
+
+  it("falls back to profile targetRegions when marketSource=profile (no prompt market)", async () => {
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValueOnce({
+      id: "task-1",
+      userId: "user-1",
+      inputPayload: {
+        customerProfile: {
+          targetRegions: ["Middle East", "Africa", "Brazil"]
+        },
+        keywordGroups: {
+          productTerms: ["telecom equipment"],
+          customerIntentTerms: ["telecom contractor"],
+          // marketTerms come from the profile expansion (UAE/Saudi/Qatar)
+          // because the prompt did not call out a specific country.
+          marketTerms: ["UAE", "Saudi Arabia", "Qatar"]
+        },
+        profileSignals: {
+          marketSelection: {
+            targetMarkets: ["UAE", "Saudi Arabia", "Qatar"],
+            promptMarkets: [],
+            profileMarkets: ["Middle East", "Africa", "Brazil"],
+            marketSource: "profile"
+          }
+        }
+      },
+      searchQueries: [
+        {
+          id: "query-1",
+          query: "telecom contractor Oman contact",
+          country: "Oman",
+          createdAt: new Date("2026-04-30T01:00:00.000Z")
+        }
+      ]
+    });
+    prisma.searchQuery.findFirst
+      .mockReset()
+      .mockResolvedValueOnce({
+        id: "query-1",
+        query: "telecom contractor Oman contact",
+        country: "Oman",
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      })
+      .mockResolvedValue(null);
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    const call = leadQualification.saveCandidates.mock.calls[0];
+    const criteria = call?.[2] as { targetRegions?: string[] };
+    // marketSource=profile keeps the legacy merge behavior so the
+    // qualification layer sees both the expanded prompt markets AND
+    // the profile macros for matchesTargetRegion fall-throughs.
+    expect(criteria?.targetRegions).toEqual(
+      expect.arrayContaining(["UAE", "Saudi Arabia", "Qatar", "Middle East", "Africa", "Brazil"])
+    );
+  });
+
+  it("falls back to merge when marketSource is missing (legacy task rows)", async () => {
+    // Same fixture as the legacy test above but explicitly asserting
+    // the fallback path: when the persisted payload predates the
+    // marketSelection feature, buildIcpCriteria still merges.
+    const prisma = createPrismaMock();
+    prisma.leadTask.findFirst.mockResolvedValueOnce({
+      id: "task-1",
+      userId: "user-1",
+      inputPayload: {
+        customerProfile: {
+          targetRegions: ["Middle East", "Africa"]
+        },
+        keywordGroups: {
+          productTerms: ["telecom equipment"],
+          customerIntentTerms: ["telecom contractor"],
+          marketTerms: ["UAE"]
+        }
+        // No profileSignals -> no marketSelection -> legacy merge path.
+      },
+      searchQueries: [
+        {
+          id: "query-1",
+          query: "telecom contractor UAE contact",
+          country: "UAE",
+          createdAt: new Date("2026-04-30T01:00:00.000Z")
+        }
+      ]
+    });
+    prisma.searchQuery.findFirst
+      .mockReset()
+      .mockResolvedValueOnce({
+        id: "query-1",
+        query: "telecom contractor UAE contact",
+        country: "UAE",
+        createdAt: new Date("2026-04-30T01:00:00.000Z")
+      })
+      .mockResolvedValue(null);
+    const braveSearch = createBraveSearchMock();
+    const leadQualification = createLeadQualificationMock();
+    const service = new AgentWorkflowService(
+      prisma as any,
+      braveSearch as any,
+      leadQualification as any
+    );
+
+    await service.executeBraveSearchForTask("user-1", "task-1", { limit: 1 });
+
+    const call = leadQualification.saveCandidates.mock.calls[0];
+    const criteria = call?.[2] as { targetRegions?: string[] };
+    // Legacy behavior: prompt + profile merged.
+    expect(criteria?.targetRegions).toEqual(
+      expect.arrayContaining(["UAE", "Middle East", "Africa"])
     );
   });
 
@@ -2048,6 +2472,15 @@ describe("AgentWorkflowService", () => {
     });
   });
 
+  describe("trimReferenceCompanyName", () => {
+    it("prefers specific aliases over weak cloud-only aliases", () => {
+      expect(trimReferenceCompanyName("HighCloud / HCT Group")).toBe("HCT Group");
+      expect(trimReferenceCompanyName("Highcloud / High Cloud Technologies")).toBe(
+        "High Cloud Technologies"
+      );
+    });
+  });
+
   // 2026-05 V1-MVP+: query-level worker pool tests. The pool spawns
   // N concurrent workers that share an atomic claim mechanism. Tests
   // verify (1) each query is processed exactly once, (2) the queryLimit
@@ -2098,7 +2531,9 @@ describe("AgentWorkflowService", () => {
       }
     });
 
-    function makePoolPrismaMock(pendingQueries: Array<{ id: string; query: string; country: string }>) {
+    function makePoolPrismaMock(
+      pendingQueries: Array<{ id: string; query: string; country: string }>
+    ) {
       const queue = [...pendingQueries];
       const claimedSet = new Set<string>();
       const completedSet = new Set<string>();
@@ -2120,20 +2555,18 @@ describe("AgentWorkflowService", () => {
       // wins; subsequent calls for the same id return count=0.
       // Cleanup path (executionStatus="running") returns count=0
       // because in this mock, the worker pool finishes cleanly.
-      prisma.searchQuery.updateMany = vi
-        .fn()
-        .mockImplementation(async ({ where, data }: any) => {
-          if (where?.id && where?.executionStatus === "pending") {
-            if (claimedSet.has(where.id)) return { count: 0 };
-            claimedSet.add(where.id);
-            return { count: 1 };
-          }
-          if (where?.executionStatus === "running") {
-            // No leftover running queries in this mock.
-            return { count: 0 };
-          }
+      prisma.searchQuery.updateMany = vi.fn().mockImplementation(async ({ where }: any) => {
+        if (where?.id && where?.executionStatus === "pending") {
+          if (claimedSet.has(where.id)) return { count: 0 };
+          claimedSet.add(where.id);
           return { count: 1 };
-        });
+        }
+        if (where?.executionStatus === "running") {
+          // No leftover running queries in this mock.
+          return { count: 0 };
+        }
+        return { count: 1 };
+      });
 
       // update tracks which queries reached "completed" status so
       // findMany (used by aggregateSearchQueryStats) can return the
@@ -2251,7 +2684,9 @@ describe("AgentWorkflowService", () => {
       );
       // EMERGENCY_TIMEOUT_MS must be >= 30min; IDLE_TIMEOUT_MS may be
       // smaller but should not be the sole termination mechanism.
-      const emergencyMatch = sourceText.match(/EMERGENCY_TIMEOUT_MS\s*=\s*(\d+)\s*\*\s*(\d+)\s*\*\s*(\d+)/);
+      const emergencyMatch = sourceText.match(
+        /EMERGENCY_TIMEOUT_MS\s*=\s*(\d+)\s*\*\s*(\d+)\s*\*\s*(\d+)/
+      );
       expect(emergencyMatch).not.toBeNull();
       const emergencyMs =
         Number(emergencyMatch![1]) * Number(emergencyMatch![2]) * Number(emergencyMatch![3]);
@@ -2272,7 +2707,12 @@ describe("AgentWorkflowService", () => {
       prisma.searchQuery.findFirst = vi.fn().mockImplementation(async () => {
         callCount++;
         if (callCount <= 2) {
-          return { id: `q-${callCount}`, query: `kw ${callCount}`, country: "UAE", createdAt: new Date() };
+          return {
+            id: `q-${callCount}`,
+            query: `kw ${callCount}`,
+            country: "UAE",
+            createdAt: new Date()
+          };
         }
         return null;
       });
@@ -2381,10 +2821,397 @@ describe("AgentWorkflowService", () => {
       // "pending") at least once after the workers finish.
       const cleanupCall = prisma.searchQuery.updateMany.mock.calls.find(
         ([args]: any[]) =>
-          args?.where?.executionStatus === "running" &&
-          args?.data?.executionStatus === "pending"
+          args?.where?.executionStatus === "running" && args?.data?.executionStatus === "pending"
       );
       expect(cleanupCall).toBeDefined();
+    });
+
+    it("completes stale running queries that already have Brave results", async () => {
+      const prisma = createPrismaMock();
+      prisma.searchQuery.updateMany = vi
+        .fn()
+        .mockResolvedValueOnce({ count: 2 })
+        .mockResolvedValueOnce({ count: 1 });
+      const service = new AgentWorkflowService(prisma as any);
+
+      const result = await (service as any).reconcileStaleRunningSearchQueries("task-1");
+
+      expect(result).toEqual({
+        completedWithResults: 2,
+        resetWithoutResults: 1
+      });
+      expect(prisma.searchQuery.updateMany).toHaveBeenNthCalledWith(1, {
+        where: {
+          taskId: "task-1",
+          executionStatus: "running",
+          resultCount: { gt: 0 }
+        },
+        data: { executionStatus: "completed" }
+      });
+      expect(prisma.searchQuery.updateMany).toHaveBeenNthCalledWith(2, {
+        where: {
+          taskId: "task-1",
+          executionStatus: "running",
+          resultCount: { lte: 0 }
+        },
+        data: { executionStatus: "pending" }
+      });
+    });
+
+    it("fills missing advanced queries when recovery finds a partial initial plan", async () => {
+      const prisma = createPrismaMock();
+      prisma.leadTask.findUnique = vi.fn().mockResolvedValue({
+        inputPayload: {
+          productProfileAnalysis: {
+            keyProducts: ["RRU"],
+            productCategories: ["Telecom"],
+            websiteUrls: []
+          },
+          customerProfileAnalysis: {
+            buyerTypes: ["system integrator"],
+            customerScenarios: [],
+            targetMarkets: ["UAE", "Saudi Arabia"]
+          },
+          keywordGroups: {
+            productTerms: ["RRU", "BBU"],
+            buyerRoles: ["telecom system integrator"],
+            scenarioTerms: ["base station maintenance"],
+            marketTerms: ["UAE", "Saudi Arabia"],
+            excludeTerms: []
+          },
+          aiKeywordExpansion: null,
+          profileSignals: {}
+        }
+      });
+      prisma.searchQuery.findMany = vi.fn().mockResolvedValue(
+        Array.from({ length: 16 }, (_, i) => ({
+          query: `existing fast query ${i + 1}`,
+          country: "UAE",
+          strategyTemplate: i < 12 ? "lane-K-K2" : "reverse-customer-network"
+        }))
+      );
+      const service = new AgentWorkflowService(prisma as any);
+      const runSlowSpy = vi
+        .spyOn(service as any, "runSlowPlanningAndAppendGptQueries")
+        .mockResolvedValue({
+          slowResult: { searchQueries: [], fallbackReasons: [] },
+          appendedCount: 14
+        });
+
+      const result = await (service as any).recoverMissingInitialSearchPlanQueries(
+        "task-1",
+        { prompt: "Find GCC telecom buyers", targetCount: 30 },
+        16
+      );
+
+      expect(runSlowSpy).toHaveBeenCalledTimes(1);
+      expect(runSlowSpy.mock.calls[0]?.[3]).toHaveLength(16);
+      expect(runSlowSpy.mock.calls[0]?.[4]).toBe(14);
+      expect(result).toEqual({
+        appendedCount: 14,
+        queryCount: 30,
+        reason: "completed_partial_plan"
+      });
+    });
+  });
+
+  // 2026-05 Stage 2 follow-up: "继续搜索 30 条" path. /search with
+  // appendIfEmpty=true must append a new pending batch when the
+  // existing queue is drained, instead of returning a no-op.
+  describe("appendContinuationSearchQueriesForTask", () => {
+    function buildContinuationPrismaMock() {
+      const prisma = createPrismaMock();
+      prisma.leadTask.findFirst = vi.fn().mockResolvedValue({
+        id: "task-1",
+        targetCount: 20,
+        inputPayload: {
+          prompt: "Find UAE telecom distributors",
+          targetCount: 20,
+          productProfileAnalysis: {
+            keyProducts: ["RRU"],
+            productCategories: ["Telecom"],
+            websiteUrls: []
+          },
+          customerProfileAnalysis: {
+            buyerTypes: ["distributor"],
+            customerScenarios: [],
+            targetMarkets: ["UAE"]
+          },
+          keywordGroups: {
+            productTerms: ["RRU"],
+            buyerRoles: ["telecom distributor"],
+            scenarioTerms: ["base station maintenance"],
+            marketTerms: ["UAE"],
+            excludeTerms: []
+          },
+          aiKeywordExpansion: null,
+          profileSignals: {}
+        }
+      });
+      prisma.searchQuery.count = vi.fn().mockResolvedValue(0);
+      prisma.searchQuery.findMany = vi
+        .fn()
+        .mockResolvedValue([{ query: "old query 1" }, { query: "old query 2" }]);
+      prisma.searchQuery.createMany = vi.fn().mockResolvedValue({ count: 0 });
+      prisma.leadCandidate.findMany = vi.fn().mockResolvedValue([
+        {
+          companyName: "Spectrum MEA",
+          website: "https://spectrummea.com/",
+          sourceUrl: "https://spectrummea.com/"
+        },
+        {
+          companyName: "High Cloud Technologies",
+          website: "https://highcloud.ae/",
+          sourceUrl: "https://highcloud.ae/"
+        }
+      ]);
+      prisma.leadTask.update = vi.fn().mockResolvedValue({});
+      return prisma;
+    }
+
+    it("appends new pending queries when the existing queue is drained", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async (input) => ({
+        queries: simpleAiQueriesForMarkets(input.targetMarkets)
+      }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      // Stub the deeper slow-planning helper so this unit test focuses
+      // on the append-orchestration logic (pending check, user gate,
+      // task touch). The slow planning path itself is already covered
+      // by the createTaskWithTimeline tests above.
+      const runSlowSpy = vi
+        .spyOn(service as any, "runSlowPlanningAndAppendGptQueries")
+        .mockResolvedValue({
+          slowResult: { searchQueries: [], fallbackReasons: [] },
+          appendedCount: 14
+        });
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(runSlowSpy).toHaveBeenCalledTimes(1);
+      // Fixed 30-query batches seed 12 fast Lane K queries + 4 reverse
+      // customer-network queries first, so slow planning receives the
+      // 14-query advanced-search remainder.
+      expect(runSlowSpy.mock.calls[0]?.[3]).toBeDefined();
+      expect(runSlowSpy.mock.calls[0]?.[4]).toBe(14);
+      expect(result).toEqual({ appendedCount: 30, reason: "appended" });
+      const fastRows = prisma.searchQuery.createMany.mock.calls[0]?.[0].data ?? [];
+      expect(new Set(fastRows.map((row: any) => row.operatorSource))).toEqual(
+        new Set(["lane_k_keyword_combination", "reverse_customer_network_mining"])
+      );
+      // Task gets touched back to running so the polling effect resumes.
+      expect(prisma.leadTask.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "task-1" } })
+      );
+    });
+
+    it("skips append when there are still pending queries", async () => {
+      const prisma = buildContinuationPrismaMock();
+      prisma.searchQuery.count = vi.fn().mockResolvedValue(5);
+      const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(result).toEqual({ appendedCount: 0, reason: "pending_remaining" });
+      expect(ai.generateSearchStrategy).not.toHaveBeenCalled();
+      expect(prisma.searchQuery.createMany).not.toHaveBeenCalled();
+    });
+
+    it("falls back to deterministic Lane K continuation queries when GPT throws inside slow planning", async () => {
+      // runSlowPlanning catches its own GPT errors and returns
+      // searchQueries=[]. The continuation path must still be useful
+      // to the user, so runSlowPlanningAndAppendGptQueries falls back
+      // to backend-assembled Lane K combinations instead of returning
+      // a silent no-op.
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async () => {
+        throw new Error("gpt timeout");
+      });
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(result.reason).toBe("appended");
+      expect(result.appendedCount).toBeGreaterThan(0);
+      expect(prisma.searchQuery.createMany).toHaveBeenCalled();
+    });
+
+    it("keeps deterministic continuation queries when the slow-planning orchestrator throws", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      vi.spyOn(service as any, "runSlowPlanningAndAppendGptQueries").mockRejectedValue(
+        new Error("DB write failed")
+      );
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(result).toEqual({ appendedCount: 30, reason: "appended" });
+      expect(prisma.searchQuery.createMany).toHaveBeenCalled();
+    });
+
+    it("keeps deterministic continuation queries when slow planning produces only duplicates", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async (input) => ({
+        queries: simpleAiQueriesForMarkets(input.targetMarkets)
+      }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      vi.spyOn(service as any, "runSlowPlanningAndAppendGptQueries").mockResolvedValue({
+        slowResult: { searchQueries: [], fallbackReasons: [] },
+        appendedCount: 0
+      });
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      expect(result).toEqual({ appendedCount: 16, reason: "appended" });
+      expect(prisma.leadTask.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "task-1" } })
+      );
+    });
+
+    it("rejects when the task does not belong to the user", async () => {
+      const prisma = buildContinuationPrismaMock();
+      prisma.leadTask.findFirst = vi.fn().mockResolvedValue(null);
+      const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      await expect(
+        (service as any).appendContinuationSearchQueriesForTask("user-1", "task-1", {
+          limit: 30
+        })
+      ).rejects.toThrow("Lead task not found");
+    });
+
+    // 2026-05 Stage 2 follow-up: when the AI returns more than the
+    // continuation limit (e.g. 35 queries), runSlowPlanning's slice
+    // cap must trim it before runSlowPlanningAndAppendGptQueries
+    // dedupes + inserts. Verifies the desiredQueryCount=30 path.
+    it("inserts at most `limit` queries when slow planning returns more than that", async () => {
+      const prisma = buildContinuationPrismaMock();
+      const ai = createLeadHuntAiMock(async () => ({ queries: [] }));
+      const service = new AgentWorkflowService(
+        prisma as any,
+        undefined as any,
+        undefined as any,
+        undefined as any,
+        ai as any
+      );
+
+      // Spy runSlowPlanning so we can directly observe whether the
+      // desiredQueryCount param flows through, and so the test
+      // doesn't depend on GPT mock + normalize pass-through.
+      const runSlowSpy = vi.spyOn(service as any, "runSlowPlanning");
+
+      // We still want runSlowPlanningAndAppendGptQueries' real dedupe
+      // + createMany path to fire, so let runSlowPlanning resolve
+      // with a fake slice that respects the cap. The actual real
+      // implementation would also slice via limitPlannedSearchQueries.
+      runSlowSpy.mockImplementation(async (input: any) => {
+        const cap = input.desiredQueryCount ?? 20;
+        // Pretend GPT generated 35 unique queries; respect the cap.
+        const queries = Array.from({ length: 35 }, (_, i) => ({
+          provider: "brave",
+          operatorSource: "brave_official",
+          executionStatus: "pending",
+          operatorName: `op-${i}`,
+          strategyTemplate: "lane-K-K2",
+          query: `continuation candidate ${i + 1}`,
+          keywordGroups: input.fastResult.keywordGroups,
+          country: "Germany",
+          effectivenessScore: 0.5
+        })).slice(0, cap);
+        return {
+          searchQueries: queries,
+          fallbackReasons: [],
+          aiQueryCount: queries.length,
+          gptRefillAttempts: 0,
+          gptRefillAcceptedCount: 0,
+          rejectedAiQueries: []
+        } as any;
+      });
+
+      const result = await (service as any).appendContinuationSearchQueriesForTask(
+        "user-1",
+        "task-1",
+        { limit: 30 }
+      );
+
+      // desiredQueryCount is the advanced-search remainder after the
+      // fixed 12 fast Lane K + 4 reverse customer queries are inserted.
+      expect(runSlowSpy).toHaveBeenCalledTimes(1);
+      expect((runSlowSpy.mock.calls[0]?.[0] as any)?.desiredQueryCount).toBe(14);
+
+      expect(result.reason).toBe("appended");
+      expect(result.appendedCount).toBe(30);
+      const insertedRows = prisma.searchQuery.createMany.mock.calls.flatMap(
+        (call) => call[0]?.data ?? []
+      );
+      expect(insertedRows.length).toBe(30);
+      expect(
+        (insertedRows as Array<{ executionStatus: string; taskId: string }>).every(
+          (row) => row.executionStatus === "pending" && row.taskId === "task-1"
+        )
+      ).toBe(true);
     });
   });
 });

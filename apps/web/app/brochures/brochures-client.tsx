@@ -20,6 +20,7 @@ import {
   WalletCards
 } from "lucide-react";
 import { AppShell } from "../app-shell";
+import { TableLoadingState } from "../table-loading-state";
 
 type ViewKey = "overview" | "create" | "templates" | "addressBook" | "account";
 type TaskTab = "tasks" | "recipients";
@@ -317,7 +318,7 @@ export function BrochuresClient() {
   const [tasks, setTasks] = useState<MailingTask[]>(fallbackTasks);
   const [searchText, setSearchText] = useState("");
   const [templateSearchText, setTemplateSearchText] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [validating, setValidating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [executingTaskId, setExecutingTaskId] = useState<string | null>(null);
@@ -531,14 +532,26 @@ export function BrochuresClient() {
       title="邮寄明信片"
     >
       <section className="brochureShell">
-        <aside className="brochureSubnav" aria-label="邮寄明信片导航">
-          {secondaryNav.map(({ key, label, icon: Icon }) => (
-            <button className={view === key ? "active" : ""} key={key} type="button" onClick={() => setView(key)}>
-              <Icon aria-hidden="true" size={20} />
-              <span>{label}</span>
-            </button>
-          ))}
-        </aside>
+        <header className="brochureTopBar">
+          <div className="brochureTopTitle">
+            <h1>邮寄明信片</h1>
+            <p>给高分客户寄产品册、设备清单、项目介绍。</p>
+          </div>
+          <nav className="brochureTopTabs" aria-label="邮寄明信片导航">
+            {secondaryNav.map(({ key, label, icon: Icon }) => (
+              <button
+                aria-current={view === key ? "page" : undefined}
+                className={view === key ? "active" : ""}
+                key={key}
+                onClick={() => setView(key)}
+                type="button"
+              >
+                <Icon aria-hidden="true" size={15} />
+                <span>{label}</span>
+              </button>
+            ))}
+          </nav>
+        </header>
 
         <section className={view === "overview" ? "brochureWorkspace" : "brochureWorkspace single"}>
           {view === "overview" ? (
@@ -607,6 +620,7 @@ export function BrochuresClient() {
 
           {view === "addressBook" ? (
             <AddressBookPage
+              loading={loading}
               recipients={filteredRecipients}
               searchText={searchText}
               selectedRecipientIds={selectedRecipientIds}
@@ -620,6 +634,7 @@ export function BrochuresClient() {
           {view === "account" ? (
             <AccountPage
               accountTab={accountTab}
+              loading={loading}
               onTabChange={setAccountTab}
               tasks={tasks}
             />
@@ -667,52 +682,36 @@ function OverviewPage({
   onToggleRecipient: (recipientId: string) => void;
   onExecuteTask: (task: MailingTask) => void;
 }) {
+  const visibleLatestTask = loading ? null : latestTask;
+
   return (
     <>
-      <header className="brochureHeader">
-        <div>
-          <h1>邮寄明信片</h1>
-          <p>用于实体明信片/信件触达，适合给高分客户寄产品册、设备清单和项目介绍。</p>
-        </div>
-        <div className="brochureRange" aria-label="时间范围">
-          <button className="active" type="button">
+      <div className="brochureOverviewHeader">
+        <div className="brochureRangeSegment" role="tablist" aria-label="时间范围">
+          <button className="active" type="button" role="tab" aria-selected="true">
             全部
           </button>
-          <button type="button">本日</button>
-          <button type="button">本周</button>
-          <button type="button">本月</button>
+          <button type="button" role="tab" aria-selected="false">本日</button>
+          <button type="button" role="tab" aria-selected="false">本周</button>
+          <button type="button" role="tab" aria-selected="false">本月</button>
         </div>
-      </header>
+      </div>
 
       <div className="brochureMetrics">
         {metrics.map(({ label, value, tone, icon: Icon }) => (
-          <article className="brochureMetric" key={label}>
-            <span className={`brochureMetricIcon ${tone}`}>
-              <Icon aria-hidden="true" size={25} />
+          <article className={`brochureMetric tone-${tone}`} key={label}>
+            <span className="brochureMetricIcon" aria-hidden="true">
+              <Icon size={18} />
             </span>
-            <div>
-              <p>{label}</p>
-              <strong>{loading ? "..." : value}</strong>
-            </div>
+            <p>{label}</p>
+            <strong>{loading ? "..." : value}</strong>
           </article>
         ))}
       </div>
 
       <div className="brochureContent">
         <section className="brochureOverviewCard">
-          <div className="brochureSectionHead">
-            <div>
-              <span>邮寄任务</span>
-              <h2>任务概览</h2>
-            </div>
-          </div>
-
-          <div className="brochureStatusLine">
-            <strong>{statusText}</strong>
-            <span>{latestTask ? `最近任务：${latestTask.taskName}` : "暂无任务"}</span>
-          </div>
-
-          <div className="brochureListHeader">
+          <header className="brochureListHeader">
             <div className="brochureTabs">
               <button className={taskTab === "tasks" ? "active" : ""} type="button" onClick={() => onTabChange("tasks")}>
                 任务列表
@@ -721,20 +720,8 @@ function OverviewPage({
                 收件人列表
               </button>
             </div>
-            <label className="brochureSearch">
-              <Search size={16} aria-hidden="true" />
-              <input value={searchText} onChange={(event) => onSearchChange(event.target.value)} placeholder="任务名、公司或国家" />
-            </label>
-            <button className="brochurePrimary" type="button" onClick={onOpenCreate} data-testid="create-mailing-task">
-              <CirclePlus size={16} aria-hidden="true" />
-              创建任务
-            </button>
-          </div>
-
-          {taskTab === "tasks" ? (
-            <>
+            {taskTab === "tasks" ? (
               <div className="brochureStatusFilters" aria-label="运输状态">
-                <span>运输状态：</span>
                 {[
                   ["all", "全部"],
                   ["completed", "已送达"],
@@ -747,15 +734,46 @@ function OverviewPage({
                     type="button"
                     onClick={() => onStatusFilterChange(key as TaskStatusFilter)}
                   >
-                    <i aria-hidden="true" />
                     {label}
                   </button>
                 ))}
               </div>
-              <MailingTaskTable tasks={filteredTasks} executingTaskId={executingTaskId} onExecuteTask={onExecuteTask} />
-            </>
+            ) : null}
+            <label className="brochureSearch">
+              <Search size={15} aria-hidden="true" />
+              <input
+                value={searchText}
+                onChange={(event) => onSearchChange(event.target.value)}
+                placeholder={taskTab === "tasks" ? "任务名 / 公司 / 国家" : "公司 / 联系人 / 国家"}
+              />
+            </label>
+            <button className="brochurePrimary" type="button" onClick={onOpenCreate} data-testid="create-mailing-task">
+              <CirclePlus size={15} aria-hidden="true" />
+              创建任务
+            </button>
+          </header>
+
+          {(statusText && statusText !== "明信片任务已准备，可创建新任务并执行沙盒调用。") || visibleLatestTask ? (
+            <p className="brochureStatusInline">
+              <span>{statusText}</span>
+              {visibleLatestTask ? <em>最近任务：{visibleLatestTask.taskName}</em> : null}
+            </p>
+          ) : null}
+
+          {taskTab === "tasks" ? (
+            <MailingTaskTable
+              executingTaskId={executingTaskId}
+              loading={loading}
+              onExecuteTask={onExecuteTask}
+              tasks={filteredTasks}
+            />
           ) : (
-            <RecipientTable recipients={filteredRecipients} selectedIds={selectedRecipientIds} onToggle={onToggleRecipient} />
+            <RecipientTable
+              loading={loading}
+              onToggle={onToggleRecipient}
+              recipients={filteredRecipients}
+              selectedIds={selectedRecipientIds}
+            />
           )}
         </section>
       </div>
@@ -1024,6 +1042,7 @@ function TemplateLibraryPage({
 }
 
 function AddressBookPage({
+  loading,
   recipients,
   searchText,
   selectedRecipientIds,
@@ -1032,6 +1051,7 @@ function AddressBookPage({
   onToggleRecipient,
   onValidateAddresses
 }: {
+  loading: boolean;
   recipients: MailingRecipient[];
   searchText: string;
   selectedRecipientIds: string[];
@@ -1064,24 +1084,31 @@ function AddressBookPage({
       </div>
 
       <div className="brochureStatusLine slim">
-        <strong>已收录 {recipients.length} 位收件人</strong>
+        <strong>{loading ? "正在同步收件人" : `已收录 ${recipients.length} 位收件人`}</strong>
         <button className="brochureGhost" type="button" onClick={onValidateAddresses} disabled={validating || !selectedRecipientIds.length}>
           <MapPinCheck size={16} aria-hidden="true" />
           {validating ? "检测中..." : "检测已选地址"}
         </button>
       </div>
 
-      <RecipientAddressTable recipients={recipients} selectedIds={selectedRecipientIds} onToggle={onToggleRecipient} />
+      <RecipientAddressTable
+        loading={loading}
+        onToggle={onToggleRecipient}
+        recipients={recipients}
+        selectedIds={selectedRecipientIds}
+      />
     </section>
   );
 }
 
 function AccountPage({
   accountTab,
+  loading,
   tasks,
   onTabChange
 }: {
   accountTab: AccountTab;
+  loading: boolean;
   tasks: MailingTask[];
   onTabChange: (tab: AccountTab) => void;
 }) {
@@ -1115,7 +1142,7 @@ function AccountPage({
             </article>
             <article>
               <CalendarDays aria-hidden="true" size={24} />
-              <strong>${totalSpend.toFixed(2)}</strong>
+              <strong>{loading ? "..." : `$${totalSpend.toFixed(2)}`}</strong>
               <span>累计消耗</span>
             </article>
           </div>
@@ -1124,7 +1151,7 @@ function AccountPage({
             <div>
               <h2>账单列表</h2>
               <p>
-                当前结果：{tasks.length} 次邮寄记录，总计消耗：${totalSpend.toFixed(2)}
+                {loading ? "正在同步邮寄记录" : `当前结果：${tasks.length} 次邮寄记录，总计消耗：$${totalSpend.toFixed(2)}`}
               </p>
             </div>
             <label className="brochureDateRange">
@@ -1135,34 +1162,41 @@ function AccountPage({
             </label>
           </div>
 
-          <div className="brochureTableWrap">
-            <table className="brochureTable">
-              <thead>
-                <tr>
-                  <th>任务名称</th>
-                  <th>收件人数</th>
-                  <th>金额($)</th>
-                  <th>时间</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tasks.length ? (
-                  tasks.map((task) => (
-                    <tr key={task.id}>
-                      <td>{task.taskName}</td>
-                      <td>{task.recipientCount}</td>
-                      <td>{task.amountUsd.toFixed(2)}</td>
-                      <td>{formatDate(task.executedAt ?? task.createdAt)}</td>
-                    </tr>
-                  ))
-                ) : (
+          {loading ? (
+            <TableLoadingState
+              title="正在加载邮寄账单"
+              description="正在同步任务记录、金额和执行时间。"
+            />
+          ) : (
+            <div className="brochureTableWrap">
+              <table className="brochureTable">
+                <thead>
                   <tr>
-                    <td colSpan={4}>暂无数据</td>
+                    <th>任务名称</th>
+                    <th>收件人数</th>
+                    <th>金额($)</th>
+                    <th>时间</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {tasks.length ? (
+                    tasks.map((task) => (
+                      <tr key={task.id}>
+                        <td>{task.taskName}</td>
+                        <td>{task.recipientCount}</td>
+                        <td>{task.amountUsd.toFixed(2)}</td>
+                        <td>{formatDate(task.executedAt ?? task.createdAt)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={4}>暂无数据</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </>
       ) : (
         <div className="brochurePricePage">
@@ -1206,13 +1240,24 @@ function AccountPage({
 
 function MailingTaskTable({
   tasks,
+  loading,
   executingTaskId,
   onExecuteTask
 }: {
   tasks: MailingTask[];
+  loading: boolean;
   executingTaskId: string | null;
   onExecuteTask: (task: MailingTask) => void;
 }) {
+  if (loading) {
+    return (
+      <TableLoadingState
+        title="正在加载邮寄任务"
+        description="正在同步任务状态、收件人数和费用。"
+      />
+    );
+  }
+
   return (
     <div className="brochureTableWrap">
       <table className="brochureTable">
@@ -1274,13 +1319,24 @@ function MailingTaskTable({
 
 function RecipientTable({
   recipients,
+  loading,
   selectedIds,
   onToggle
 }: {
   recipients: MailingRecipient[];
+  loading: boolean;
   selectedIds: string[];
   onToggle: (recipientId: string) => void;
 }) {
+  if (loading) {
+    return (
+      <TableLoadingState
+        title="正在加载收件人列表"
+        description="正在同步客户地址、联系人和检测状态。"
+      />
+    );
+  }
+
   return (
     <div className="brochureTableWrap">
       <table className="brochureTable">
@@ -1325,13 +1381,24 @@ function RecipientTable({
 
 function RecipientAddressTable({
   recipients,
+  loading,
   selectedIds,
   onToggle
 }: {
   recipients: MailingRecipient[];
+  loading: boolean;
   selectedIds: string[];
   onToggle: (recipientId: string) => void;
 }) {
+  if (loading) {
+    return (
+      <TableLoadingState
+        title="正在加载地址簿"
+        description="正在同步收件公司、地址和邮编信息。"
+      />
+    );
+  }
+
   return (
     <div className="brochureTableWrap">
       <table className="brochureTable address">

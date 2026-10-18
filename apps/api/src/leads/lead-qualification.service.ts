@@ -166,22 +166,17 @@ type EvidenceLeadClassification = {
   risk: string;
 };
 
-// 2026-05: contact-probe budgets relaxed for GCC/SEA sites that
-// commonly sit behind a CDN with 4-6s TTFB or render contact info via
-// JS. Old values were 5s timeout / 6 main pages / 3 linked pages,
-// which timed out on roughly half of legitimate target-country sites
-// (notably .ae integrators with React shells and slow CDNs). Bumped
-// to 9s after observing blackcatqatar.com (Qatar EPC) responding in
-// 4-5s normally but occasionally spiking to 7-8s during peak hours.
-// 12s was too aggressive — it made each candidate take 30-60s total
-// when multiple URLs were slow, dragging the whole task to 25+ min.
+// Contact probing balances recall with task runtime: keep the timeout tight,
+// but visit enough high-value direct and linked pages for multilingual sites.
 const contactProbeTimeoutMs = 8000;
-const contactProbePageLimit = 8;
-const contactLinkedProbePageLimit = 5;
+const contactProbePageLimit = 16;
+const contactLinkedProbePageLimit = 8;
 const maxAiCandidateEvaluationsPerBatch = 15;
 
 @Injectable()
 export class LeadQualificationService {
+  private readonly candidateSaveLocks = new Map<string, Promise<void>>();
+
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   normalizeSearchResults(
@@ -207,6 +202,22 @@ export class LeadQualificationService {
     const risks: string[] = [];
     let score = 0;
     let forcedStatus: IcpScoreDraft["status"] | null = null;
+    // 2026-05 Stage 2 follow-up: when set, the candidate is a
+    // verified-off-target hard reject; the final score is capped
+    // BELOW the main-pool threshold AFTER any later +score steps
+    // (contactScore, buyer-role floor) so the row can't be rescued
+    // back into review/qualified.
+    let verifiedOffTargetCountryReject = false;
+    // 2026-05 Stage 2 follow-up: same hard-reject mechanism for
+    // off-industry candidates. detectOffIndustryBucket scans for
+    // medical / SaaS / finance / consumer-retail / etc. signals and
+    // returns the bucket name when (a) the candidate trips ≥2 hits
+    // in one bucket, (b) target product/customer keywords are NOT
+    // members of that bucket (so a SaaS-target user looking for
+    // MongoDB stays in the running), and (c) the candidate has no
+    // specific product term and no target customer-type term to
+    // override the off-industry signal.
+    let offIndustryBucketReject: string | null = null;
     const pageType = classifyCandidatePage(candidate, criteria);
     const pageQuality = assessPageQuality(candidate, criteria, pageType);
     const evidenceClassification = classifyEvidenceLead(candidate, criteria, pageType);
@@ -251,6 +262,26 @@ export class LeadQualificationService {
     if (hasIndustryContextSignal) {
       score += 20;
       reasons.push("Matches relevant product, industry, or buyer context");
+    }
+
+    // 2026-05 Stage 2 follow-up: off-industry hard reject. If the
+    // candidate's text trips ≥2 hits inside an off-industry bucket
+    // (medical/SaaS/etc.), AND the target's own product/customer
+    // keywords aren't members of that bucket (self-guard for
+    // SaaS-target users actually looking for MongoDB), AND there is
+    // no specific product term + no target customer-type term in
+    // the candidate text to override, force-reject below.
+    offIndustryBucketReject = detectOffIndustryBucket(text, {
+      productKeywords: criteria.productKeywords,
+      customerTypeKeywords: criteria.customerTypeKeywords,
+      hasSpecificProductSignal,
+      hasTargetCustomerType
+    });
+    if (offIndustryBucketReject) {
+      forcedStatus = "rejected";
+      risks.push(
+        `Off-industry signal: candidate looks like ${offIndustryBucketReject} content unrelated to the target product/customer`
+      );
     }
 
     if (hasSpecificProductSignal) {
@@ -298,8 +329,12 @@ export class LeadQualificationService {
         countryValidation.countryConfidence === "unknown");
     const sourceQueryCountryMismatch = Boolean(
       countryValidation.inferredCountry &&
-        candidate.queryCountry &&
-        !matchesTargetRegion(countryValidation.inferredCountry, [candidate.queryCountry])
+      candidate.queryCountry &&
+      !matchesTargetRegion(countryValidation.inferredCountry, [candidate.queryCountry])
+    );
+    const countryConflictOnlyOffTarget = countryConflictHasOnlyOffTargetEvidence(
+      countryValidation,
+      criteria.targetRegions
     );
 
     if (
@@ -316,15 +351,33 @@ export class LeadQualificationService {
         );
       }
     } else if (targetCountryMismatch) {
-      // 2026-05: country mismatch is a soft signal. We deduct 20 but
-      // do NOT hard-cap the score, so candidates with weak country
-      // evidence (e.g. country=null from missing contact-page probe)
-      // can still pass through if they have strong product+role
-      // signals. The earlier "hard cap at 49" was too aggressive — it
-      // killed 80% of legitimate candidates whose country was simply
-      // not yet verified.
-      score -= 20;
-      risks.push("Official country evidence does not match the selected target markets");
+      // 2026-05 Stage 2 follow-up: hard reject when the candidate's
+      // country is verified (high/medium confidence, no conflict) AND
+      // proven to be outside the selected target markets. Earlier
+      // versions kept these as "new-market exploration" leads with
+      // only -20 score penalty, but the buyer-role floor below would
+      // routinely rescue US/UK/FR sellers (HCT, MongoDB, Cisco, etc.)
+      // back into the main pool of a Germany-targeted task. Verified
+      // off-target = settled fact, not a soft hint, so we drain the
+      // score AND force the status, ensuring buyer-role floor cannot
+      // override (it explicitly skips when forcedStatus === "rejected").
+      //
+      // Lower-confidence cases (low / unknown / countryConflict) still
+      // fall through to the soft-signal branches below, so candidates
+      // with truly missing / ambiguous country evidence keep their
+      // chance to surface for human review.
+      const verifiedOffTargetCountry = targetCountryVerified && !countryValidation.countryConflict;
+      if (verifiedOffTargetCountry) {
+        verifiedOffTargetCountryReject = true;
+        forcedStatus = "rejected";
+        risks.push("Verified candidate country is outside the selected target markets");
+      } else {
+        // Unverified / conflicting country mismatches stay soft so a
+        // candidate with weak country evidence can still pass through
+        // on strong product+role signals.
+        score -= 20;
+        risks.push("Official country evidence does not match the selected target markets");
+      }
     } else if (!hasTargetMarketConstraint && hasAny(text, criteria.targetRegions)) {
       score += 10;
       reasons.push("Mentions target market");
@@ -333,6 +386,13 @@ export class LeadQualificationService {
     }
 
     if (countryValidation.countryConflict) {
+      if (countryConflictOnlyOffTarget) {
+        verifiedOffTargetCountryReject = true;
+        forcedStatus = "rejected";
+        risks.push(
+          "Country evidence conflicts, but none of the verified country signals match the selected target markets"
+        );
+      }
       // Country conflicts (e.g. evidence points to two different
       // countries) used to force a separate review state. Per the
       // 2026-05 country-validation rework, we no longer split country
@@ -367,7 +427,19 @@ export class LeadQualificationService {
     }
 
     const riskyTerms = [...defaultRiskTerms, ...(criteria.disqualifiers ?? [])].filter(Boolean);
-    const matchedRisks = riskyTerms.filter((term) => text.includes(term.toLowerCase()));
+    // 2026-05 Stage 2 follow-up (P2): negation-context aware match.
+    // Plain text.includes(term) used to fire on phrases like
+    //   "We do not sell consumer mobile phones"
+    //   "no jobs page"
+    //   "this site has no marketplace listings"
+    // — pushing the candidate into a -20 penalty even though the
+    // negative term was being explicitly rejected by the candidate's
+    // own copy. containsOutsideNegationContext walks every match and
+    // skips the ones that are governed by an immediately preceding
+    // negation cue ("do not", "don't", "no ", "without", "except",
+    // "exclude", "never", "instead of", etc.). True off-target text
+    // ("Job openings: Senior Sales") still trips the penalty.
+    const matchedRisks = riskyTerms.filter((term) => containsOutsideNegationContext(text, term));
     if (matchedRisks.length > 0) {
       score -= 20;
       risks.push(`Contains disqualifying terms: ${matchedRisks.slice(0, 4).join(", ")}`);
@@ -440,14 +512,15 @@ export class LeadQualificationService {
       );
     }
 
-    if (targetCountryMismatch) {
-      // Country mismatch is now a soft signal, not a score floor.
-      // We keep the candidate in the running ("opening a new market")
-      // and only let downstream scoring decide.
-      risks.push(
-        "Verified candidate country differs from selected target markets; treated as new-market exploration"
-      );
-    }
+    // 2026-05 Stage 2 follow-up: removed the legacy duplicate
+    // "Verified candidate country differs from selected target markets;
+    // treated as new-market exploration" risk push. The country mismatch
+    // branch above already emits the right risk for both paths:
+    //   - hard reject: "Verified candidate country is outside the selected target markets"
+    //   - soft mismatch: "Official country evidence does not match the selected target markets"
+    // Re-pushing here would either duplicate the soft message or
+    // contradict the hard-reject decision (claiming the row is "kept
+    // as new-market exploration" while status === "rejected").
 
     // targetCountryUnverified no longer reduces the score. The 2026-05
     // policy is "country unconfirmed → still go to review". Old code
@@ -548,6 +621,21 @@ export class LeadQualificationService {
     }
     // ---- end customer-role floor ----
 
+    // 2026-05 Stage 2 follow-up: verified-off-target candidates must
+    // never come back above the main-pool threshold even after
+    // contactScore + buyer-role floor have run. Cap right before
+    // finalScore so it survives every later additive bump.
+    if (verifiedOffTargetCountryReject) {
+      score = Math.min(score, 39);
+    }
+    // 2026-05 Stage 2 follow-up: same final cap for off-industry
+    // hard reject. forcedStatus blocks buyer-role floor; the cap
+    // here defends against contactScore + any later positive bumps
+    // that ran before this point.
+    if (offIndustryBucketReject) {
+      score = Math.min(score, 39);
+    }
+
     const finalScore = clamp(Math.round(score), 0, 100);
     const grade = finalScore >= 75 ? "high" : finalScore >= 50 ? "medium" : "low";
     const hardRejectedPage =
@@ -595,6 +683,38 @@ export class LeadQualificationService {
   }
 
   async saveCandidates(
+    taskId: string,
+    results: BraveSearchResult[],
+    criteria: IcpScoringCriteria,
+    defaultCountry?: string,
+    aiEvaluator?: CandidateAiEvaluator
+  ) {
+    return this.withTaskCandidateSaveLock(taskId, () =>
+      this.saveCandidatesUnlocked(taskId, results, criteria, defaultCountry, aiEvaluator)
+    );
+  }
+
+  private async withTaskCandidateSaveLock<T>(taskId: string, run: () => Promise<T>) {
+    const previous = this.candidateSaveLocks.get(taskId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous.catch(() => undefined).then(() => current);
+    this.candidateSaveLocks.set(taskId, chained);
+
+    await previous.catch(() => undefined);
+    try {
+      return await run();
+    } finally {
+      release();
+      if (this.candidateSaveLocks.get(taskId) === chained) {
+        this.candidateSaveLocks.delete(taskId);
+      }
+    }
+  }
+
+  private async saveCandidatesUnlocked(
     taskId: string,
     results: BraveSearchResult[],
     criteria: IcpScoringCriteria,
@@ -673,11 +793,12 @@ export class LeadQualificationService {
         aiEvaluationsUsed += 1;
       }
       const icp = aiEvaluation ? mergeAiEvaluationWithRuleScore(ruleIcp, aiEvaluation) : ruleIcp;
+      const storedCompanyName = chooseStoredCompanyName(enrichedCandidate, aiEvaluation);
 
       const record = await this.prisma.leadCandidate.create({
         data: {
           taskId,
-          companyName: enrichedCandidate.companyName,
+          companyName: storedCompanyName,
           website: enrichedCandidate.website,
           // 2026-05 (Q1=A): when country is verified we use the verified
           // value; when it is unconfirmed we fall back to the queryCountry
@@ -770,6 +891,10 @@ function shouldEvaluateCandidateWithAi(
   // we already know the company is in a different region and we don't
   // want to spend GPT budget classifying it.
   const countryValidation = validatedCountry(candidate);
+  if (countryConflictHasOnlyOffTargetEvidence(countryValidation, criteria.targetRegions)) {
+    return false;
+  }
+
   if (
     hasTargetRegionConstraint(criteria.targetRegions) &&
     countryValidation.inferredCountry &&
@@ -929,6 +1054,18 @@ function mergeAiEvaluationWithRuleScore(
   };
 }
 
+function chooseStoredCompanyName(
+  candidate: NormalizedLeadCandidate,
+  aiEvaluation: CandidateBuyerEvaluation | null
+) {
+  const aiCompanyName = aiEvaluation?.companyName?.trim();
+  if (!aiEvaluation || !aiCompanyName || aiEvaluation.confidence < 0.55) {
+    return candidate.companyName;
+  }
+
+  return chooseBestCompanyName(candidate.companyName, candidate.website, [aiCompanyName]);
+}
+
 function hasAiCompanyNameQualityRisk(ai: CandidateBuyerEvaluation) {
   const text = [...(ai.risks ?? []), ...(ai.matchedSignals ?? [])].join(" ").toLowerCase();
   return /company\s+name|wrong\s+name|looks\s+wrong|site[-\s]?builder|created\s+by|designed\s+by|powered\s+by|template\s+label|page\s+title/.test(
@@ -1035,6 +1172,25 @@ function extractCompanyName(title: string, url: string) {
     return domainCompany || "Unknown Company";
   }
 
+  // 2026-05 V1-MVP+: prefer the domain when the page title is a generic
+  // OEM-partner / channel-program label that does not name the actual
+  // operator. Brave often returns titles like "Huawei Partners",
+  // "Authorized Distributor", "ZTE Solutions" for buyer-side companies
+  // whose real brand only shows up in the domain. Without this branch
+  // the lead row reads "Huawei Partners → neodatatechnologies.com"
+  // which is confusing in the candidate table.
+  if (looksLikeOemPartnerTitle(title) && domainCompany) {
+    return domainCompany;
+  }
+
+  if (
+    domainCompany &&
+    looksLikeBrandOnlyTitle(title) &&
+    normalizeCompanyKey(domainCompany) !== normalizeCompanyKey(title)
+  ) {
+    return domainCompany;
+  }
+
   const parts = title
     .split(/\s(?:[-–—|:»]\s)+|\s[|]\s/)
     .map((part) => cleanupCompanyName(part))
@@ -1046,17 +1202,39 @@ function extractCompanyName(title: string, url: string) {
   return selected || domainCompany || "Unknown Company";
 }
 
+// 2026-05 V1-MVP+: detect titles that describe a partner/channel program
+// rather than the company itself. These titles must never override the
+// domain-derived company name (e.g. "Huawei Partners" should not become
+// the operator's name when the operator is actually NeoData).
+function looksLikeOemPartnerTitle(value: string) {
+  const lower = cleanupCompanyName(value).toLowerCase();
+  return (
+    /^(?:huawei|zte|ericsson|nokia|alcatel-lucent|cisco|samsung|fortinet|hpe|juniper|dell|lenovo|microsoft|aws|google|sap|oracle|ibm|sophos|ruckus|aruba|extreme)\s+(?:partners?|partnership|partner program|authorized\s+(?:partner|distributor|reseller|dealer)|elite\s+partner|gold\s+partner|silver\s+partner|certified\s+partner|solutions?(?:\s+partner)?|technology\s+partner|alliance|ecosystem)$/i.test(
+      lower
+    ) ||
+    /^(?:authorized|official|certified)\s+(?:distributor|reseller|dealer|partner)$/i.test(lower) ||
+    /^(?:partners?|partnership|partner program|alliance|ecosystem)$/i.test(lower)
+  );
+}
+
+function looksLikeBrandOnlyTitle(value: string) {
+  const lower = cleanupCompanyName(value).toLowerCase();
+  return /^(?:huawei|zte|ericsson|nokia|alcatel-lucent|cisco|samsung|fortinet|hpe|juniper|dell|lenovo|microsoft|aws|google|sap|oracle|ibm|sophos|ruckus|aruba|extreme)$/.test(
+    lower
+  );
+}
+
 function cleanupCompanyName(value: string) {
   return value
-    .replace(/\b(home|official site|website|about us|contact us|logo)\b/gi, "")
-    .replace(/^\s*(?:welcome to|official)\s+/i, "")
-    // 2026-05 V1-MVP+: strip "by " prefix that leaks from attribution
-    // patterns in page titles (e.g. "by Qatar Multitech Trading...").
-    .replace(/^\s*by\s+/i, "")
-    .replace(siteBuilderCreditPrefixPattern, "")
-    .replace(/\s+\b(?:homepage|home page)\b$/i, "")
-    .replace(/\s+/g, " ")
-    .replace(/^[|:：/\\\-\s]+|[|:：/\\\-\s]+$/g, "")
+      .replace(/\b(home|official site|website|about us|contact us|logo)\b/gi, "")
+      .replace(/^\s*(?:welcome to|official)\s+/i, "")
+      // 2026-05 V1-MVP+: strip "by " prefix that leaks from attribution
+      // patterns in page titles (e.g. "by Qatar Multitech Trading...").
+      .replace(/^\s*by\s+/i, "")
+      .replace(siteBuilderCreditPrefixPattern, "")
+      .replace(/\s+\b(?:homepage|home page)\b$/i, "")
+      .replace(/\s+/g, " ")
+      .replace(/^[|:：/\\\-\s]+|[|:：/\\\-\s]+$/g, "")
     .trim();
 }
 
@@ -1082,7 +1260,10 @@ function isGenericTitle(value: string) {
 }
 
 function isForbiddenCompanyName(value: string) {
-  const normalized = cleanupCompanyName(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normalized = cleanupCompanyName(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
   return (
     !normalized ||
     forbiddenCompanyNameTerms.has(normalized) ||
@@ -1099,7 +1280,9 @@ function isForbiddenCompanyName(value: string) {
     //   - "Top 10 Telecom Companies in Qatar"
     //   - "How to Choose a Telecom Provider"
     //   - "What is 5G Technology"
-    /\b(?:which\s+(?:one|is)|how\s+to|what\s+is|top\s+\d+|best\s+\d+|vs\.?\s|versus)\b/i.test(value) ||
+    /\b(?:which\s+(?:one|is)|how\s+to|what\s+is|top\s+\d+|best\s+\d+|vs\.?\s|versus)\b/i.test(
+      value
+    ) ||
     // Long names with colons are almost always page titles, not
     // company names (e.g. "Telecom services: project management and
     // certification"). Real company names with colons are extremely
@@ -1117,6 +1300,14 @@ function isLikelyCompanyName(value: string, domainCompany: string | null) {
   const name = cleanupCompanyName(value);
   const lower = name.toLowerCase();
   if (!name || name.length > 72 || isGenericTitle(name) || isForbiddenCompanyName(name)) {
+    return false;
+  }
+
+  if (
+    domainCompany &&
+    looksLikeBrandOnlyTitle(name) &&
+    normalizeCompanyKey(name) !== normalizeCompanyKey(domainCompany)
+  ) {
     return false;
   }
 
@@ -1153,7 +1344,7 @@ function looksLikeProductTitle(value: string) {
         "bbu",
         "aau",
         "networking equipment",
-      "hardware repair"
+        "hardware repair"
       ]))
   );
 }
@@ -1327,14 +1518,14 @@ function assessCountryValidation(candidate: NormalizedLeadCandidate) {
   // has a Qatar branch, so we infer Qatar.
   let inferredCountry: string | null = null;
   let countryConflict = evidenceConflict;
-  let countryConflictCountries = countryConflict ? uniqueCountries(candidateCountries) : [];
+  const countryConflictCountries = countryConflict ? uniqueCountries(candidateCountries) : [];
 
   if (candidateCountries.length === 1) {
     inferredCountry = candidateCountries[0]!;
   } else if (evidenceConflict && candidate.queryCountry) {
     const queryCountryNorm = normalizeCountry(candidate.queryCountry);
-    const matchingCountry = candidateCountries.find(
-      (c) => countryMatchesTarget(c, queryCountryNorm)
+    const matchingCountry = candidateCountries.find((c) =>
+      countryMatchesTarget(c, queryCountryNorm)
     );
     if (matchingCountry) {
       // Resolve the conflict in favor of the local branch that matches
@@ -1869,9 +2060,7 @@ function looksLikeTemplatePhoneNumber(phone: string) {
   const digits = digitsOnly(phone);
   if (
     /^(?:38640(?:222555|44445555)|15551234567|1800458556)$/.test(digits) ||
-    /(?:000000|111111|222222|333333|444444|555555|666666|777777|888888|999999)/.test(
-      digits
-    )
+    /(?:000000|111111|222222|333333|444444|555555|666666|777777|888888|999999)/.test(digits)
   ) {
     return true;
   }
@@ -2238,7 +2427,9 @@ function looksLikeTier1MobileOperator(
         .toLowerCase();
       const isVendorPage =
         /vendor|supplier|procurement|tender|rfp|rfq|registration/i.test(path) ||
-        /vendor\s*(?:registration|relations|portal)|supplier\s*registration|procurement\s*portal/i.test(text);
+        /vendor\s*(?:registration|relations|portal)|supplier\s*registration|procurement\s*portal/i.test(
+          text
+        );
       if (!isVendorPage) {
         return true;
       }
@@ -2418,17 +2609,13 @@ function looksLikeCertificationOrInspectionService(
   // 2) Text-based detection: need 2+ certification signals AND no
   //    buyer-role signals to reject.
   const lowerText = text.toLowerCase();
-  const certHits = CERTIFICATION_TEXT_SIGNALS.filter((signal) =>
-    lowerText.includes(signal)
-  );
+  const certHits = CERTIFICATION_TEXT_SIGNALS.filter((signal) => lowerText.includes(signal));
   if (certHits.length < 2) {
     return false;
   }
 
   // Check for buyer-role signals that would override the rejection.
-  const hasBuyerRole = BUYER_ROLE_SIGNALS.some((signal) =>
-    lowerText.includes(signal)
-  );
+  const hasBuyerRole = BUYER_ROLE_SIGNALS.some((signal) => lowerText.includes(signal));
   if (hasBuyerRole) {
     return false;
   }
@@ -2438,10 +2625,11 @@ function looksLikeCertificationOrInspectionService(
 
 function looksLikeTrainingOrCourseSite(candidate: NormalizedLeadCandidate, text: string) {
   const path = pathFromUrl(candidate.sourceUrl).toLowerCase();
-  const domain = (candidate.website
-    ? domainFromUrl(candidate.website)
-    : domainFromUrl(candidate.sourceUrl)
-  )?.toLowerCase() ?? "";
+  const domain =
+    (candidate.website
+      ? domainFromUrl(candidate.website)
+      : domainFromUrl(candidate.sourceUrl)
+    )?.toLowerCase() ?? "";
 
   // Domain or path explicitly references coaching / civil-service
   // exam preparation / academy.
@@ -2689,10 +2877,10 @@ function isRiskyDiscoveryPage(candidate: NormalizedLeadCandidate) {
 
   return Boolean(
     (domain && (isBlockedContentDomain(domain) || isBlockedMarketplaceDomain(domain))) ||
-      looksLikeKnowledgeContentPage(candidate) ||
-      looksLikeArticlePath(path) ||
-      looksLikeContentTitle(candidate.companyName) ||
-      hasAny(text, contentNoiseTerms)
+    looksLikeKnowledgeContentPage(candidate) ||
+    looksLikeArticlePath(path) ||
+    looksLikeContentTitle(candidate.companyName) ||
+    hasContentNoiseSignal(text)
   );
 }
 
@@ -2786,79 +2974,86 @@ function looksLikeDirectCompanyEvidence(candidate: NormalizedLeadCandidate) {
 }
 
 function contactProbeUrls(website: string, sourceUrl: string) {
-  const urls = new Set<string>();
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  const addUrl = (value: string) => {
+    const normalized = normalizeProbeUrl(value);
+    if (!normalized || seen.has(normalized.key)) {
+      return;
+    }
+    seen.add(normalized.key);
+    urls.push(normalized.url);
+  };
+
   try {
     const parsed = new URL(website);
     const origin = parsed.origin;
-    urls.add(origin);
-    urls.add(website);
-    urls.add(sourceUrl);
+    addUrl(origin);
+    addUrl(sourceUrl);
+    addUrl(website);
     for (const path of contactPagePathCandidates(sourceUrl, website)) {
-      urls.add(`${origin}${path}`);
-    }
-    for (const path of [
-      "/about",
-      "/about-us",
-      "/company",
-      "/who-we-are",
-      "/our-team",
-      "/team",
-      "/our-offices",
-      "/our-locations",
-      "/locations",
-      "/offices",
-      "/imprint",
-      "/legal-notice",
-      "/support",
-      "/sales",
-      "/request-a-quote",
-      "/quote"
-    ]) {
-      urls.add(`${origin}${path}`);
+      addUrl(`${origin}${path}`);
     }
   } catch {
-    urls.add(sourceUrl);
+    addUrl(sourceUrl);
   }
 
-  return [...urls].slice(0, contactProbePageLimit);
+  return urls.slice(0, contactProbePageLimit);
+}
+
+function normalizeProbeUrl(value: string) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    if (url.pathname === "/" && !url.search) {
+      return { url: url.origin, key: url.origin };
+    }
+    return { url: url.toString(), key: url.toString() };
+  } catch {
+    const trimmed = value.trim();
+    return trimmed ? { url: trimmed, key: trimmed } : null;
+  }
 }
 
 function contactPagePathCandidates(...urls: string[]) {
-  const prefixes = new Set<string>([""]);
+  const observedPrefixes = new Set<string>();
   for (const url of urls) {
     const prefix = installBasePathPrefix(url);
     if (prefix) {
-      prefixes.add(prefix);
+      observedPrefixes.add(prefix);
     }
   }
-  prefixes.add("/wp");
 
-  // 2026-05: high-frequency contact paths come first. The previous
-  // ordering iterated `suffixes.flatMap(s => prefixes.map(p => p+s))`
-  // which interleaved every suffix with every prefix; with prefix list
-  // size >= 3 (root + sub-path + /wp), only the first 2-3 distinct
-  // suffixes ever survived the contactProbePageLimit cutoff. That meant
-  // `/contact-us` was almost always cut off on sites whose source URL
-  // had a sub-path. We now iterate the OTHER way: for each suffix in
-  // priority order, emit the empty-prefix path first, then sub-path
-  // and /wp variants. The most likely paths therefore land at the top
-  // of the URL list and survive truncation.
-  const highPrioritySuffixes = [
-    "/contact",
-    "/contactus",
-    "/contact-us",
-    "/contacts",
+  // The 4 contact-page forms users actually click on most modern sites.
+  const topRootContactPaths = ["/contact", "/contact-us", "/contacts", "/contactus"];
+
+  // English-locale variants right after the root contact paths. Winncom
+  // exposes /en/contacts, while NESIC keeps contact data on about.php?lang=en.
+  const enLocaleContactPaths = [
+    "/en/contact",
+    "/en/contact-us",
+    "/en/contacts",
+    "/en/contactus",
+    "/about.php?lang=en"
+  ];
+
+  const observedPrefixContactPaths = [...observedPrefixes].flatMap((prefix) =>
+    topRootContactPaths.map((suffix) => `${prefix}${suffix}`)
+  );
+  const wpContactPaths = topRootContactPaths.map((suffix) => `/wp${suffix}`);
+
+  // Trailing-slash and .html variants of the root contact paths, plus common
+  // verbal forms ("get in touch", "reach us", "connect").
+  const rootContactVariants = [
     "/contact/",
-    "/contactus/",
     "/contact-us/",
     "/contacts/",
+    "/contactus/",
     "/contact.html",
-    "/contactus.html",
     "/contact-us.html",
+    "/contactus.html",
     "/get-in-touch",
     "/get-in-touch/",
-    "/get-in-touch-with-us",
-    "/get-in-touch-customers",
     "/getintouch",
     "/getintouch/",
     "/reach-us",
@@ -2866,7 +3061,15 @@ function contactPagePathCandidates(...urls: string[]) {
     "/connect",
     "/connect/"
   ];
-  const lowPrioritySuffixes = [
+
+  const prefixedContactVariants = ["/contact/", "/contact-us/", "/contacts/", "/contactus/"];
+
+  // Lower-value fallbacks. /about, /company are intentionally NOT in
+  // this list; they almost never carry contact info on modern sites
+  // and waste probe budget. The contactLinkPathTerms list already lets
+  // us follow about/company anchors discovered on the homepage when
+  // they exist.
+  const otherFallbackPaths = [
     "/our-team",
     "/our-team/",
     "/team",
@@ -2896,22 +3099,20 @@ function contactPagePathCandidates(...urls: string[]) {
     "/offices",
     "/offices/"
   ];
-  const orderedPrefixes = ["", ...[...prefixes].filter((prefix) => prefix !== "")];
-  const allSuffixes = [...highPrioritySuffixes, ...lowPrioritySuffixes];
-  const candidates: string[] = [];
-  // First pass: emit all suffixes with empty prefix (highest priority —
-  // these are the most likely contact page paths on any site).
-  for (const suffix of allSuffixes) {
-    candidates.push(suffix);
-  }
-  // Second pass: emit sub-path and /wp variants for high-priority
-  // suffixes only (these are fallbacks for sites with path prefixes).
-  for (const suffix of highPrioritySuffixes) {
-    for (const prefix of orderedPrefixes) {
-      if (prefix === "") continue; // already emitted above
-      candidates.push(`${prefix}${suffix}`);
-    }
-  }
+
+  const candidates: string[] = [
+    ...topRootContactPaths,
+    ...enLocaleContactPaths,
+    ...observedPrefixContactPaths,
+    ...wpContactPaths,
+    ...rootContactVariants,
+    ...[...observedPrefixes].flatMap((prefix) =>
+      prefixedContactVariants.map((suffix) => `${prefix}${suffix}`)
+    ),
+    ...prefixedContactVariants.map((suffix) => `/wp${suffix}`),
+    ...otherFallbackPaths
+  ];
+
   return uniqueStrings(candidates);
 }
 
@@ -2961,7 +3162,24 @@ function installBasePathPrefix(url: string) {
 }
 
 async function fetchProbePages(urls: string[]) {
-  return Promise.all(uniqueStrings(urls).map(async (url) => ({ url, html: await fetchText(url) })));
+  const uniqueUrls = uniqueStrings(urls);
+  const results: Array<{ url: string; html: string }> = [];
+  const concurrency = 4;
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < uniqueUrls.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      const url = uniqueUrls[currentIndex]!;
+      results[currentIndex] = { url, html: await fetchText(url) };
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, uniqueUrls.length) }, () => worker())
+  );
+  return results.filter(Boolean);
 }
 
 function extractContactLinks(html: string, baseUrl: string) {
@@ -2993,11 +3211,17 @@ function extractContactLinks(html: string, baseUrl: string) {
     })
     .map((url) => {
       url.hash = "";
-      url.search = "";
+      if (!hasMeaningfulContactSearchParams(url)) {
+        url.search = "";
+      }
       return url.toString();
     });
 
   return uniqueStrings(urls).slice(0, 12);
+}
+
+function hasMeaningfulContactSearchParams(url: URL) {
+  return ["lang", "language", "locale"].some((param) => url.searchParams.has(param));
 }
 
 function urlOrigin(url: string) {
@@ -3012,33 +3236,115 @@ function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
+type ContactProbeFetchResult = {
+  ok: boolean;
+  status: number;
+  html: string;
+};
+
 async function fetchText(url: string) {
+  const first = await fetchTextOnce(url);
+  if (first.ok) {
+    return first.html;
+  }
+
+  const sucuriCookie = extractSucuriChallengeCookie(first.html);
+  if (!sucuriCookie) {
+    return "";
+  }
+
+  const second = await fetchTextOnce(url, sucuriCookie);
+  return second.ok ? second.html : "";
+}
+
+async function fetchTextOnce(url: string, cookie?: string): Promise<ContactProbeFetchResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), contactProbeTimeoutMs);
 
   try {
+    const headers: Record<string, string> = {
+      accept: "text/html,text/plain;q=0.9,*/*;q=0.8",
+      "accept-language": "en-US,en;q=0.9",
+      "cache-control": "no-cache",
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+    };
+    if (cookie) {
+      headers.cookie = cookie;
+    }
     const response = await fetch(url, {
       signal: controller.signal,
       redirect: "follow",
-      headers: {
-        accept: "text/html,text/plain;q=0.9,*/*;q=0.8",
-        "user-agent": "Mozilla/5.0 (compatible; LeadHuntAI/0.1 contact enrichment)"
-      }
+      headers
     });
     const contentType = response.headers.get("content-type") ?? "";
-    if (
-      !response.ok ||
-      (!contentType.includes("text/html") && !contentType.includes("text/plain"))
-    ) {
-      return "";
+    if (!contentType.includes("text/html") && !contentType.includes("text/plain")) {
+      return { ok: false, status: response.status, html: "" };
     }
 
-    return await response.text();
+    const html = await response.text();
+    return { ok: response.ok, status: response.status, html };
   } catch {
-    return "";
+    return { ok: false, status: 0, html: "" };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function extractSucuriChallengeCookie(html: string) {
+  if (!html.includes("sucuri_cloudproxy") || !html.includes("You are being redirected")) {
+    return null;
+  }
+
+  const encoded = html.match(/\bS=["']([A-Za-z0-9+/=]+)["']/)?.[1];
+  if (!encoded) {
+    return null;
+  }
+
+  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  const assignment = decoded.match(/^\s*([A-Za-z_$][\w$]*)\s*=\s*([\s\S]*?);\s*document\.cookie=/);
+  if (!assignment?.[1] || !assignment[2]) {
+    return null;
+  }
+
+  const cookieValue = evaluateSafeJavascriptConcat(assignment[2]);
+  const cookieNamePattern = new RegExp(
+    `document\\.cookie\\s*=\\s*([\\s\\S]*?)\\+\\s*["']=["']\\s*\\+\\s*${assignment[1]}\\s*\\+`
+  );
+  const cookieNameExpression = decoded.match(cookieNamePattern)?.[1];
+  const cookieName = cookieNameExpression
+    ? evaluateSafeJavascriptConcat(cookieNameExpression)
+    : null;
+
+  return cookieName && cookieValue ? `${cookieName}=${cookieValue}` : null;
+}
+
+function evaluateSafeJavascriptConcat(expression: string) {
+  const parts = expression.split("+");
+  let output = "";
+
+  for (const rawPart of parts) {
+    const part = rawPart.trim();
+    const quoted = part.match(/^["']([\s\S]*)["']$/);
+    if (quoted) {
+      output += quoted[1];
+      continue;
+    }
+
+    const charCode = part.match(/^String\.fromCharCode\((\d+)\)$/);
+    if (charCode?.[1]) {
+      output += String.fromCharCode(Number(charCode[1]));
+      continue;
+    }
+
+    if (!part) {
+      continue;
+    }
+
+    return null;
+  }
+
+  return output;
 }
 
 function htmlToSearchableText(html: string) {
@@ -3089,6 +3395,60 @@ function hasAny(text: string, terms: string[]) {
   return terms.some((term) => text.includes(term.toLowerCase()));
 }
 
+// 2026-05 Stage 2 follow-up (P2): negation-aware variant of
+// text.includes for the disqualifier penalty path. We walk every
+// occurrence of `term` in `text` and check if the run of words
+// immediately preceding it is one of the standard negation cues
+// ("do not", "don't", "no ", "without", "except", "exclude",
+// "instead of", "never", "doesn't", "isn't", "aren't", etc.). If a
+// match is governed by a negation cue, we skip it; if any match in
+// the text is NOT under a negation cue, we count it as a real hit.
+//
+// Heuristic, not full NLP — we only look back ~40 chars (a few words)
+// so multi-clause sentences are not over-suppressed. We DON'T anchor
+// the cue to the very end of the window — phrases like "do not sell
+// consumer mobile phones" put "do not" several words before the
+// disqualifier. As long as the cue is somewhere in that small
+// preceding window, we treat the match as negated.
+const negationCuePatterns: RegExp[] = [
+  /\b(do|does|did)\s+not\b/i,
+  /\b(don|doesn|didn|won|wouldn|isn|aren|wasn|weren|hasn|haven|hadn|cannot|couldn|shouldn|mustn|shan|can)['']?t\b/i,
+  /\bnever\b/i,
+  /\bno\s+(?!one|other)/i,
+  /\bnone\s+of\b/i,
+  /\bwithout\b/i,
+  /\bexclud(?:e|es|ed|ing)\b/i,
+  /\bexcept\b/i,
+  /\binstead\s+of\b/i,
+  /\brather\s+than\b/i,
+  /\bnot\s+(?:a\s+|the\s+)?\w*\s*$/i,
+  /\bopt(?:ed)?\s+out\s+of\b/i
+];
+
+function containsOutsideNegationContext(text: string, term: string) {
+  const needle = term.toLowerCase();
+  if (!needle) return false;
+  let from = 0;
+  while (from <= text.length) {
+    const idx = text.indexOf(needle, from);
+    if (idx === -1) {
+      return false;
+    }
+    // Scan a small window before `idx` for a negation cue. We look
+    // back 40 characters (≈ a short clause) so phrases like "do not
+    // sell consumer mobile phones" are caught even when the cue
+    // doesn't sit right next to the disqualifier.
+    const windowStart = Math.max(0, idx - 40);
+    const window = text.slice(windowStart, idx);
+    const isNegated = negationCuePatterns.some((pattern) => pattern.test(window));
+    if (!isNegated) {
+      return true;
+    }
+    from = idx + needle.length;
+  }
+  return false;
+}
+
 function hasTelecomContext(text: string) {
   if (hasAny(text, telecomIndustryTerms)) {
     return true;
@@ -3104,7 +3464,9 @@ function hasSearchContext(text: string, criteria: IcpScoringCriteria) {
     ...(criteria.brandTerms ?? [])
   ].filter((term) => term.trim().length >= 2);
 
-  return hasAny(text, criteriaTerms) || (criteriaIndicatesTelecom(criteria) && hasTelecomContext(text));
+  return (
+    hasAny(text, criteriaTerms) || (criteriaIndicatesTelecom(criteria) && hasTelecomContext(text))
+  );
 }
 
 function criteriaIndicatesTelecom(criteria: IcpScoringCriteria) {
@@ -3136,6 +3498,22 @@ function matchesTargetRegion(country: string, targetRegions: string[]) {
 
 function hasTargetRegionConstraint(targetRegions: string[]) {
   return targetRegions.length > 0 && !targetRegions.some(isGlobalTargetRegion);
+}
+
+function countryConflictHasOnlyOffTargetEvidence(
+  countryValidation: Pick<NormalizedLeadCandidate, "countryConflict" | "countryConflictCountries">,
+  targetRegions: string[]
+) {
+  if (!hasTargetRegionConstraint(targetRegions) || !countryValidation.countryConflict) {
+    return false;
+  }
+  const conflictCountries = uniqueStrings(countryValidation.countryConflictCountries ?? []).filter(
+    Boolean
+  );
+  return (
+    conflictCountries.length > 0 &&
+    conflictCountries.every((country) => !matchesTargetRegion(country, targetRegions))
+  );
 }
 
 function isMacroTargetRegion(region: string) {
@@ -3203,6 +3581,10 @@ function classifyCandidatePage(
   }
 
   if (domain && isThirdPartyProfileDomain(domain)) {
+    return hasProcurementIntent(text) ? "procurement_document" : "third_party_profile";
+  }
+
+  if (domain && isDirectoryIntelligenceDomain(domain)) {
     return hasProcurementIntent(text) ? "procurement_document" : "third_party_profile";
   }
 
@@ -3451,7 +3833,7 @@ function classifyEvidenceLead(
   const isNewsOrContent =
     (domain ? isNewsMediaDomain(domain) : false) ||
     looksLikeArticlePath(path) ||
-    hasAny(text, newsContentTerms) ||
+    hasNewsContentSignal(text) ||
     pageType === "content_or_directory";
   const isExplicitNewsArticle =
     (domain ? isNewsMediaDomain(domain) : false) ||
@@ -3461,17 +3843,16 @@ function classifyEvidenceLead(
     looksLikeDirectoryEvidence(path, text) ||
     (pageType === "third_party_profile" && hasAny(text, directoryDocumentTerms));
   const hasRelevantSearchContext =
-    hasSearchContext(text, criteria) ||
-    hasAny(text, specificTelecomProductTerms);
+    hasSearchContext(text, criteria) || hasAny(text, specificTelecomProductTerms);
   const extractableCompanies = extractMentionedCompanySignals(originalText);
   const usefulProjectNews =
-    isExplicitNewsArticle &&
-    hasRelevantSearchContext &&
-    hasAny(text, projectNewsTerms);
+    isExplicitNewsArticle && hasRelevantSearchContext && hasAny(text, projectNewsTerms);
   const usefulDocumentIntelligence =
     isDocument &&
     hasRelevantSearchContext &&
-    (isProcurement || hasAny(text, exhibitionDocumentTerms) || hasAny(text, directoryDocumentTerms));
+    (isProcurement ||
+      hasAny(text, exhibitionDocumentTerms) ||
+      hasAny(text, directoryDocumentTerms));
   const allowedProcurementDirectory =
     isProcurement && domain ? isProcurementIntelligenceDomain(domain) : false;
   const hardContentNoise =
@@ -3507,9 +3888,9 @@ function classifyEvidenceLead(
       extractableCompanies,
       status: "evidence_review",
       scoreCap: 49,
-      reason: "Industry organization, standards body, conference, or event page kept only as evidence",
-      risk:
-        "Associations, alliances, standards organizations, conferences, agendas, and technical programmes are not direct customer companies"
+      reason:
+        "Industry organization, standards body, conference, or event page kept only as evidence",
+      risk: "Associations, alliances, standards organizations, conferences, agendas, and technical programmes are not direct customer companies"
     };
   }
 
@@ -3640,8 +4021,7 @@ function classifyEvidenceLead(
       status: "evidence_review",
       scoreCap: 49,
       reason: "Content page kept only as evidence, not as a customer",
-      risk:
-        "News, article, blog, media, report, or content page cannot enter the main customer list"
+      risk: "News, article, blog, media, report, or content page cannot enter the main customer list"
     };
   }
 
@@ -3661,8 +4041,7 @@ function intelligenceClassification(
     status: "intelligence_review",
     scoreCap: 49,
     reason: "Search result is useful buyer intelligence but not a direct customer",
-    risk:
-      "Intelligence sources must be reviewed and mined for real local companies before outreach or CRM sync"
+    risk: "Intelligence sources must be reviewed and mined for real local companies before outreach or CRM sync"
   };
 }
 
@@ -3834,7 +4213,7 @@ function assessPageQuality(
     reasons.push("Includes direct contact details");
   }
 
-  const hasContentNoise = looksLikeArticlePath(path) || hasAny(text, contentNoiseTerms);
+  const hasContentNoise = looksLikeArticlePath(path) || hasContentNoiseSignal(text);
   if (hasContentNoise) {
     if (buyerServicePage) {
       negativeScore += looksLikeArticlePath(path) ? 6 : 0;
@@ -4092,9 +4471,8 @@ function looksLikeNonCustomerProductPage(candidate: NormalizedLeadCandidate) {
     return true;
   }
 
-  const hasSkuOrModelSignal = /\b(?:sku|model|part\s*(?:no|number)|p\/n|datasheet|product details?)\b/i.test(
-    text
-  );
+  const hasSkuOrModelSignal =
+    /\b(?:sku|model|part\s*(?:no|number)|p\/n|datasheet|product details?)\b/i.test(text);
   const hasCommerceOrCatalogSignal =
     hasAny(text, storefrontCommerceTerms) ||
     hasAny(text, storefrontCatalogTerms) ||
@@ -4112,10 +4490,10 @@ function looksLikeIndustryOrganizationOrEventPage(candidate: NormalizedLeadCandi
 
   return Boolean(
     (domain && industryOrganizationOrEventDomains.some((item) => domainMatches(domain, item))) ||
-      /\/(?:conference|event|events|agenda|technical-program|technical-programme|workshop|symposium|program-committee)\b/i.test(
-        path
-      ) ||
-      hasAny(text, industryOrganizationOrEventTerms)
+    /\/(?:conference|event|events|agenda|technical-program|technical-programme|workshop|symposium|program-committee)\b/i.test(
+      path
+    ) ||
+    hasAny(text, industryOrganizationOrEventTerms)
   );
 }
 
@@ -4149,10 +4527,10 @@ function hasChinaSupplierSignal(candidate: NormalizedLeadCandidate) {
 
   return Boolean(
     (domain &&
-        (domain.endsWith(".cn") ||
-          chinaSupplierDomains.some((item) => domainMatches(domain, item)) ||
-          /\bchina\b/i.test(domain))) ||
-      hasAny(text, chinaSupplierSignalTerms)
+      (domain.endsWith(".cn") ||
+        chinaSupplierDomains.some((item) => domainMatches(domain, item)) ||
+        /\bchina\b/i.test(domain))) ||
+    hasAny(text, chinaSupplierSignalTerms)
   );
 }
 
@@ -4210,7 +4588,10 @@ function toJsonInput(value: unknown): Prisma.InputJsonValue {
       }
 
       if (typeof item === "string") {
-        return item.split(String.fromCharCode(0)).join("").replace(/\\u0000/gi, "");
+        return item
+          .split(String.fromCharCode(0))
+          .join("")
+          .replace(/\\u0000/gi, "");
       }
 
       return item;
@@ -4737,6 +5118,266 @@ const defaultRiskTerms = [
   "b2b marketplace"
 ];
 
+// 2026-05 Stage 2 follow-up: off-industry buckets used by
+// detectOffIndustryBucket. Each bucket is the set of words that, when
+// present in a candidate's title/snippet/summary alongside no target
+// product or customer signal, indicates the candidate is from an
+// industry the user did not ask about. Buckets are evaluated
+// independently; a candidate can only trip ONE bucket per scoring
+// pass.
+//
+// 2026-05 Stage 2 follow-up (revised): each bucket has STRONG and
+// WEAK terms.
+//
+// STRONG = unambiguous industry self-identification, e.g.
+//   "private bank" / "investment bank" / "wealth management firm"
+//   / "aesthetic clinic" / "developer database platform". These
+//   are phrases real off-industry companies say about themselves.
+//
+// WEAK = single nouns that legitimate target buyers commonly print
+// in served-industries menus, e.g. "bank", "banking", "healthcare",
+// "hospital", "retail". A telecom system integrator's homepage
+// often lists "Banking, Healthcare, Retail, Government" as the
+// industries it serves — those should NOT count as the candidate
+// being a bank/hospital/retailer themselves.
+//
+// Detection rule: fire only when the candidate trips
+//   (a) at least one STRONG hit AND total ≥ 2 hits, OR
+//   (b) at least 2 STRONG hits.
+//
+// Two WEAK hits alone (e.g. "Banking" + "Healthcare" in a nav menu)
+// no longer fire. A real bank like "Hamburg Commercial Bank" still
+// fires because the body text contains "private banking", "asset
+// management", "investment banking" — multiple STRONG phrases.
+//
+// Self-guard: when the user's own product/customer keywords contain
+// any token from a bucket's STRONG list, that bucket is skipped
+// entirely. (Weak terms are too generic for self-guard; using them
+// would disable the medical bucket for any task that mentions
+// "healthcare verticals" in its product keywords.)
+const offIndustryBuckets: Record<string, { strong: string[]; weak: string[] }> = {
+  medical: {
+    strong: [
+      "medical clinic",
+      "medical center",
+      "aesthetic clinic",
+      "aesthetic medical",
+      "aesthetix",
+      "dental clinic",
+      "dental practice",
+      "dentist",
+      "cosmetic clinic",
+      "skincare",
+      "beauty clinic",
+      "beauty salon",
+      "pharmaceutical company",
+      "pharma manufacturer",
+      "biotech firm",
+      "biocartis",
+      "molecular diagnostic",
+      "surgical center",
+      "surgery center",
+      "wellness center",
+      "spa resort",
+      "health clinic"
+    ],
+    // Weak terms: single-word industry mentions that nav menus and
+    // generic copy commonly use without meaning the company itself
+    // is a medical org.
+    weak: [
+      "medical",
+      "clinical",
+      "clinic",
+      "hospital",
+      "pharma",
+      "pharmaceutical",
+      "biotech",
+      "diagnostic",
+      "surgery",
+      "surgical",
+      "dental",
+      "cosmetic",
+      "aesthetic",
+      "beauty",
+      "spa",
+      "wellness",
+      "healthcare",
+      "health care"
+    ]
+  },
+  software_saas: {
+    strong: [
+      "saas platform",
+      "developer database",
+      "cloud database",
+      "developer platform",
+      "no-code platform",
+      "low-code platform",
+      "kubernetes platform",
+      "managed cloud platform",
+      "data lake platform",
+      "data warehouse platform",
+      "code repository",
+      "git platform",
+      "antivirus software",
+      "cybersecurity software",
+      "crm software",
+      "erp software"
+    ],
+    weak: [
+      "saas",
+      "database",
+      "cloud platform",
+      "software platform",
+      "devops",
+      "crm",
+      "analytics platform",
+      "data platform",
+      "data lake",
+      "data warehouse",
+      "managed cloud",
+      "kubernetes"
+    ]
+  },
+  consumer_retail: {
+    strong: [
+      "consumer electronics",
+      "mobile phone retail",
+      "online shopping",
+      "ecommerce platform",
+      "e-commerce platform",
+      "fashion brand",
+      "clothing brand",
+      "footwear brand",
+      "grocery chain"
+    ],
+    weak: [
+      "retail store",
+      "grocery",
+      "fashion",
+      "apparel",
+      "footwear",
+      "toys",
+      "household goods",
+      "kitchenware"
+    ]
+  },
+  finance: {
+    // Strong = unambiguous "we are a financial firm" phrases. A real
+    // bank's homepage will print "private banking", "investment
+    // banking", "wealth management" etc. multiple times in body
+    // copy, easily clearing the threshold. A telecom integrator's
+    // industries menu listing "Banking" alone will not.
+    strong: [
+      "private bank",
+      "investment bank",
+      "commercial bank",
+      "private banking",
+      "investment banking",
+      "retail banking",
+      "wealth management",
+      "asset management",
+      "fintech",
+      "credit card issuer",
+      "stock trading",
+      "investment fund",
+      "private equity",
+      "hedge fund",
+      "insurance broker",
+      "insurance company"
+    ],
+    weak: ["bank", "banking", "insurance", "loans"]
+  },
+  food_hospitality: {
+    strong: [
+      "restaurant",
+      "cafe",
+      "catering company",
+      "hotel chain",
+      "travel agency",
+      "tourism agency",
+      "food service",
+      "kitchen equipment"
+    ],
+    weak: ["hospitality", "tourism", "menu"]
+  },
+  education: {
+    strong: [
+      "university",
+      "college",
+      "kindergarten",
+      "tutoring center",
+      "online course",
+      "e-learning platform",
+      "mooc"
+    ],
+    weak: ["school", "academy", "tutoring"]
+  }
+};
+
+function detectOffIndustryBucket(
+  text: string,
+  context: {
+    productKeywords: string[];
+    customerTypeKeywords: string[];
+    hasSpecificProductSignal: boolean;
+    hasTargetCustomerType: boolean;
+  }
+): string | null {
+  // Override gate: candidate already shows a specific product term or
+  // a target customer-type match in its own text — that's a stronger
+  // signal than any off-industry bucket can be, so don't reject.
+  if (context.hasSpecificProductSignal || context.hasTargetCustomerType) {
+    return null;
+  }
+  const lowerText = text.toLowerCase();
+  // Self-guard: combine the user's own product + customer keywords
+  // (lowercased) so we can skip any bucket the user is actually
+  // shopping in. Example: a user looking for "MongoDB resellers"
+  // would have "mongodb" or "database" in productKeywords; the
+  // software_saas bucket is then disabled for that scoring pass.
+  // We only check overlap against the STRONG list; weak terms are
+  // too generic to drive self-guard (they'd disable medical for any
+  // task that incidentally mentions healthcare as a vertical).
+  const userKeywords = [...context.productKeywords, ...context.customerTypeKeywords]
+    .map((term) => term.toLowerCase())
+    .filter(Boolean);
+  for (const [bucketName, bucket] of Object.entries(offIndustryBuckets)) {
+    const userOverlapsBucket = bucket.strong.some((bucketTerm) =>
+      userKeywords.some(
+        (userTerm) => userTerm.includes(bucketTerm) || bucketTerm.includes(userTerm)
+      )
+    );
+    if (userOverlapsBucket) {
+      continue;
+    }
+    let strongHits = 0;
+    let weakHits = 0;
+    const seen = new Set<string>();
+    for (const term of bucket.strong) {
+      if (lowerText.includes(term) && !seen.has(term)) {
+        seen.add(term);
+        strongHits += 1;
+      }
+    }
+    for (const term of bucket.weak) {
+      if (lowerText.includes(term) && !seen.has(term)) {
+        seen.add(term);
+        weakHits += 1;
+      }
+    }
+    // Fire when:
+    //   (a) ≥1 strong AND total ≥2 (real industry phrasing plus any
+    //       additional signal)
+    //   (b) ≥2 strong (multiple unambiguous phrases regardless of
+    //       weak signal)
+    if (strongHits >= 2 || (strongHits >= 1 && strongHits + weakHits >= 2)) {
+      return bucketName;
+    }
+  }
+  return null;
+}
+
 const strongProcurementIntentTerms = [
   "tender",
   "rfq",
@@ -5034,6 +5675,7 @@ const directoryIntelligenceDomains = [
   "saudidirectory.com",
   "yello.ae",
   "yellosa.co.za",
+  "mapquest.com",
   "uaeplusplus.com",
   "kompass.com",
   "europages.com",
@@ -5160,16 +5802,56 @@ const governmentInformationTerms = [
   "regulatory authority"
 ];
 
-const newsContentTerms = [
+// 2026-05 P1 follow-up: news/content term split. Same pattern as
+// contentNoiseTerms — strong phrases unambiguously identify a news/
+// content page; weak single nouns ("news", "media") are kept because
+// they're real signals when paired but cannot fire alone.
+const newsContentStrongTerms = [
+  "press release",
+  "news article",
+  "reported by",
+  "market report",
+  "industry report",
+  "research report",
+  "white paper",
+  "the journalist",
+  "publishing platform"
+];
+
+const newsContentWeakTerms = [
   "news",
   "media",
   "article",
-  "press release",
   "blog",
   "reported",
   "journalist",
   "publisher"
 ];
+
+function hasNewsContentSignal(text: string): boolean {
+  let strong = 0;
+  let weak = 0;
+  const seen = new Set<string>();
+  for (const t of newsContentStrongTerms) {
+    if (text.includes(t) && !seen.has(t)) {
+      seen.add(t);
+      strong += 1;
+      if (strong >= 2) return true;
+    }
+  }
+  for (const t of newsContentWeakTerms) {
+    if (text.includes(t) && !seen.has(t)) {
+      seen.add(t);
+      weak += 1;
+    }
+  }
+  if (strong >= 1 && strong + weak >= 2) return true;
+  if (weak >= 3) return true;
+  return false;
+}
+
+// All callers migrated to hasNewsContentSignal — the legacy flat
+// newsContentTerms array has been removed.
 
 const projectNewsTerms = [
   "project",
@@ -5415,6 +6097,8 @@ const companyPagePathTerms = [
 
 const contactLinkPathTerms = [
   "contact",
+  "about",
+  "company",
   "get-in-touch",
   "quote",
   "request",
@@ -5472,22 +6156,39 @@ const articlePathTerms = [
   "/forum"
 ];
 
-const contentNoiseTerms = [
-  "article",
-  "blog",
-  "news",
+// 2026-05 P1 follow-up: split content/news term lists into STRONG
+// and WEAK to stop nav-menu single-word false positives.
+//
+// The old flat-includes approach against contentNoiseTerms (and
+// newsContentTerms) hard-rejected real telecom/SI buyer pages just
+// because their nav menu contained "News" or "Media" links — see
+// Kuwait Telecom and Amanco SA in the e2e replay. The fix mirrors
+// the off-industry strong/weak split:
+//
+//   STRONG = unambiguous "this page IS a content/news page" phrases
+//     ("press release", "market report", "industry report",
+//     "research report", "news article", "white paper"...).
+//   WEAK = single nouns commonly found in nav menus and footers
+//     ("news", "media", "blog", "article", "category", "showroom").
+//
+// Detection fires only when (a) ≥1 strong hit AND total ≥2, or
+// (b) ≥2 strong hits, or (c) ≥3 weak hits (a true content site
+// usually mentions multiple of these in body copy, not just one
+// menu link).
+const contentNoiseStrongTerms = [
   "press release",
   "market report",
   "industry report",
   "research report",
-  "forecast",
   "market size",
   "market share",
+  "market forecast",
+  "market trends",
+  "global market",
   "top startups",
   "startup database",
   "company database",
   "mou targets",
-  "marketplace",
   "supplier directory",
   "yellow pages",
   "company directory",
@@ -5495,42 +6196,53 @@ const contentNoiseTerms = [
   "b2b marketplace",
   "manufacturers and suppliers",
   "wholesale suppliers",
-  "category",
-  "catalog",
   "technology indicator",
   "market indicator",
   "business strategies",
   "import export data",
   "shipment details",
-  "showroom",
-  "what is",
-  "how to",
-  "guide to",
   "case study",
   "white paper",
-  "state act",
-  "commission restricts",
-  "regulation",
-  "interim assessment",
-  "damages to telecommunication infrastructure",
-  "inventory management",
-  "software tools",
-  "management system",
-  "deployment challenges",
-  "forum",
-  "discussion board",
-  "types, challenges",
-  "tips",
   "application note",
   "product application",
+  "deployment challenges",
+  "discussion board",
+  "what is",
+  "what are",
+  "what does",
+  "how to",
   "how to buy",
-  "commodity",
-  "maintenance & repair",
-  "truck spare parts",
+  "guide to",
   "key component",
   "signal transmission",
   "lightning protection",
-  "what are",
+  "damages to telecommunication infrastructure",
+  "interim assessment",
+  "commission restricts",
+  "state act",
+  "types, challenges",
+  "truck spare parts",
+  "companies in the world",
+  "companies worldwide"
+];
+
+const contentNoiseWeakTerms = [
+  "article",
+  "blog",
+  "news",
+  "forecast",
+  "marketplace",
+  "category",
+  "catalog",
+  "showroom",
+  "regulation",
+  "inventory management",
+  "software tools",
+  "management system",
+  "forum",
+  "tips",
+  "commodity",
+  "maintenance & repair",
   "webinar",
   "event",
   "career",
@@ -5542,6 +6254,31 @@ const contentNoiseTerms = [
   "linkedin",
   "facebook"
 ];
+
+function hasContentNoiseSignal(text: string): boolean {
+  let strong = 0;
+  let weak = 0;
+  const seen = new Set<string>();
+  for (const t of contentNoiseStrongTerms) {
+    if (text.includes(t) && !seen.has(t)) {
+      seen.add(t);
+      strong += 1;
+      if (strong >= 2) return true;
+    }
+  }
+  for (const t of contentNoiseWeakTerms) {
+    if (text.includes(t) && !seen.has(t)) {
+      seen.add(t);
+      weak += 1;
+    }
+  }
+  if (strong >= 1 && strong + weak >= 2) return true;
+  if (weak >= 3) return true;
+  return false;
+}
+
+// All callers migrated to hasContentNoiseSignal — the legacy flat
+// contentNoiseTerms array has been removed.
 
 const contentTitleTerms = [
   "market report",
@@ -5712,6 +6449,7 @@ const domainCompanyNameOverrides: Record<string, string> = {
   mfcomm: "MF Communications",
   rtesqatar: "RTES Qatar",
   screamerelectronicservices: "Screamer Electronic Services",
+  sfttradingllc: "SFT Trading LLC",
   sfps: "SFPS",
   stc: "STC",
   telephonyme: "TelephonyME",
@@ -5779,6 +6517,49 @@ const forbiddenCompanyNameTerms = new Set([
   "category",
   "contact",
   "contact us",
+  // 2026-05 V1-MVP+: more generic page-title terms that leaked through
+  // as company names (e.g. Mobilink Kuwait's "/contact-us" page has
+  // <title>Contacts</title>, which was being extracted as a brand new
+  // candidate company. Same story for "get in touch", "our team",
+  // "team", "services", etc.).
+  "contacts",
+  "contact info",
+  "contact information",
+  "get in touch",
+  "reach us",
+  "reach out",
+  "connect with us",
+  "our team",
+  "team",
+  "our offices",
+  "offices",
+  "our locations",
+  "locations",
+  "services",
+  "our services",
+  "products",
+  "our products",
+  "solutions",
+  "our solutions",
+  "support",
+  "careers",
+  "careers home",
+  "jobs",
+  "blog",
+  "news",
+  "media",
+  "press",
+  "privacy",
+  "privacy policy",
+  "terms",
+  "terms of service",
+  "cookie policy",
+  "sitemap",
+  "search",
+  "login",
+  "sign in",
+  "sign up",
+  "register",
   "home",
   "homepage",
   "pdf",
@@ -6022,6 +6803,7 @@ const phoneCountryCodeSignals: Array<[string, string]> = [
   ["234", "Nigeria"],
   ["27", "South Africa"],
   ["254", "Kenya"],
+  ["251", "Ethiopia"],
   ["20", "Egypt"],
   ["212", "Morocco"],
   ["233", "Ghana"],
@@ -6064,6 +6846,8 @@ const countrySignals: Array<[string, string]> = [
   ["kenya", "KENYA"],
   ["nairobi", "KENYA"],
   [".ke", "KENYA"],
+  ["ethiopia", "ETHIOPIA"],
+  [".et", "ETHIOPIA"],
   ["南非", "SOUTH AFRICA"],
   ["south africa", "SOUTH AFRICA"],
   [".za", "SOUTH AFRICA"],

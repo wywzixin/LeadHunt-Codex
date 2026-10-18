@@ -272,7 +272,9 @@ describe("AuthService", () => {
 
     expect(url.hostname).toBe("accounts.google.com");
     expect(url.searchParams.get("client_id")).toBe("google-auth-client-id");
-    expect(url.searchParams.get("redirect_uri")).toBe("http://localhost:4000/api/auth/google/callback");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "http://localhost:4000/api/auth/google/callback"
+    );
     expect(url.searchParams.get("scope")).toBe("openid email profile");
     expect(url.searchParams.get("scope")).not.toContain("gmail");
     expect(url.searchParams.get("state")).toBe("state-token-value-123");
@@ -285,7 +287,9 @@ describe("AuthService", () => {
     vi.stubEnv("GOOGLE_AUTH_REDIRECT_URI", "http://localhost:4000/api/auth/google/callback");
     (service as any).fetchImpl = vi
       .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "google-access-token" }), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "google-access-token" }), { status: 200 })
+      )
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -340,7 +344,9 @@ describe("AuthService", () => {
     vi.stubEnv("GOOGLE_AUTH_REDIRECT_URI", "http://localhost:4000/api/auth/google/callback");
     (service as any).fetchImpl = vi
       .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "google-access-token" }), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "google-access-token" }), { status: 200 })
+      )
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -383,7 +389,24 @@ describe("AuthService", () => {
 
   it("rejects a Google callback with an invalid state", async () => {
     await expect(
-      service.loginWithGoogleCallback({ code: "google-code", state: "state-token-value-123" }, "different-state")
+      service.loginWithGoogleCallback(
+        { code: "google-code", state: "state-token-value-123" },
+        "different-state"
+      )
     ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it("returns a readable Google callback error when Google cannot be reached", async () => {
+    vi.stubEnv("GOOGLE_AUTH_CLIENT_ID", "google-auth-client-id");
+    vi.stubEnv("GOOGLE_AUTH_CLIENT_SECRET", "google-auth-client-secret");
+    vi.stubEnv("GOOGLE_AUTH_REDIRECT_URI", "http://localhost:4000/api/auth/google/callback");
+    (service as any).fetchImpl = vi.fn().mockRejectedValue(new Error("fetch failed"));
+
+    await expect(
+      service.loginWithGoogleCallback(
+        { code: "google-code", state: "state-token-value-123" },
+        "state-token-value-123"
+      )
+    ).rejects.toThrow("Google token exchange failed: fetch failed");
   });
 });

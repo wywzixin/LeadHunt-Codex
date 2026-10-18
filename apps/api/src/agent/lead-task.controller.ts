@@ -1,4 +1,15 @@
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Query, Req } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Inject,
+  Param,
+  Post,
+  Query,
+  Req
+} from "@nestjs/common";
 import type { Request } from "express";
 import { z } from "zod";
 import { AuthService } from "../auth/auth.service.js";
@@ -12,15 +23,24 @@ const createLeadTaskSchema = z.object({
 
 const listLeadTaskSchema = z.object({
   search: z.string().trim().min(1).max(120).optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional()
+  status: z.enum(["all", "active", "completed", "stopped"]).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  offset: z.coerce.number().int().min(0).optional()
 });
 
 const approveLeadTaskSchema = z.object({
-  leadIds: z.array(z.string().uuid()).min(1).max(100).optional()
+  leadIds: z.array(z.string().uuid()).min(1).max(500).optional()
 });
 
 const executeSearchSchema = z.object({
-  limit: z.number().int().min(1).max(500).optional()
+  limit: z.number().int().min(1).max(500).optional(),
+  // 2026-05 Stage 2 follow-up: when set, the backend appends a fresh
+  // batch of pending queries before running the worker pool if the
+  // task has no pending/running queries left. Without this, /search
+  // is a no-op for tasks that have already drained their queue
+  // (the "继续搜索 30 条" button used to fire a 201 with
+  // executedQueries=0).
+  appendIfEmpty: z.boolean().optional()
 });
 
 @Controller("api/lead-tasks")
@@ -70,6 +90,12 @@ export class LeadTaskController {
   async leads(@Req() request: Request, @Param("taskId") taskId: string) {
     const { user } = await this.authService.me(readSessionCookie(request));
     return this.agentWorkflowService.getTaskLeadsForUser(user.id, taskId);
+  }
+
+  @Delete(":taskId")
+  async delete(@Req() request: Request, @Param("taskId") taskId: string) {
+    const { user } = await this.authService.me(readSessionCookie(request));
+    return this.agentWorkflowService.softDeleteTaskForUser(user.id, taskId);
   }
 
   @Post(":taskId/search")

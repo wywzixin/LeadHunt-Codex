@@ -1,12 +1,8 @@
 import { randomBytes, createHash } from "node:crypto";
-import {
-  BadRequestException,
-  Injectable,
-  UnauthorizedException,
-  Inject
-} from "@nestjs/common";
+import { BadRequestException, Injectable, UnauthorizedException, Inject } from "@nestjs/common";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
+import { createGmailFetchImpl, type GmailFetchLike } from "../gmail/gmail-fetch.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import type { AuthPayload, AuthUser } from "./auth.types.js";
 import type { SessionCookie } from "./session-cookie.js";
@@ -73,7 +69,7 @@ type DbUser = {
 
 @Injectable()
 export class AuthService {
-  private readonly fetchImpl = globalThis.fetch.bind(globalThis);
+  private fetchImpl: GmailFetchLike = createGmailFetchImpl();
 
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
@@ -228,7 +224,10 @@ export class AuthService {
     };
   }
 
-  async loginWithGoogleCallback(input: unknown, expectedState: string | null): Promise<AuthPayload & { session: SessionCookie }> {
+  async loginWithGoogleCallback(
+    input: unknown,
+    expectedState: string | null
+  ): Promise<AuthPayload & { session: SessionCookie }> {
     const data = parseOrBadRequest(googleCallbackSchema, input);
     if (!expectedState || data.state !== expectedState) {
       throw new UnauthorizedException("Invalid Google OAuth state");
@@ -324,13 +323,17 @@ export class AuthService {
       redirect_uri: config.redirectUri,
       grant_type: "authorization_code"
     });
-    const response = await this.fetchImpl(config.tokenUri, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
+    const response = await this.fetchGoogleAuth(
+      config.tokenUri,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: body.toString()
       },
-      body
-    });
+      "Google token exchange failed"
+    );
     const payload = (await response.json()) as GoogleTokenResponse;
 
     if (!response.ok || !payload.access_token) {
@@ -343,15 +346,21 @@ export class AuthService {
   }
 
   private async fetchGoogleProfile(config: GoogleAuthConfig, accessToken: string) {
-    const response = await this.fetchImpl(config.userInfoUri, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`
-      }
-    });
+    const response = await this.fetchGoogleAuth(
+      config.userInfoUri,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      },
+      "Google profile request failed"
+    );
     const payload = (await response.json()) as GoogleUserInfoResponse;
 
     if (!response.ok || !payload.sub || !payload.email || payload.email_verified === false) {
-      throw new BadRequestException(formatGoogleAuthError("Google profile request failed", payload));
+      throw new BadRequestException(
+        formatGoogleAuthError("Google profile request failed", payload)
+      );
     }
 
     return {
@@ -359,6 +368,18 @@ export class AuthService {
       email: payload.email,
       name: payload.name ?? null
     };
+  }
+
+  private async fetchGoogleAuth(
+    url: string,
+    init: Parameters<GmailFetchLike>[1],
+    errorPrefix: string
+  ) {
+    try {
+      return await this.fetchImpl(url, init);
+    } catch (error) {
+      throw new BadRequestException(`${errorPrefix}: ${readNetworkError(error)}`);
+    }
   }
 
   private async createSession(userId: string): Promise<SessionCookie> {
@@ -452,9 +473,25 @@ function getGoogleAuthConfig(): GoogleAuthConfig {
   };
 }
 
-function formatGoogleAuthError(prefix: string, payload: GoogleTokenResponse | GoogleUserInfoResponse) {
+function formatGoogleAuthError(
+  prefix: string,
+  payload: GoogleTokenResponse | GoogleUserInfoResponse
+) {
   const detail = payload.error_description ?? payload.error;
   return detail ? `${prefix}: ${detail}` : prefix;
+}
+
+function readNetworkError(error: unknown) {
+  if (error instanceof Error && error.message) {
+    const cause = error.cause;
+    if (cause instanceof Error && cause.message) {
+      return `${error.message} (${cause.message})`;
+    }
+
+    return error.message;
+  }
+
+  return "network request failed";
 }
 
 function toAuthUser(user: DbUser): AuthUser {

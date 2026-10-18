@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   BarChart3,
-  Bell,
   Bot,
   BriefcaseBusiness,
   ChevronDown,
@@ -34,6 +33,7 @@ type AppShellProps = {
 };
 
 type CurrentUser = {
+  id?: string;
   email: string;
   name: string | null;
 };
@@ -49,9 +49,7 @@ type NavItem = {
 
 const navGroups: Array<{ label?: string; items: NavItem[] }> = [
   {
-    items: [
-      { label: "AI 外贸员", href: "/", icon: Bot, letter: "A", badge: "New", featured: true }
-    ]
+    items: [{ label: "AI 外贸员", href: "/", icon: Bot, letter: "A", badge: "New", featured: true }]
   },
   {
     label: "线索中心",
@@ -96,12 +94,13 @@ export function AppShell({
   const [loggingOut, setLoggingOut] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
   const accountName = currentUser ? displayAccountName(currentUser) : "用户";
-  const accountInitial = getAccountInitial(accountName);
   const shellClasses = [
     "leadApp",
     isLetterFrame ? "letterFrame" : "",
     sidebarCollapsed ? "sidebarCollapsed" : ""
-  ].filter(Boolean).join(" ");
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -179,20 +178,14 @@ export function AppShell({
         </div>
 
         <div className="appTopActions">
-          <div className="topAction">
-            <span className="topIcon hasDot">
-              <Bell aria-hidden="true" size={18} />
-            </span>
-            <span>消息</span>
-          </div>
-          <button className="toolboxButton" type="button">
-            <BriefcaseBusiness aria-hidden="true" size={18} />
-            工具箱
-          </button>
           <div className="creditPill" aria-label="账户积分">
             <span>积分 0</span>
-            <span className="creditDivider" aria-hidden="true">|</span>
-            <a className="creditUpgrade" href="#upgrade">升级</a>
+            <span className="creditDivider" aria-hidden="true">
+              |
+            </span>
+            <a className="creditUpgrade" href="#upgrade">
+              升级
+            </a>
           </div>
           <div className="accountMenu" ref={accountMenuRef}>
             <button
@@ -203,7 +196,7 @@ export function AppShell({
               aria-label={`当前用户：${accountName}`}
               onClick={() => setAccountMenuOpen((current) => !current)}
             >
-              <div className="avatarImg">{accountInitial}</div>
+              <AccountAvatar user={currentUser} name={accountName} />
               <div>
                 <strong>{accountName}</strong>
                 <small>B2B 出口业务员</small>
@@ -213,7 +206,7 @@ export function AppShell({
             {accountMenuOpen ? (
               <div className="accountDropdown" role="menu" aria-label="账号菜单">
                 <div className="accountDropdownHead">
-                  <span className="avatarImg">{accountInitial}</span>
+                  <AccountAvatar user={currentUser} name={accountName} />
                   <div>
                     <strong>{accountName}</strong>
                     <small>{currentUser?.email ?? "未读取到邮箱"}</small>
@@ -247,11 +240,7 @@ export function AppShell({
                 if (item.href === activePath) classes.push("active");
 
                 return (
-                  <a
-                    className={classes.join(" ")}
-                    href={item.href}
-                    key={item.href}
-                  >
+                  <a className={classes.join(" ")} href={item.href} key={item.href}>
                     <span className={isLetterFrame ? "navIcon letterNavIcon" : "navIcon"}>
                       {isLetterFrame ? item.letter : <Icon aria-hidden="true" size={18} />}
                     </span>
@@ -270,7 +259,11 @@ export function AppShell({
           title={sidebarCollapsed ? "展开菜单" : "收起菜单"}
           onClick={() => setSidebarCollapsed((current) => !current)}
         >
-          {sidebarCollapsed ? <ChevronRight aria-hidden="true" size={16} /> : <ChevronLeft aria-hidden="true" size={16} />}
+          {sidebarCollapsed ? (
+            <ChevronRight aria-hidden="true" size={16} />
+          ) : (
+            <ChevronLeft aria-hidden="true" size={16} />
+          )}
           <span>{sidebarCollapsed ? "展开" : "收起菜单"}</span>
         </button>
       </aside>
@@ -293,6 +286,22 @@ export function AppShell({
   );
 }
 
+function AccountAvatar({ user, name }: { user: CurrentUser | null; name: string }) {
+  const palette = getAvatarPalette(user, name);
+  const initial = getAccountInitial(name);
+  const style = {
+    "--avatar-from": palette.from,
+    "--avatar-to": palette.to,
+    "--avatar-glow": palette.glow
+  } as CSSProperties;
+
+  return (
+    <span className="avatarImg" style={style} aria-hidden="true">
+      <span className="avatarLetter">{initial}</span>
+    </span>
+  );
+}
+
 function displayAccountName(user: CurrentUser) {
   const name = user.name?.trim();
   if (name) {
@@ -304,4 +313,34 @@ function displayAccountName(user: CurrentUser) {
 
 function getAccountInitial(name: string) {
   return [...name.trim()][0]?.toUpperCase() ?? "用";
+}
+
+const defaultAvatarPalette = {
+  from: "#3b5bdb",
+  to: "#6366f1",
+  glow: "rgba(99, 102, 241, 0.32)"
+};
+
+const avatarPalettes = [
+  defaultAvatarPalette,
+  { from: "#2563eb", to: "#0ea5e9", glow: "rgba(37, 99, 235, 0.32)" },
+  { from: "#4f46e5", to: "#7c3aed", glow: "rgba(124, 58, 237, 0.32)" },
+  { from: "#0891b2", to: "#0369a1", glow: "rgba(8, 145, 178, 0.30)" },
+  { from: "#1e3a8a", to: "#3b82f6", glow: "rgba(59, 130, 246, 0.32)" },
+  { from: "#6366f1", to: "#a855f7", glow: "rgba(168, 85, 247, 0.30)" }
+];
+
+function getAvatarPalette(user: CurrentUser | null, displayName: string) {
+  const seed = `${user?.id ?? ""}|${user?.email ?? ""}|${displayName}`;
+  const hash = hashString(seed || "LeadHunt");
+  return avatarPalettes[hash % avatarPalettes.length] ?? defaultAvatarPalette;
+}
+
+function hashString(value: string) {
+  let hash = 0;
+  for (const char of value) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+
+  return hash;
 }

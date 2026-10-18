@@ -10,6 +10,8 @@ export type SyncLeadToCrmInput = {
   now?: Date;
 };
 
+const approvedCrmStatuses = ["approved", "contacted", "email_sent"] as const;
+
 export async function syncLeadToCrm(prisma: PrismaService, userId: string, leadId: string, input: SyncLeadToCrmInput = {}) {
   const lead = await prisma.leadCandidate.findFirst({
     where: {
@@ -87,6 +89,55 @@ export async function syncLeadToCrm(prisma: PrismaService, userId: string, leadI
   return crmLead;
 }
 
+export async function ensureApprovedCandidatesInCrm(
+  prisma: PrismaService,
+  userId: string,
+  options: { taskId?: string } = {}
+) {
+  const candidates = await prisma.leadCandidate.findMany({
+    where: {
+      ...(options.taskId ? { taskId: options.taskId } : {}),
+      task: { userId },
+      crmLead: null,
+      status: { in: [...approvedCrmStatuses] }
+    },
+    select: {
+      id: true,
+      status: true
+    }
+  });
+
+  const syncableCandidates = candidates.filter((candidate) =>
+    Boolean(candidate.id) && approvedCrmStatuses.includes(candidate.status as (typeof approvedCrmStatuses)[number])
+  );
+
+  await Promise.all(
+    syncableCandidates.map((candidate) => upsertApprovedCandidateInCrm(prisma, candidate.id, candidate.status))
+  );
+
+  return {
+    syncedCount: syncableCandidates.length
+  };
+}
+
+export async function upsertApprovedCandidateInCrm(prisma: PrismaService, leadId: string, status: string | null) {
+  const stage = crmStageFromCandidateStatus(status);
+  const tags = uniqueTags(["AI 外贸员", "已加入CRM", stage === "contacted" ? "已触达" : "已确认"]);
+
+  return prisma.crmLead.upsert({
+    where: { leadId },
+    create: {
+      leadId,
+      stage,
+      tags
+    },
+    update: {
+      stage,
+      tags
+    }
+  });
+}
+
 export function normalizeTags(value: Prisma.JsonValue | null | undefined) {
   if (!Array.isArray(value)) {
     return [];
@@ -103,4 +154,8 @@ function addDays(date: Date, days: number) {
   const next = new Date(date);
   next.setDate(next.getDate() + days);
   return next;
+}
+
+function crmStageFromCandidateStatus(status: string | null) {
+  return status === "contacted" || status === "email_sent" ? "contacted" : "qualified";
 }

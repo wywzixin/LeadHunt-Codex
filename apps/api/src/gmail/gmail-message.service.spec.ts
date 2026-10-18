@@ -121,7 +121,9 @@ function createPrismaMock() {
       updateMany: vi.fn().mockResolvedValue({ count: 1 })
     },
     leadTask: {
-      update: vi.fn().mockResolvedValue({ id: "22222222-2222-4222-8222-222222222222", status: "email_sent" })
+      update: vi
+        .fn()
+        .mockResolvedValue({ id: "22222222-2222-4222-8222-222222222222", status: "email_sent" })
     },
     outreachDraft: {
       create: vi.fn().mockImplementation(({ data }) =>
@@ -146,14 +148,19 @@ function createPrismaMock() {
       count: vi.fn().mockResolvedValue(0),
       findFirst: vi.fn().mockResolvedValue(null),
       findUnique: vi.fn().mockResolvedValue({ id: sendLogId }),
-      create: vi.fn().mockResolvedValue({
-        id: sendLogId,
-        draftId: "draft-1",
-        status: "pending",
-        providerMessageId: null,
-        sentAt: null,
-        createdAt: new Date("2026-04-30T00:00:00.000Z")
-      }),
+      create: vi.fn().mockImplementation(({ data }) =>
+        Promise.resolve({
+          id: sendLogId,
+          draftId: data.draftId,
+          recipientEmail: data.recipientEmail ?? null,
+          replyTo: data.replyTo ?? null,
+          status: data.status,
+          providerMessageId: null,
+          scheduledAt: data.scheduledAt ?? null,
+          sentAt: null,
+          createdAt: new Date("2026-04-30T00:00:00.000Z")
+        })
+      ),
       update: vi.fn().mockImplementation(({ data }) =>
         Promise.resolve({
           id: sendLogId,
@@ -269,7 +276,9 @@ describe("GmailMessageService", () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "access-token" }))
-      .mockResolvedValueOnce(jsonResponse({ id: "gmail-draft-1", message: { id: "gmail-message-1" } }));
+      .mockResolvedValueOnce(
+        jsonResponse({ id: "gmail-draft-1", message: { id: "gmail-message-1" } })
+      );
     const service = new GmailMessageService(prisma as any, { fetchImpl });
 
     const result = await service.createDraft("user-1", {
@@ -303,16 +312,14 @@ describe("GmailMessageService", () => {
   it("sends only after explicit confirmation and records a send log", async () => {
     setEnv();
     const prisma = createPrismaMock();
-    prisma.followupTask.findFirst
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: "followup-1",
-        leadId: "11111111-1111-4111-8111-111111111111",
-        type: "email_followup",
-        status: "pending",
-        dueAt: followupDueAt,
-        note: "Gmail 触达后 3 天检查是否需要二次跟进"
-      });
+    prisma.followupTask.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      id: "followup-1",
+      leadId: "11111111-1111-4111-8111-111111111111",
+      type: "email_followup",
+      status: "pending",
+      dueAt: followupDueAt,
+      note: "Gmail 触达后 3 天检查是否需要二次跟进"
+    });
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "access-token" }))
@@ -338,6 +345,8 @@ describe("GmailMessageService", () => {
     expect(prisma.sendLog.create).toHaveBeenCalledWith({
       data: {
         draftId: "draft-1",
+        recipientEmail: "prospect@example.com",
+        replyTo: "sender@gmail.com",
         status: "pending"
       }
     });
@@ -350,6 +359,7 @@ describe("GmailMessageService", () => {
       data: {
         status: "sent",
         providerMessageId: "gmail-message-1",
+        lastError: null,
         sentAt: expect.any(Date)
       }
     });
@@ -407,11 +417,151 @@ describe("GmailMessageService", () => {
     });
   });
 
+  it("sends every recipient in a valid Gmail batch", async () => {
+    setEnv();
+    process.env.GMAIL_MIN_SEND_INTERVAL_MS = "60000";
+    const prisma = createPrismaMock();
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "access-token-1" }))
+      .mockResolvedValueOnce(jsonResponse({ id: "gmail-message-1", threadId: "thread-1" }))
+      .mockResolvedValueOnce(jsonResponse({ access_token: "access-token-2" }))
+      .mockResolvedValueOnce(jsonResponse({ id: "gmail-message-2", threadId: "thread-2" }));
+    const mxLookup = vi.fn().mockResolvedValue([{ exchange: "mx.example.com", priority: 10 }]);
+    const service = new GmailMessageService(prisma as any, { fetchImpl, mxLookup });
+
+    const result = await service.sendEmailBatch("user-1", {
+      recipients: [
+        { leadId: "11111111-1111-4111-8111-111111111111", to: "sales@ultrastream.ae" },
+        { leadId: "11111111-1111-4111-8111-111111111111", to: "sales@example.com" }
+      ],
+      subject: "Telecom equipment availability",
+      body: "Hello",
+      confirm: true
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      successCount: 2,
+      totalCount: 2,
+      failureCount: 0
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(mxLookup).toHaveBeenCalledTimes(2);
+    expect(prisma.sendLog.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("validates every batch recipient before sending Gmail messages", async () => {
+    setEnv();
+    const prisma = createPrismaMock();
+    const fetchImpl = vi.fn();
+    const mxLookup = vi.fn().mockImplementation((domain: string) => {
+      if (domain === "ultrastream.ae") {
+        return Promise.resolve([
+          { exchange: "ultrastream-ae.mail.protection.outlook.com", priority: 1 }
+        ]);
+      }
+
+      return Promise.reject(Object.assign(new Error("queryMx ENOTFOUND"), { code: "ENOTFOUND" }));
+    });
+    const service = new GmailMessageService(prisma as any, { fetchImpl, mxLookup });
+
+    await expect(
+      service.sendEmailBatch("user-1", {
+        recipients: [
+          { leadId: "11111111-1111-4111-8111-111111111111", to: "sales@ultrastream.ae" },
+          { leadId: "11111111-1111-4111-8111-111111111111", to: "sales@spectrum-gcc.com" }
+        ],
+        subject: "Telecom equipment availability",
+        body: "Hello",
+        confirm: true
+      })
+    ).rejects.toThrow(/已取消本次批量发送.*spectrum-gcc\.com/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(prisma.outreachDraft.create).not.toHaveBeenCalled();
+    expect(prisma.sendLog.create).not.toHaveBeenCalled();
+  });
+
+  it("blocks a Gmail batch when daily capacity cannot cover every recipient", async () => {
+    setEnv();
+    process.env.GMAIL_DAILY_SEND_LIMIT = "1";
+    const prisma = createPrismaMock();
+    const fetchImpl = vi.fn();
+    const mxLookup = vi.fn().mockResolvedValue([{ exchange: "mx.example.com", priority: 10 }]);
+    const service = new GmailMessageService(prisma as any, { fetchImpl, mxLookup });
+
+    await expect(
+      service.sendEmailBatch("user-1", {
+        recipients: [
+          { leadId: "11111111-1111-4111-8111-111111111111", to: "sales@ultrastream.ae" },
+          { leadId: "11111111-1111-4111-8111-111111111111", to: "sales@example.com" }
+        ],
+        subject: "Telecom equipment availability",
+        body: "Hello",
+        confirm: true
+      })
+    ).rejects.toThrow("daily send limit would be exceeded");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(prisma.outreachDraft.create).not.toHaveBeenCalled();
+    expect(prisma.sendLog.create).not.toHaveBeenCalled();
+  });
+
+  it("schedules a confirmed Gmail message without sending immediately", async () => {
+    setEnv();
+    const prisma = createPrismaMock();
+    const fetchImpl = vi.fn();
+    const mxLookup = vi.fn().mockResolvedValue([{ exchange: "mx.example.com", priority: 10 }]);
+    const service = new GmailMessageService(prisma as any, { fetchImpl, mxLookup });
+    const scheduledAt = new Date(Date.now() + 30 * 60 * 1000);
+
+    const result = await service.scheduleEmail("user-1", {
+      leadId: "11111111-1111-4111-8111-111111111111",
+      to: "prospect@example.com",
+      subject: "Telecom equipment availability",
+      body: "Hello",
+      confirm: true,
+      scheduledAt
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      scheduled: true,
+      scheduledAt,
+      providerMessageId: null
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(prisma.outreachDraft.create).toHaveBeenCalledWith({
+      data: {
+        leadId: "11111111-1111-4111-8111-111111111111",
+        subject: "Telecom equipment availability",
+        body: "Hello",
+        status: "scheduled"
+      }
+    });
+    expect(prisma.sendLog.create).toHaveBeenCalledWith({
+      data: {
+        draftId: "draft-1",
+        recipientEmail: "prospect@example.com",
+        replyTo: "sender@gmail.com",
+        scheduledAt,
+        status: "scheduled"
+      }
+    });
+    expect(prisma.agentStep.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { taskId: "22222222-2222-4222-8222-222222222222", nodeName: "send_gmail" },
+        data: expect.objectContaining({ status: "pending" })
+      })
+    );
+  });
+
   it("blocks Gmail sending when the recipient domain has no MX record", async () => {
     setEnv();
     const prisma = createPrismaMock();
     const fetchImpl = vi.fn();
-    const mxLookup = vi.fn().mockRejectedValue(Object.assign(new Error("queryMx ENOTFOUND"), { code: "ENOTFOUND" }));
+    const mxLookup = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("queryMx ENOTFOUND"), { code: "ENOTFOUND" }));
     const service = new GmailMessageService(prisma as any, { fetchImpl, mxLookup });
 
     await expect(
@@ -451,7 +601,7 @@ describe("GmailMessageService", () => {
     setEnv();
     process.env.GMAIL_MIN_SEND_INTERVAL_MS = "60000";
     const prisma = createPrismaMock();
-    prisma.sendLog.findFirst.mockResolvedValue({ createdAt: new Date() });
+    prisma.sendLog.findFirst.mockResolvedValue({ sentAt: new Date() });
     const fetchImpl = vi.fn();
     const service = new GmailMessageService(prisma as any, { fetchImpl });
 
@@ -474,7 +624,9 @@ describe("GmailMessageService", () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "access-token" }))
-      .mockResolvedValueOnce(jsonResponse(gmailThreadPayload("Please send quotation for RRU and BBU spare parts.")));
+      .mockResolvedValueOnce(
+        jsonResponse(gmailThreadPayload("Please send quotation for RRU and BBU spare parts."))
+      );
     const aiService = {
       classifyReply: vi.fn().mockResolvedValue({
         category: "request_quote",
@@ -561,7 +713,8 @@ describe("GmailMessageService", () => {
       const aiService = {
         classifyReply: vi.fn().mockResolvedValue({
           category,
-          sentiment: category === "rejection" || category === "unsubscribe" ? "negative" : "positive",
+          sentiment:
+            category === "rejection" || category === "unsubscribe" ? "negative" : "positive",
           confidence: 0.82,
           summary: `Classified as ${category}`,
           nextAction: "Route reply"

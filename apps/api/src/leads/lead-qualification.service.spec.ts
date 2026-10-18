@@ -144,6 +144,25 @@ describe("LeadQualificationService", () => {
     ]);
   });
 
+  it("uses the buyer domain instead of a brand-only result title", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Huawei",
+          url: "https://sfttradingllc.com/contact-us/",
+          snippet:
+            "UAE authorized channel partner and telecom equipment distributor for Huawei network equipment.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "UAE" }
+    );
+
+    expect(candidate?.companyName).toBe("SFT Trading LLC");
+  });
+
   it("falls back to domain brands instead of using marketing headlines as company names", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
 
@@ -341,6 +360,96 @@ describe("LeadQualificationService", () => {
         })
       })
     );
+  });
+
+  it("stores a higher-quality AI company name when the result title is domain-derived", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+    const aiEvaluator = vi.fn().mockResolvedValue({
+      companyName: "Ultra Stream Technologies LLC",
+      websiteUrl: "https://www.ustech.ae/huawei-distributor-in-dubai-uae",
+      resultType: "possible_buyer",
+      buyerType: "ICT and ELV supplier / communication equipment distributor",
+      fitScore: 62,
+      confidence: 0.78,
+      decision: "review",
+      matchedSignals: ["Located in UAE", "Huawei distributor in Dubai"],
+      risks: []
+    });
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "ustech - Huawei Distributor in Dubai UAE",
+          url: "https://www.ustech.ae/huawei-distributor-in-dubai-uae",
+          snippet:
+            "Huawei distributor in Dubai UAE with telecom networking products. sales@ultrastream.ae Phone +971 4 553 8728",
+          source: "web"
+        }
+      ],
+      criteria,
+      "UAE",
+      aiEvaluator
+    );
+
+    expect(aiEvaluator).toHaveBeenCalled();
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          companyName: "Ultra Stream Technologies LLC"
+        })
+      })
+    );
+  });
+
+  it("serializes same-task candidate saves so concurrent workers do not duplicate a domain", async () => {
+    const prisma = createPrismaMock();
+    const stored: any[] = [];
+    prisma.leadCandidate.findMany.mockImplementation(async () =>
+      stored.map((lead) => ({
+        id: lead.id,
+        companyName: lead.companyName,
+        website: lead.website,
+        contacts: lead.contacts
+      }))
+    );
+    prisma.leadCandidate.create.mockImplementation(async ({ data }) => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const record = {
+        id: `lead-${stored.length + 1}`,
+        companyName: data.companyName,
+        website: data.website,
+        contacts: data.contacts.create,
+        icpScore: data.icpScore.create
+      };
+      stored.push(record);
+      return record;
+    });
+    const service = new LeadQualificationService(prisma as any);
+    const firstResult = {
+      title: "Switch Link Computers Trading - Huawei Distributor",
+      url: "https://switchlinkct.com/huawei-distributor-dubai-uae/",
+      snippet:
+        "Huawei distributor in Dubai UAE with networking and telecom solutions. info@switchlinkdubai.com +971 55 9670902",
+      source: "web" as const
+    };
+    const secondResult = {
+      title: "Switch Link Computers Trading - Networking Solutions",
+      url: "https://switchlinkct.com/",
+      snippet:
+        "Switch Link Computers Trading supplies networking and telecom solutions in UAE. info@switchlinkdubai.com +971 55 9670902",
+      source: "web" as const
+    };
+
+    const [first, second] = await Promise.all([
+      service.saveCandidates("task-1", [firstResult], criteria, "UAE"),
+      service.saveCandidates("task-1", [secondResult], criteria, "UAE")
+    ]);
+
+    expect(stored).toHaveLength(1);
+    expect(first.createdCount + second.createdCount).toBe(1);
+    expect(first.skippedCount + second.skippedCount).toBe(1);
   });
 
   it("sanitizes AI scoring evidence before writing JSON fields", async () => {
@@ -744,13 +853,50 @@ describe("LeadQualificationService", () => {
     );
   });
 
-  it("keeps verified-country candidates from outside the target list as new-market leads", async () => {
-    // 2026-05 product policy: a verified country outside the selected
-    // target markets is no longer a hard reject. The user explicitly
-    // said "validation fails �?just let it through, more customers is
-    // fine, treat it as opening a new market." We assert both rows
-    // come through and Berlin lands at review-or-better with a
-    // soft-mismatch risk note.
+  it("uses Ethiopia phone evidence to hard-reject GCC off-target candidates", async () => {
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Spectrum Engineering - Telecom Maintenance",
+          url: "https://spectrum-engineering.net/",
+          snippet:
+            "Ethiopia office. Telecom engineering contractor and network maintenance company. Phone +251 982 209 595. info@spectrumengineering.et",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE", "Saudi Arabia", "Qatar", "Oman", "Kuwait"]
+      },
+      "UAE"
+    );
+
+    expect(result.createdCount).toBe(1);
+    const createCall = prisma.leadCandidate.create.mock.calls[0]?.[0];
+    expect(createCall.data.country).toBe("ETHIOPIA");
+    expect(createCall.data.queryCountry).toBe("UAE");
+    expect(createCall.data.countryConfidence).toMatch(/high|medium/);
+    expect(createCall.data.status).toBe("rejected");
+    expect(createCall.data.icpScore.create.score).toBeLessThanOrEqual(39);
+    expect(createCall.data.icpScore.create.reasons.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
+      ])
+    );
+  });
+
+  it("hard-rejects verified-country candidates from outside the target list (no new-market exploration)", async () => {
+    // 2026-05 Stage 2 follow-up: a verified country (high/medium
+    // confidence, no conflict) outside the selected target markets
+    // is now a hard reject. Earlier policy kept these as soft
+    // "new-market exploration" leads, but the buyer-role floor would
+    // routinely rescue them back into the main pool — a Germany task
+    // would surface US/UK/FR sellers for outreach, which the user
+    // never asked for. Verified off-target = settled fact, not hint.
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -796,21 +942,22 @@ describe("LeadQualificationService", () => {
     expect(berlinCall?.[0].data.country).toBe("GERMANY");
     expect(berlinCall?.[0].data.queryCountry).toBe("POLAND");
     expect(berlinCall?.[0].data.countryConflict).toBe(false);
-    expect(["review", "qualified"]).toContain(berlinCall?.[0].data.status);
+    expect(berlinCall?.[0].data.status).toBe("rejected");
+    expect(berlinCall?.[0].data.icpScore.create.score).toBeLessThanOrEqual(39);
     expect(berlinCall?.[0].data.icpScore.create.reasons.risks).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("new-market exploration")
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
       ])
     );
   });
 
-  it("keeps off-target verified countries as new-market leads instead of rejecting them", async () => {
-    // 2026-05: candidate verified outside target markets is no longer
-    // a hard reject. We let it through; the user accepted opening new
-    // markets when validation differs from the query country. The
-    // status here will be review or qualified depending on score; the
-    // important assertion is that we record the country mismatch in
-    // risks rather than dropping the row.
+  it("hard-rejects verified off-target countries (e.g. Kenya target, US-verified Tempest)", async () => {
+    // 2026-05 Stage 2 follow-up: previously this test asserted the
+    // candidate landed at review/qualified with a soft "new-market
+    // exploration" risk. Policy reversed: verified off-target is a
+    // hard reject so the user's selected target markets stay clean.
+    // We still keep the row + record the mismatch in risks so the
+    // user can audit later.
     const prisma = createPrismaMock();
     const service = new LeadQualificationService(prisma as any);
 
@@ -844,10 +991,11 @@ describe("LeadQualificationService", () => {
     expect(tempestCall.country).toBe("UNITED STATES");
     expect(tempestCall.inferredCountry).toBe("UNITED STATES");
     expect(tempestCall.countryConflict).toBe(false);
-    expect(["review", "qualified"]).toContain(tempestCall.status);
+    expect(tempestCall.status).toBe("rejected");
+    expect(tempestCall.icpScore.create.score).toBeLessThanOrEqual(39);
     expect(tempestCall.icpScore.create.reasons.risks).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("new-market exploration")
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
       ])
     );
   });
@@ -1023,14 +1171,277 @@ describe("LeadQualificationService", () => {
 
     expect(uaeScore.status).not.toBe("rejected");
     expect(southAfricaScore.status).not.toBe("rejected");
-    // 2026-05: US (outside the macro region) is now allowed through as
-    // a soft new-market lead, not hard-rejected. The US fixture above
-    // is a real DAS integrator with a verified phone, so it lands in
-    // "review" with a new-market-exploration risk note.
-    expect(usScore.status).not.toBe("rejected");
+    // 2026-05 Stage 2 follow-up: US (verified outside the macro region
+    // Middle East/Africa) is now hard-rejected. Macro target regions
+    // expand member countries (UAE, Saudi, South Africa, etc.) but
+    // anything outside the expanded set + verified high/medium is a
+    // settled off-target.
+    expect(usScore.status).toBe("rejected");
     expect(usScore.risks).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("new-market exploration")
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
+      ])
+    );
+  });
+
+  // 2026-05 Stage 2 follow-up: verified-off-target hard reject must
+  // only fire when (a) the country is verified high/medium, (b) there
+  // is no country conflict, and (c) the country is outside the target
+  // markets. The next four tests pin down those guardrails so the
+  // policy doesn't regress into killing soft / ambiguous candidates.
+
+  it("does NOT hard-reject off-target candidates when country confidence is low", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Mystery DAS Integrator",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        // Low confidence — phone area code only, no address evidence.
+        countryConfidence: "low",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "UNITED STATES",
+            value: "+1 555 1234567",
+            sourceUrl: "https://example.com",
+            confidence: "low"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Germany"] }
+    );
+
+    // Soft mismatch only — score gets the legacy -20 nudge but the
+    // candidate still has a chance to surface for human review.
+    expect(score.status).not.toBe("rejected");
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Official country evidence does not match the selected target markets")
+      ])
+    );
+  });
+
+  it("does NOT hard-reject off-target candidates when country confidence is unknown", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Mystery DAS Integrator",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "unknown",
+        countryConflict: false,
+        countryEvidence: [],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Germany"] }
+    );
+
+    // Unknown confidence falls through to the targetCountryUnverified
+    // branch (risk note, no -20). Candidate keeps its review chance.
+    expect(score.status).not.toBe("rejected");
+  });
+
+  it("does NOT hard-reject country conflicts when one conflict country matches the target market", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Multi-country Integrator",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "medium",
+        countryConflict: true,
+        countryConflictCountries: ["UNITED STATES", "GERMANY"],
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "UNITED STATES",
+            value: "+1 555 1234567",
+            sourceUrl: "https://example.com",
+            confidence: "medium"
+          },
+          {
+            type: "phone",
+            country: "GERMANY",
+            value: "+49 30 1234567",
+            sourceUrl: "https://example.com",
+            confidence: "medium"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Germany"] }
+    );
+
+    // Country conflict means evidence points to two different countries.
+    // If at least one verified signal is the target market, the row is
+    // ambiguous rather than settled off-target.
+    expect(score.status).not.toBe("rejected");
+  });
+
+  it("hard-rejects country conflicts when all verified country signals are outside the target markets", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Second Sight Systems",
+        website: "https://secondsightsystems.com/services/tower-services/",
+        sourceUrl: "https://secondsightsystems.com/services/tower-services/",
+        country: "UNITED STATES",
+        inferredCountry: null,
+        countryConfidence: "low",
+        countryConflict: true,
+        countryConflictCountries: ["UNITED STATES", "PHILIPPINES"],
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "UNITED STATES",
+            value: "+1 844 789 9111",
+            sourceUrl: "https://secondsightsystems.com",
+            confidence: "high"
+          },
+          {
+            type: "phone",
+            country: "PHILIPPINES",
+            value: "63127 844-789-9111",
+            sourceUrl: "https://secondsightsystems.com",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@sssrf.com",
+            sourceUrl: "https://secondsightsystems.com"
+          }
+        ],
+        summary:
+          "Tower services including tower installation, tower maintenance and microwave dish work."
+      },
+      { ...criteria, targetRegions: ["Nigeria", "Kenya"] }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("none of the verified country signals match the selected target markets")
+      ])
+    );
+  });
+
+  it("does NOT hard-reject member-country candidates of a macro target (Middle East + Qatar)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Doha Telecom Maintenance",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "QATAR",
+        inferredCountry: "QATAR",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "QATAR",
+            value: "+974 4 123 4567",
+            sourceUrl: "https://example.com",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Middle East"] }
+    );
+
+    // Qatar is a member country of the "Middle East" macro region, so
+    // matchesTargetRegion must accept it; verified-off-target hard
+    // reject must NOT fire.
+    expect(score.status).not.toBe("rejected");
+  });
+
+  it("hard-rejects medium-confidence verified off-target countries (Germany target + US medium)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        // Strong buyer-role + product signals so the legacy floor
+        // would normally rescue this row to score 55-63. The hard
+        // reject must override regardless.
+        companyName: "US DAS Integrator",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "medium",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            country: "UNITED STATES",
+            value: "+1 630 209 8300",
+            sourceUrl: "https://example.com",
+            confidence: "medium"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: "Telecom DAS small cell system integrator with RRU BBU maintenance services."
+      },
+      { ...criteria, targetRegions: ["Germany"] }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Verified candidate country is outside the selected target markets")
       ])
     );
   });
@@ -1697,6 +2108,38 @@ describe("LeadQualificationService", () => {
     expect(scores[3]?.score).toBeGreaterThan(scores[0]?.score ?? 0);
   });
 
+  it("keeps map/listing pages out of the customer pool despite listing-page contact emails", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const [candidate] = service.normalizeSearchResults(
+      [
+        {
+          title: "Highcloud Solutions Inc - MapQuest",
+          url: "https://www.mapquest.com/us/minnesota/highcloud-solutions-inc-420618817",
+          snippet:
+            "MapQuest local listing for Highcloud Solutions Inc. Network equipment service, job listings, directions, maps, help@mapquest.com.",
+          source: "web"
+        }
+      ],
+      { taskId: "task-1", defaultCountry: "Kenya" }
+    );
+
+    const score = service.scoreCandidate(candidate!, {
+      ...criteria,
+      targetRegions: ["Kenya", "Nigeria"],
+      productKeywords: ["Huawei RRU", "ZTE BBU", "rectifier module"],
+      customerTypeKeywords: ["telecom contractor", "system integrator", "maintenance company"]
+    });
+
+    expect(["intelligence", "rejected"]).toContain(score.status);
+    expect(score.status).not.toBe("review");
+    expect(score.status).not.toBe("qualified");
+    expect(score.pageType).toBe("third_party_profile");
+    expect(score.score).toBeLessThan(50);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Third-party profile")])
+    );
+  });
+
   it("filters dates and long numeric ids out of phone contacts", () => {
     const service = new LeadQualificationService(createPrismaMock() as any);
     const [candidate] = service.normalizeSearchResults(
@@ -1876,6 +2319,396 @@ describe("LeadQualificationService", () => {
               expect.objectContaining({ type: "email", value: "info@qilantelecom.com" }),
               expect.objectContaining({ type: "email", value: "sales@qilantelecom.com" }),
               expect.objectContaining({ type: "phone", value: "+233 302 555 568" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("probes English locale contact pages before the URL cutoff", async () => {
+    const prisma = createPrismaMock();
+    const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/en/contacts")
+        ? `
+          <html><body>
+            Winncom wireless broadband and telecom equipment distributor.
+            <a href="mailto:sales@winncom.com">sales@winncom.com</a>
+            <span>Phone: 440-498-9510</span>
+          </body></html>
+        `
+        : `
+          <html><body>
+            Winncom wireless broadband and telecom equipment distributor.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Winncom Technologies - Telecom Distributor",
+          url: "https://www.winncom.com/",
+          snippet:
+            "United States wireless broadband distributor and telecom equipment stockist for RRU BBU projects.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["United States"]
+      },
+      "United States"
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://www.winncom.com/en/contacts",
+      expect.objectContaining({ headers: expect.any(Object) })
+    );
+    expect(
+      fetchSpy.mock.calls.findIndex(([input]) => String(input) === "https://www.winncom.com/en/contacts")
+    ).toBeLessThan(16);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "sales@winncom.com" }),
+              expect.objectContaining({ type: "phone", value: "440-498-9510" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("corrects brand-only titles and extracts SFT Trading contact details from the contact page", async () => {
+    const prisma = createPrismaMock();
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/contact-us/")
+        ? `
+          <html>
+            <head><title>SFT Trading LLC - Contact Us</title></head>
+            <body>
+              <img alt="SFT Trading LLC Logo" src="/logo.png" />
+              SFT Trading LLC is a UAE telecom equipment distributor and channel partner.
+              Email: info@sfttradingllc.com
+              Phone: +971 4 3212406
+              Mobile: +971 555 822 407
+            </body>
+          </html>
+        `
+        : `
+          <html><body>
+            SFT Trading LLC provides Huawei and ZTE telecom equipment in Dubai.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Huawei",
+          url: "https://sfttradingllc.com/contact-us/",
+          snippet:
+            "UAE channel partner and telecom equipment distributor for Huawei, ZTE, BBU, RRU and rectifier spare parts.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE"],
+        productKeywords: ["Huawei", "ZTE", "BBU", "RRU", "rectifier"],
+        customerTypeKeywords: ["distributor", "channel partner", "stockist"]
+      },
+      "UAE"
+    );
+
+    expect(result.createdCount).toBe(1);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          companyName: "SFT Trading LLC",
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "info@sfttradingllc.com" }),
+              expect.objectContaining({ type: "phone", value: "+971 4 3212406" }),
+              expect.objectContaining({ type: "phone", value: "+971 555 822 407" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("keeps observed sub-path contact pages inside the final probe URL budget", async () => {
+    const prisma = createPrismaMock();
+    const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/mena/contact-us")
+        ? `
+          <html><body>
+            MENA Network Services telecom system integrator.
+            Email: sales@menanet.ae
+            Phone: +971 4 555 1020
+          </body></html>
+        `
+        : `
+          <html><body>
+            MENA Network Services telecom system integrator in UAE.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "MENA Network Services",
+          url: "https://menanet.example/mena/solutions",
+          snippet: "UAE telecom system integrator and network services contractor.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE"]
+      },
+      "UAE"
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://menanet.example/mena/contact-us",
+      expect.objectContaining({ headers: expect.any(Object) })
+    );
+    expect(
+      fetchSpy.mock.calls.findIndex(
+        ([input]) => String(input) === "https://menanet.example/mena/contact-us"
+      )
+    ).toBeLessThan(16);
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "sales@menanet.ae" }),
+              expect.objectContaining({ type: "phone", value: "+971 4 555 1020" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("follows legacy about links with language query params when contact data lives there", async () => {
+    const prisma = createPrismaMock();
+    const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/about.php?lang=en")
+        ? `
+          <html><body>
+            NESIC Saudi telecom system integrator.
+            Email: info@nesicsa.com
+            Tel: +966-13-898-9477
+          </body></html>
+        `
+        : `
+          <html><body>
+            <a href="/about.php?lang=en">About NESIC</a>
+            Saudi telecom system integrator and network contractor.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "NESIC Saudi Arabia",
+          url: "https://nesicsa.com/",
+          snippet: "Saudi Arabia telecom system integrator and network infrastructure contractor.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia"]
+      },
+      "Saudi Arabia"
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://nesicsa.com/about.php?lang=en",
+      expect.objectContaining({ headers: expect.any(Object) })
+    );
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "info@nesicsa.com" }),
+              expect.objectContaining({ type: "phone", value: "+966-13-898-9477" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("follows branded contact page slugs from homepage navigation", async () => {
+    const prisma = createPrismaMock();
+    const fetchSpy = vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      const html = url.endsWith("/contact-us-gbi/")
+        ? `
+          <html><body>
+            Gulf Bridge International telecom Qatar.
+            <a href="mailto:info@gbiinc.com">info@gbiinc.com</a>
+            <a href="mailto:sales@gbiinc.com">sales@gbiinc.com</a>
+            Phone: +974 4009 4444
+          </body></html>
+        `
+        : `
+          <html><body>
+            <a href="/contact-us-gbi/">Contact Us - GBI</a>
+            Gulf Bridge International telecom Qatar.
+          </body></html>
+        `;
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "GBI Gulf Bridge International",
+          url: "https://www.gbiinc.com/",
+          snippet: "Qatar telecom network operator and infrastructure provider.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Qatar"]
+      },
+      "Qatar"
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://www.gbiinc.com/contact-us-gbi/",
+      expect.objectContaining({ headers: expect.any(Object) })
+    );
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({ type: "email", value: "info@gbiinc.com" }),
+              expect.objectContaining({ type: "email", value: "sales@gbiinc.com" }),
+              expect.objectContaining({ type: "phone", value: "+974 4009 4444" })
+            ])
+          }
+        })
+      })
+    );
+  });
+
+  it("retries Sucuri cookie challenge pages before giving up on contact extraction", async () => {
+    const prisma = createPrismaMock();
+    const challengeScript = Buffer.from(
+      `v="a" + String.fromCharCode(98);document.cookie='s'+'u'+"=" + v + ';path=/;max-age=86400'; location.reload();`
+    ).toString("base64");
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      const cookie = (init?.headers as Record<string, string> | undefined)?.cookie;
+      if (url.endsWith("/contact-us/") && cookie === "su=ab") {
+        return new Response(
+          `
+            <html><body>
+              Neo Data Technologies telecom solutions UAE.
+              Email: info@neodatatechnologies.com
+              Mobile: +971 56 418 1800
+            </body></html>
+          `,
+          {
+            status: 200,
+            headers: { "content-type": "text/html; charset=UTF-8" }
+          }
+        );
+      }
+
+      if (url.endsWith("/contact-us/")) {
+        return new Response(
+          `<html><title>You are being redirected...</title><script>var sucuri_cloudproxy_js='',S='${challengeScript}';</script></html>`,
+          {
+            status: 307,
+            headers: { "content-type": "text/html" }
+          }
+        );
+      }
+
+      return new Response("<html><body>Neo Data Technologies UAE telecom solutions.</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" }
+      });
+    });
+    const service = new LeadQualificationService(prisma as any);
+
+    await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Neo Data Technologies",
+          url: "https://neodatatechnologies.com/contact-us/",
+          snippet: "UAE telecom solutions provider and network system integrator.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["UAE"]
+      },
+      "UAE"
+    );
+
+    expect(prisma.leadCandidate.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contacts: {
+            create: expect.arrayContaining([
+              expect.objectContaining({
+                type: "email",
+                value: "info@neodatatechnologies.com"
+              }),
+              expect.objectContaining({ type: "phone", value: "+971 56 418 1800" })
             ])
           }
         })
@@ -2892,5 +3725,734 @@ describe("LeadQualificationService", () => {
     // RRU, spare parts) — should NOT be rejected despite mentioning
     // certification and compliance.
     expect(result.createdCount).toBe(1);
+  });
+
+  // 2026-05 Stage 2 follow-up: off-industry hard reject. The next
+  // five tests pin the verified-off-industry policy: medical/SaaS/etc.
+  // candidates with no target product/customer signal must land in
+  // "rejected" instead of being rescued by the buyer-role floor;
+  // self-guards must keep targeted-bucket queries (SaaS targets
+  // looking for SaaS) and edge-case overlaps (medical-distributor
+  // pages that mention RRU spare parts) intact.
+
+  it("hard-rejects medical/aesthetic candidates when target is telecom (Aesthetix scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Aesthetix Beauty Clinic",
+        website: "https://aesthetix.example.com",
+        sourceUrl: "https://aesthetix.example.com/services",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@aesthetix.example.com",
+            sourceUrl: "https://aesthetix.example.com/contact"
+          }
+        ],
+        // Two off-industry medical bucket terms (aesthetic +
+        // skincare), zero target product/customer signal.
+        summary:
+          "Aesthetix is an aesthetic medical clinic offering cosmetic skincare treatments and dental services for retail customers."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU", "telecom power"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("hard-rejects SaaS/database candidates when target is PLC equipment (MongoDB scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "MongoDB",
+        website: "https://mongodb.com",
+        sourceUrl: "https://mongodb.com/cloud",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "low",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@mongodb.com",
+            sourceUrl: "https://mongodb.com/contact"
+          }
+        ],
+        // Two software_saas bucket hits (database, cloud platform);
+        // zero PLC/automation/integrator signal.
+        summary:
+          "MongoDB Atlas is a developer database and cloud platform used by enterprises around the world."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["PLC programmer", "PLC programming device"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("does NOT off-industry-reject candidates that match a specific target product term", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        // A medical-device distributor that ALSO supplies RRU spare
+        // parts to telecom hospitals. The off-industry hits are
+        // present (medical, hospital), but the candidate text also
+        // contains a specific telecom product term, which must
+        // override the bucket reject.
+        companyName: "Medico Telecom Distributor",
+        website: "https://medicotelecom.example.com",
+        sourceUrl: "https://medicotelecom.example.com/contact",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@medicotelecom.example.com",
+            sourceUrl: "https://medicotelecom.example.com/contact"
+          }
+        ],
+        summary:
+          "Medico distributes RRU spare parts and BBU equipment to medical hospitals and clinical telecom rooms across Germany."
+      },      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU", "telecom power"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    // Specific product signal (RRU/BBU) overrides the medical bucket
+    // hits; status should not be "rejected" purely from off-industry.
+    expect(score.status).not.toBe("rejected");
+  });
+
+  it("does NOT off-industry-reject SaaS candidates when the user is targeting SaaS", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "MongoDB",
+        website: "https://mongodb.com",
+        sourceUrl: "https://mongodb.com/cloud",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "low",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@mongodb.com",
+            sourceUrl: "https://mongodb.com/contact"
+          }
+        ],
+        summary:
+          "MongoDB Atlas is a developer database and cloud platform used by enterprises around the world."
+      },
+      {
+        ...criteria,
+        targetRegions: ["United States"],
+        // User actually IS hunting in the SaaS space — productKeywords
+        // overlap the software_saas bucket. Self-guard must disable
+        // that bucket for this scoring pass.
+        productKeywords: ["database", "cloud platform", "saas"],
+        customerTypeKeywords: ["enterprise developer", "distributor"]
+      }
+    );
+
+    // Self-guard kept the SaaS bucket disabled, so MongoDB should
+    // NOT be rejected by off-industry rules (it may still land at
+    // review depending on score, but never status === "rejected"
+    // on the basis of off-industry alone).
+    expect(score.status).not.toBe("rejected");
+  });
+
+  // 2026-05 P0 follow-up to off-industry hard reject. The first
+  // pass used flat `text.includes(term)` checks, so single-word
+  // bucket terms like `bank`/`banking`/`healthcare` could hit on a
+  // telecom integrator's "industries we serve" nav menu (Kuwait
+  // Telecom + Amanco SA in real GCC tasks). The fix splits each
+  // bucket into STRONG (unambiguous self-identification phrases like
+  // "private bank", "aesthetic medical", "developer database") and
+  // WEAK (single nouns that nav menus use). Detection now requires
+  // ≥1 strong AND total ≥2 hits, OR ≥2 strong hits. Two weak hits
+  // alone never fire.
+
+  it("does NOT off-industry-reject a telecom system integrator that lists Banking/Healthcare in its served-industries menu (Kuwait Telecom scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Kuwait Telecom",
+        website: "https://kuwait-telecom.example.com",
+        sourceUrl: "https://kuwait-telecom.example.com/services",
+        country: "KUWAIT",
+        inferredCountry: "KUWAIT",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+96522123456",
+            country: "KUWAIT",
+            sourceUrl: "https://kuwait-telecom.example.com/contact",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@kuwait-telecom.example.com",
+            sourceUrl: "https://kuwait-telecom.example.com/contact"
+          },
+          {
+            type: "phone" as const,
+            value: "+96522123456",
+            sourceUrl: "https://kuwait-telecom.example.com/contact"
+          }
+        ],
+        // The body says "we are a telecom services provider"; the
+        // header lists served verticals "Telecom Banking Retail
+        // Healthcare". Under the old flat-includes rule the words
+        // banking + healthcare counted as 2 hits and the candidate
+        // was rejected. Under the new strong/weak split they are
+        // both WEAK only — no STRONG finance/medical phrase appears
+        // — so the bucket never fires.
+        summary:
+          "Kuwait Telecom is a Kuwait-based telecom services provider and system integrator delivering IP networks, voice termination services, and managed telecom solutions for governments, enterprises, and operators. Industries served: Telecom, Banking, Retail, Media, Healthcare, Security."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Kuwait", "UAE", "Saudi Arabia"],
+        // Note: no overlap with finance/medical bucket strong terms,
+        // so neither bucket is self-guarded — the win must come from
+        // the strong/weak split alone.
+        productKeywords: ["RRU", "BBU", "telecom equipment", "5G"],
+        customerTypeKeywords: ["operator", "system integrator"]
+      }
+    );
+
+    // The off-industry rule must NOT have fired; that's the only
+    // thing this test pins. The candidate may still land in any of
+    // qualified/review depending on other signals.
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("does NOT off-industry-reject an HCIS-approved security/telecom integrator whose markets menu lists Banking/Healthcare/Government (Amanco SA scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Amanco",
+        website: "https://amanco.example.com",
+        sourceUrl: "https://amanco.example.com/about",
+        country: "SAUDI ARABIA",
+        inferredCountry: "SAUDI ARABIA",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+966114736100",
+            country: "SAUDI ARABIA",
+            sourceUrl: "https://amanco.example.com/contact",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@amanco.example.com",
+            sourceUrl: "https://amanco.example.com/contact"
+          },
+          {
+            type: "phone" as const,
+            value: "+966114736100",
+            sourceUrl: "https://amanco.example.com/contact"
+          }
+        ],
+        summary:
+          "Amanco is a Saudi Arabia HCIS Approved Security System Integrator and telecom solutions supplier. We provide complete telecommunication and security solutions including PAGA, mass notification, fire alarm, and industrial communication systems for industrial buyers. Our Markets: Oil & Gas, Petrochemical, Transportation, Government, Banking, Healthcare, Defence, Education."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia", "UAE", "Qatar"],
+        productKeywords: ["telecom equipment", "fire alarm", "PAGA"],
+        customerTypeKeywords: ["system integrator", "industrial buyer"]
+      }
+    );
+
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("STILL hard-rejects a real bank whose own copy contains multiple strong finance phrases (Hamburg Commercial Bank scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Hamburg Commercial Bank",
+        website: "https://hcob-bank.example.com",
+        sourceUrl: "https://hcob-bank.example.com/business-areas/corporates",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@hcob-bank.example.com",
+            sourceUrl: "https://hcob-bank.example.com/contact"
+          }
+        ],
+        // A genuine commercial bank's own page. Multiple STRONG
+        // finance phrases ("commercial bank", "investment banking",
+        // "wealth management", "asset management") plus the WEAK
+        // "bank"/"banking" mentions easily clear the threshold.
+        summary:
+          "Hamburg Commercial Bank is a leading commercial bank offering investment banking, wealth management, and asset management services to corporates and institutional investors across Germany."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["PLC programmer", "industrial automation", "automation"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  it("STILL hard-rejects an aesthetic clinic with multiple strong medical phrases (Aesthetix scenario, post-strong/weak refactor)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Aesthetix Beauty Clinic",
+        website: "https://aesthetix.example.com",
+        sourceUrl: "https://aesthetix.example.com/services",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@aesthetix.example.com",
+            sourceUrl: "https://aesthetix.example.com/contact"
+          }
+        ],
+        // Strong: "aesthetic medical", "medical clinic", "skincare",
+        // "dental clinic". Comfortably ≥2 strong, no self-guard.
+        summary:
+          "Aesthetix is an aesthetic medical clinic offering cosmetic skincare treatments and dental clinic services for retail customers."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["PLC programmer", "industrial automation"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    expect(score.status).toBe("rejected");
+    expect(score.score).toBeLessThanOrEqual(39);
+    expect(score.risks).toEqual(
+      expect.arrayContaining([expect.stringContaining("Off-industry signal")])
+    );
+  });
+
+  // 2026-05 P1 follow-up to off-industry: page-quality / content
+  // classifier was using flat text.includes() against
+  // contentNoiseTerms + newsContentTerms. Real telecom/SI buyer
+  // pages whose nav menu contained "News" / "Media" links got
+  // misclassified as content_or_directory and routed into
+  // content_evidence with a 49-cap. The next four tests pin the
+  // strong/weak refactor:
+  //  - real telecom/SI sites are NOT classified as content pages
+  //    just because of a single weak nav-menu word
+  //  - real news/article pages STILL get classified as content
+
+  it("does NOT classify a real telecom/SI buyer page as content just because the nav menu has a 'News' link (Kuwait Telecom scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Kuwait Telecom",
+        website: "https://kuwait-telecom.example.com",
+        sourceUrl: "https://kuwait-telecom.example.com/",
+        country: "KUWAIT",
+        inferredCountry: "KUWAIT",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+96522123456",
+            country: "KUWAIT",
+            sourceUrl: "https://kuwait-telecom.example.com/contact",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@kuwait-telecom.example.com",
+            sourceUrl: "https://kuwait-telecom.example.com/contact"
+          },
+          {
+            type: "phone" as const,
+            value: "+96522123456",
+            sourceUrl: "https://kuwait-telecom.example.com/contact"
+          }
+        ],
+        // Real telecom buyer-side body copy. The only "content" word
+        // here is the nav-menu link "News" at the very end. Under the
+        // old flat-includes rule that single weak term tripped
+        // contentNoiseTerms and the candidate got page-typed as
+        // content_or_directory + content_evidence (scoreCap 49).
+        summary:
+          "Kuwait Telecom is a network operator and telecom system integrator delivering IP networks, voice termination services, and managed telecom solutions for businesses, carriers, and the telecom industry. Industries served: Telecom, Banking, Retail, Media, Healthcare, Security. About Us Get A Quote News"
+      },
+      {
+        ...criteria,
+        targetRegions: ["Kuwait", "UAE", "Saudi Arabia"],
+        productKeywords: ["RRU", "BBU", "telecom equipment", "5G"],
+        customerTypeKeywords: ["operator", "system integrator"]
+      }
+    );
+
+    // The page-quality / news-content classifier must NOT have
+    // misclassified this as content. Both risk strings come from
+    // pageType-driven branches we want suppressed for nav-menu hits.
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "Search result looks like article, report, job, training, or media content"
+        )
+      ])
+    );
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "News, article, blog, media, report, or content page cannot enter the main customer list"
+        )
+      ])
+    );
+    expect(score.pageType).not.toBe("content_or_directory");
+    expect(score.leadType).not.toBe("content_evidence");
+  });
+
+  it("does NOT classify an HCIS-approved system integrator as content because its menu has 'Media' (Amanco SA scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Amanco",
+        website: "https://amanco.example.com",
+        sourceUrl: "https://amanco.example.com/about",
+        country: "SAUDI ARABIA",
+        inferredCountry: "SAUDI ARABIA",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+966114736100",
+            country: "SAUDI ARABIA",
+            sourceUrl: "https://amanco.example.com/contact",
+            confidence: "high"
+          }
+        ],
+        contacts: [
+          {
+            type: "email" as const,
+            value: "info@amanco.example.com",
+            sourceUrl: "https://amanco.example.com/contact"
+          },
+          {
+            type: "phone" as const,
+            value: "+966114736100",
+            sourceUrl: "https://amanco.example.com/contact"
+          }
+        ],
+        summary:
+          "Amanco is a Saudi Arabia HCIS Approved Security System Integrator and telecom contractor providing complete telecommunication and security solutions including PAGA, mass notification, fire alarm, and industrial communication systems. Latest News and Media coverage available."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Saudi Arabia", "UAE", "Qatar"],
+        productKeywords: ["telecom equipment", "fire alarm", "PAGA"],
+        customerTypeKeywords: ["system integrator", "telecom contractor"]
+      }
+    );
+
+    expect(score.risks).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "Search result looks like article, report, job, training, or media content"
+        )
+      ])
+    );
+    expect(score.pageType).not.toBe("content_or_directory");
+    expect(score.leadType).not.toBe("content_evidence");
+  });
+
+  it("STILL classifies a real news/article URL as content even when the candidate country IS in target (EE Times-style scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "EE Times Germany",
+        website: "https://www.eetimes.example.de",
+        sourceUrl:
+          "https://www.eetimes.example.de/european-telecoms-eye-openran-to-replace-huawei-equipment/",
+        // Country deliberately set to IN-TARGET so the assertion is
+        // not contaminated by verified off-target hard reject. If the
+        // page-quality / news classifier were broken, a Germany news
+        // page would slip through into review/qualified.
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        countryEvidence: [
+          {
+            type: "phone",
+            value: "+4930123456",
+            country: "GERMANY",
+            sourceUrl: "https://www.eetimes.example.de",
+            confidence: "high"
+          }
+        ],
+        contacts: [],
+        // Multiple weak news/content terms in the body — under the
+        // new strong/weak rule, weak >= 3 fires hasNewsContentSignal.
+        // Plus an explicit URL slug that looksLikeArticlePath would
+        // also pick up via the /20\d{2}/ pattern... but the slug
+        // here uses kebab-case headline. Rely on weak >= 3 alone.
+        summary:
+          "EE Times Germany — European telecoms eye OpenRAN to replace Huawei equipment. Read the full news article. Categories: news, blog, media, article. Author: a journalist."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU", "PLC programmer"],
+        customerTypeKeywords: ["distributor", "system integrator"]
+      }
+    );
+
+    // Strong assertion: page must be classified as content_or_directory
+    // AND content_evidence risks must be present. Country is IN-target,
+    // so this isolates the page-quality / news classifier behaviour.
+    expect(score.pageType).toBe("content_or_directory");
+    expect(score.leadType).toBe("content_evidence");
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "News, article, blog, media, report, or content page cannot enter the main customer list"
+        )
+      ])
+    );
+    expect(score.status).not.toBe("qualified");
+  });
+
+  it("STILL rejects market-research style pages via hardContentNoise (Future Market Insights scenario)", () => {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    const score = service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Future Market Insights",
+        website: "https://www.futuremarketinsights.example.com",
+        sourceUrl:
+          "https://www.futuremarketinsights.example.com/reports/5g-ran-market",
+        country: "UNITED STATES",
+        inferredCountry: "UNITED STATES",
+        countryConfidence: "medium",
+        countryConflict: false,
+        contacts: [],
+        // "market report"/"industry report"/"research report" are
+        // hardRejectContentTerms — they make hardContentNoise=true
+        // and the page is page-typed as content_or_directory.
+        summary:
+          "Future Market Insights publishes the latest market report, industry report, and research report on the 5G RAN market with detailed market size, market share, and market forecast figures."
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU"],
+        customerTypeKeywords: ["operator", "system integrator"]
+      }
+    );
+
+    // Market-research page must stay out of qualified.
+    expect(score.score).toBeLessThanOrEqual(58);
+    expect(score.status).not.toBe("qualified");
+    expect(score.pageType).toBe("content_or_directory");
+  });
+
+  it("threads productProfileAnalysis.negativeKeywords + customerProfileAnalysis.disqualifiers into the disqualifying-terms penalty", async () => {
+    // 2026-05 Stage 2 follow-up first cut (item A): disqualifiers
+    // pulled from the persisted profile analyses. We assert via
+    // saveCandidates that a candidate snippet containing one of
+    // those terms gets the existing -20 penalty + risk note.
+    const prisma = createPrismaMock();
+    const service = new LeadQualificationService(prisma as any);
+
+    const result = await service.saveCandidates(
+      "task-1",
+      [
+        {
+          title: "Berlin Telecom Service",
+          url: "https://berlintelecom.de/services",
+          // Real disqualifier hit — "training center" appears in
+          // affirmative context (no negation cue), so the matcher
+          // counts it. The negation-aware test below covers the
+          // P2 case where a similar phrase is explicitly negated.
+          snippet:
+            "Berlin Telecom Service distributes RRU and BBU equipment. Our training center hosts certification courses for installers.",
+          source: "web"
+        }
+      ],
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        disqualifiers: ["consumer mobile phones", "training center"]
+      },
+      "Germany"
+    );
+
+    expect(result.createdCount).toBe(1);
+    const created = prisma.leadCandidate.create.mock.calls[0]?.[0]?.data;
+    expect(created?.icpScore?.create?.reasons?.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Contains disqualifying terms")
+      ])
+    );
+  });
+
+  // 2026-05 Stage 2 follow-up (P2): negation-context aware disqualifier.
+  // The plain text.includes() match used to fire the -20 penalty on
+  // candidates that EXPLICITLY rejected the term in their own copy
+  // ("We do not sell consumer mobile phones"). The next four tests
+  // pin the new behavior: explicit negation cues short-circuit the
+  // match, but real negative pages still trip the penalty.
+  //
+  // We exercise scoreCandidate directly here instead of going through
+  // saveCandidates so the assertion is unambiguous: only the
+  // disqualifier-penalty path is under test, not the upstream
+  // normalize/dedupe filters that may drop a row entirely on its own
+  // grounds.
+
+  function scoreWithDisqualifier(
+    snippet: string,
+    disqualifiers: string[]
+  ) {
+    const service = new LeadQualificationService(createPrismaMock() as any);
+    return service.scoreCandidate(
+      {
+        taskId: "task-1",
+        companyName: "Berlin Telecom Service",
+        website: "https://example.com",
+        sourceUrl: "https://example.com/contact",
+        country: "GERMANY",
+        inferredCountry: "GERMANY",
+        countryConfidence: "high",
+        countryConflict: false,
+        contacts: [
+          {
+            type: "email" as const,
+            value: "sales@example.com",
+            sourceUrl: "https://example.com/contact"
+          }
+        ],
+        summary: snippet
+      },
+      {
+        ...criteria,
+        targetRegions: ["Germany"],
+        productKeywords: ["RRU", "BBU"],
+        customerTypeKeywords: ["distributor", "system integrator"],
+        disqualifiers
+      }
+    );
+  }
+
+  it("does NOT fire disqualifier penalty when the term is in an explicit negation context", () => {
+    const score = scoreWithDisqualifier(
+      "Berlin Telecom Service distributes RRU and BBU equipment. We do not sell consumer mobile phones; full B2B telecom contractor scope.",
+      ["consumer mobile phones"]
+    );
+    expect(
+      score.risks.some((r) => r.startsWith("Contains disqualifying terms"))
+    ).toBe(false);
+  });
+
+  it("DOES fire disqualifier penalty when the term appears in a normal affirmative context", () => {
+    const score = scoreWithDisqualifier(
+      "Berlin Telecom Service is a wholesale distributor of RRU and BBU equipment AND consumer mobile phones for retail partners.",
+      ["consumer mobile phones"]
+    );
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Contains disqualifying terms")
+      ])
+    );
+  });
+
+  it("DOES fire disqualifier penalty when SOME match is negated but ANOTHER is affirmative", () => {
+    // Two occurrences of "consumer mobile phones": the first is
+    // governed by "do not sell" and is suppressed; the second is in a
+    // plain affirmative context and must trip the penalty.
+    const score = scoreWithDisqualifier(
+      "Berlin Telecom Service does not sell consumer mobile phones to end users. Wholesale partners can still buy consumer mobile phones in bulk through our distribution arm.",
+      ["consumer mobile phones"]
+    );
+    expect(score.risks).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Contains disqualifying terms")
+      ])
+    );
+  });
+
+  it("does NOT fire disqualifier penalty for 'without X' / 'except X' phrasings", () => {
+    const score = scoreWithDisqualifier(
+      "Berlin Telecom Service distributes RRU and BBU equipment without marketplace listings, except career events organized by partners.",
+      ["marketplace", "career"]
+    );
+    expect(
+      score.risks.some((r) => r.startsWith("Contains disqualifying terms"))
+    ).toBe(false);
   });
 });

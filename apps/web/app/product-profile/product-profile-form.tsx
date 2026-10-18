@@ -1,9 +1,8 @@
 "use client";
 
-import type { ChangeEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Globe2, LockKeyhole, Play, RotateCcw, Save, Sparkles, UploadCloud } from "lucide-react";
+import { Globe2, Link2, LockKeyhole, Play, RotateCcw, Save, Sparkles } from "lucide-react";
 
 type ProductProfileState = {
   productLinksText: string;
@@ -11,6 +10,8 @@ type ProductProfileState = {
   documentUrlsText: string;
   notes: string;
 };
+
+const PRODUCT_PROFILE_NOTES_MAX_LENGTH = 300;
 
 const initialState: ProductProfileState = {
   productLinksText: "https://telecorenet.com/\nhttps://telecorenet.com/products",
@@ -27,7 +28,7 @@ const guideItems = [
     text: "让 AI 读取你的独立站、产品目录和主营产品范围"
   },
   {
-    icon: UploadCloud,
+    icon: Link2,
     title: "补充产品资料",
     text: "可补充产品目录、库存表、报价表、产品图片或资料链接"
   },
@@ -41,7 +42,6 @@ const guideItems = [
 export function ProductProfileForm() {
   const router = useRouter();
   const [form, setForm] = useState<ProductProfileState>(initialState);
-  const [documentFileNames, setDocumentFileNames] = useState<string[]>([]);
   const [status, setStatus] = useState("");
 
   const productLinks = useMemo(() => splitLines(form.productLinksText), [form.productLinksText]);
@@ -86,11 +86,6 @@ export function ProductProfileForm() {
 
   function updateField(field: keyof ProductProfileState, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
-  }
-
-  function updateDocumentFiles(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []).map((file) => file.name);
-    setDocumentFileNames(files);
   }
 
   async function persistProfile() {
@@ -142,7 +137,7 @@ export function ProductProfileForm() {
       </header>
 
       <section className="productGuide">
-        <h2>这个功能是做什么的？</h2>
+        <h2>先告诉 AI 你卖什么</h2>
         <div className="productGuideGrid">
           {guideItems.map((item) => {
             const Icon = item.icon;
@@ -166,12 +161,6 @@ export function ProductProfileForm() {
       </section>
 
       <section className="productFormCard">
-        <aside className="productSteps" aria-label="产品画像填写步骤">
-          <StepItem index={1} title="产品基础信息" text="先告诉 AI 你的官网、产品页或主营产品范围" />
-          <StepItem index={2} title="补充资料" text="上传资料或导入库存记录，帮助 AI 更准确理解产品能力" />
-          <StepItem index={3} title="补充说明" text="补充官网看不出来的优势、现货能力、品牌范围和适用场景" />
-        </aside>
-
         <div className="productFields">
           <label className="productField productLinksField">
             <span>官网 / 产品页链接 *</span>
@@ -192,15 +181,15 @@ export function ProductProfileForm() {
             />
           </label>
 
-          <label className="productField productUploadField">
-            <span>上传资料（可选）</span>
-            <div className="productUploadBox">
-              <input type="file" multiple onChange={updateDocumentFiles} />
-              <UploadCloud aria-hidden="true" size={21} />
-              <strong>点击上传或拖拽文件到此处</strong>
-              <small>支持产品目录、库存表、报价表、产品图片</small>
-            </div>
-            {documentFileNames.length ? <small>已选择：{documentFileNames.join(", ")}</small> : null}
+          <label className="productField productNotesField">
+            <span>补充说明（可选）</span>
+            <textarea
+              maxLength={PRODUCT_PROFILE_NOTES_MAX_LENGTH}
+              value={form.notes}
+              onChange={(event) => updateField("notes", event.target.value)}
+              placeholder="例如：我们主要做某类产品及备件，支持项目供货、现货补货和定制需求..."
+            />
+            <small>{form.notes.length} / {PRODUCT_PROFILE_NOTES_MAX_LENGTH}</small>
           </label>
 
           <label className="productField">
@@ -210,16 +199,6 @@ export function ProductProfileForm() {
               onChange={(event) => updateField("documentUrlsText", event.target.value)}
               placeholder="https://your-domain.com/catalog.pdf"
             />
-          </label>
-
-          <label className="productField productNotesField">
-            <span>补充说明（可选）</span>
-            <textarea
-              value={form.notes}
-              onChange={(event) => updateField("notes", event.target.value)}
-              placeholder="例如：我们主要做某类产品及备件，支持项目供货、现货补货和定制需求..."
-            />
-            <small>{form.notes.length} / 4000</small>
           </label>
         </div>
       </section>
@@ -242,15 +221,6 @@ export function ProductProfileForm() {
         </div>
       </section>
 
-      <div className="profileActionTips" aria-label="保存方式说明">
-        <span>
-          <b>保存并开始找客户</b>：保存产品画像后进入 AI 外贸员，用最新资料启动找客户流程。
-        </span>
-        <span>
-          <b>仅保存</b>：只更新产品画像，停留在当前页面，不创建找客户任务。
-        </span>
-      </div>
-
       <div className="productActions">
         <button className="primary productPrimaryAction" type="button" onClick={handleSaveAndStart}>
           <Play aria-hidden="true" size={16} />
@@ -268,18 +238,6 @@ export function ProductProfileForm() {
         ) : null}
       </div>
     </section>
-  );
-}
-
-function StepItem({ index, title, text }: { index: number; title: string; text: string }) {
-  return (
-    <div className="productStep">
-      <span>{index}</span>
-      <div>
-        <strong>{title}</strong>
-        <p>{text}</p>
-      </div>
-    </div>
   );
 }
 

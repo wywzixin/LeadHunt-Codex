@@ -15,7 +15,14 @@
         "take_snapshot",
         "click",
         "evaluate_script",
-        "fill"
+        "fill",
+        "take_screenshot",
+        "wait_for",
+        "new_page",
+        "list_network_requests",
+        "get_network_request",
+        "emulate",
+        "type_text"
       ]
     }
   }

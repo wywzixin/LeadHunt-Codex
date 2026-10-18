@@ -64,18 +64,33 @@ export class AuthController {
   @Get("google")
   google(@Res() response: Response) {
     const result = this.authService.buildGoogleAuthorizationUrl();
-    response.setHeader("Set-Cookie", serializeGoogleStateCookie(result.state, result.maxAgeSeconds));
+    response.setHeader(
+      "Set-Cookie",
+      serializeGoogleStateCookie(result.state, result.maxAgeSeconds)
+    );
     return response.redirect(result.url);
   }
 
   @Get("google/callback")
-  async googleCallback(@Req() request: Request, @Query() query: unknown, @Res() response: Response) {
-    const result = await this.authService.loginWithGoogleCallback(query, readGoogleStateCookie(request));
-    response.setHeader("Set-Cookie", [
-      serializeSessionCookie(result.session, sessionMaxAgeSeconds),
-      serializeExpiredGoogleStateCookie()
-    ]);
-    return response.redirect(process.env.FRONTEND_URL ?? "http://localhost:3000");
+  async googleCallback(
+    @Req() request: Request,
+    @Query() query: unknown,
+    @Res() response: Response
+  ) {
+    try {
+      const result = await this.authService.loginWithGoogleCallback(
+        query,
+        readGoogleStateCookie(request)
+      );
+      response.setHeader("Set-Cookie", [
+        serializeSessionCookie(result.session, sessionMaxAgeSeconds),
+        serializeExpiredGoogleStateCookie()
+      ]);
+      return response.redirect(process.env.FRONTEND_URL ?? "http://localhost:3000");
+    } catch (error) {
+      response.setHeader("Set-Cookie", serializeExpiredGoogleStateCookie());
+      return response.redirect(buildGoogleAuthFailureUrl(error));
+    }
   }
 }
 
@@ -90,7 +105,13 @@ function serializeGoogleStateCookie(state: string, maxAgeSeconds: number) {
 }
 
 function serializeExpiredGoogleStateCookie() {
-  return [`${googleStateCookieName}=`, "HttpOnly", "Path=/api/auth/google", "SameSite=Lax", "Max-Age=0"].join("; ");
+  return [
+    `${googleStateCookieName}=`,
+    "HttpOnly",
+    "Path=/api/auth/google",
+    "SameSite=Lax",
+    "Max-Age=0"
+  ].join("; ");
 }
 
 function readGoogleStateCookie(request: Request) {
@@ -100,5 +121,41 @@ function readGoogleStateCookie(request: Request) {
   }
 
   const cookies = header.split(";").map((part) => part.trim());
-  return cookies.find((part) => part.startsWith(`${googleStateCookieName}=`))?.slice(googleStateCookieName.length + 1) ?? null;
+  return (
+    cookies
+      .find((part) => part.startsWith(`${googleStateCookieName}=`))
+      ?.slice(googleStateCookieName.length + 1) ?? null
+  );
+}
+
+function buildGoogleAuthFailureUrl(error: unknown) {
+  const frontendUrl = (process.env.FRONTEND_URL ?? "http://localhost:3000").replace(/\/+$/, "");
+  const reason = toGoogleAuthFailureReason(error);
+  return `${frontendUrl}/login?google=error&reason=${encodeURIComponent(reason)}`;
+}
+
+function toGoogleAuthFailureReason(error: unknown) {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.includes("state")) {
+    return "state";
+  }
+  if (message.includes("not configured") || message.includes("invalid_client")) {
+    return "config";
+  }
+  if (message.includes("redirect_uri")) {
+    return "redirect_uri";
+  }
+  if (
+    message.includes("fetch failed") ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("network")
+  ) {
+    return "network";
+  }
+  if (message.includes("profile")) {
+    return "profile";
+  }
+
+  return "failed";
 }

@@ -24,7 +24,6 @@ import {
   type LeadHuntWorkflowState,
   type WorkflowStepStatus,
   type WorkflowStep,
-  type OperatorSource,
   createLeadHuntWorkflowGraph,
   createInitialWorkflowSteps,
   interrupt
@@ -38,6 +37,7 @@ import type {
   ProductProfileAnalysis,
   SearchStrategyPlan
 } from "../ai/leadhunt-ai.schemas.js";
+import { ensureApprovedCandidatesInCrm, upsertApprovedCandidateInCrm } from "../crm/crm-sync.js";
 import {
   LeadQualificationService,
   type IcpScoringCriteria
@@ -62,9 +62,36 @@ type LeadTaskListRow = {
   created_at: Date;
   updated_at: Date;
   prompt: string | null;
+  input_payload: Prisma.JsonValue | null;
   lead_count: number | bigint | null;
   query_count: number | bigint | null;
+  pending_crm_count: number | bigint | null;
+  pending_email_count: number | bigint | null;
+  total_count: number | bigint | null;
 };
+
+// 2026-05 Stage 3 follow-up: workbench KPIs need to aggregate over the
+// user's full task history, not the `limit=30` window the list view
+// shows. This row is the single-row result of a small SQL that scans
+// every task owned by the user and folds the same per-task counters.
+type LeadTaskSummaryRow = {
+  task_count: number | bigint | null;
+  today_lead_count: number | bigint | null;
+  pending_crm_count: number | bigint | null;
+  pending_email_count: number | bigint | null;
+};
+
+// 2026-05 Stage 2 follow-up: structured reasons for why a continuation
+// search-append produced (or didn't produce) new queries. Surfaced on
+// the /search response so the frontend can show "未生成新的搜索指令"
+// instead of pretending the click did nothing.
+type ContinuationAppendReason =
+  | "appended"
+  | "pending_remaining"
+  | "missing_payload"
+  | "ai_unavailable"
+  | "ai_error"
+  | "no_new_queries";
 
 type PlannedSearchQuery = {
   provider: string;
@@ -131,11 +158,11 @@ type EmailReviewResume = {
 
 const MAX_SYNC_SEARCH_QUERY_LIMIT = 500;
 const MAX_CANDIDATE_RESULTS_PER_QUERY = 20;
-const DEFAULT_SEARCH_QUERY_COUNT = 20;
+const DEFAULT_SEARCH_QUERY_COUNT = 30;
 const SEARCH_STRATEGY_INITIAL_QUERY_COUNT = 15;
 const DEFAULT_MAIN_CUSTOMER_QUERY_COUNT = 24;
 const DEFAULT_CHANNEL_CUSTOMER_QUERY_COUNT = 6;
-const MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT = DEFAULT_SEARCH_QUERY_COUNT;
+const MIN_EXECUTABLE_GPT_SEARCH_QUERY_COUNT = 14;
 const SEARCH_STRATEGY_MAX_REFILL_ATTEMPTS = 2;
 const PRODUCT_PROFILE_TIMEOUT_MS = 75_000;
 const CUSTOMER_PROFILE_TIMEOUT_MS = 75_000;
@@ -164,9 +191,11 @@ const PER_QUERY_SAVE_CANDIDATES_TIMEOUT_MS = 120_000;
 // auto-marked failed during recovery so they don't accumulate forever.
 const STALE_RUNNING_TASK_HOURS = 24;
 const FIRST_STAGE_SEARCH_QUERY_LIMIT = 15;
-// 2026-05: Lane K default query count. First batch targets 16-18 Lane K
-// queries; continue-search batches can increase this to 24-28.
-const LANE_K_DEFAULT_QUERY_COUNT = 20;
+// 2026-05: fixed 30-query batch mix. Lane K gives the user quick,
+// high-recall results; GPT advanced queries carry precision; reverse
+// customer mining is capped so lookalike searches do not dominate.
+const LANE_K_DEFAULT_QUERY_COUNT = 12;
+const REVERSE_CUSTOMER_QUERY_COUNT = 4;
 // 2026-05 V1-MVP+: query-level worker pool concurrency. Default 3 means
 // up to 3 search queries are processed in parallel. JS is single-threaded
 // but the per-query work spends most of its time in Brave HTTP, contact
@@ -568,11 +597,11 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     });
 
     for (const task of tasks) {
-      // 2026-05 P1: also reset any "running" search queries on the
-      // recovered task back to "pending" so the next loop iteration
-      // can pick them up. A query stuck on "running" before the crash
-      // would otherwise be skipped by countPendingSearchQueries.
-      await this.resetStuckRunningSearchQueries(task.id);
+      // 2026-05 P1: reconcile any "running" search queries before
+      // recovery. If Brave already returned results, do not retry that
+      // potentially expensive query forever; finish it. Queries with no
+      // results can still be safely re-claimed.
+      await this.reconcileStaleRunningSearchQueries(task.id);
 
       const input = createTaskInputFromPayload(task.inputPayload, task.targetCount ?? undefined);
       if (!input) {
@@ -617,14 +646,29 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async resetStuckRunningSearchQueries(taskId: string) {
-    await this.prisma.searchQuery.updateMany({
+  private async reconcileStaleRunningSearchQueries(taskId: string) {
+    const completedWithResults = await this.prisma.searchQuery.updateMany({
       where: {
         taskId,
-        executionStatus: "running"
+        executionStatus: "running",
+        resultCount: { gt: 0 }
+      },
+      data: { executionStatus: "completed" }
+    });
+
+    const resetWithoutResults = await this.prisma.searchQuery.updateMany({
+      where: {
+        taskId,
+        executionStatus: "running",
+        resultCount: { lte: 0 }
       },
       data: { executionStatus: "pending" }
     });
+
+    return {
+      completedWithResults: completedWithResults.count,
+      resetWithoutResults: resetWithoutResults.count
+    };
   }
 
   private async runAutonomousLeadDiscovery(
@@ -640,9 +684,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
 
       if (options.skipPlanning) {
         const queryCount = await this.prisma.searchQuery.count({ where: { taskId } });
+        const recoveredPlan = await this.recoverMissingInitialSearchPlanQueries(
+          taskId,
+          input,
+          queryCount
+        );
         await this.markStepCompleted(taskId, "plan_search_queries", {
           recovered: true,
-          queryCount
+          queryCount: recoveredPlan.queryCount,
+          recoveredCreatedCount: recoveredPlan.appendedCount,
+          recoveredReason: recoveredPlan.reason
         });
       } else {
         // 2026-05 V1-MVP Step 3: concurrent planning + search.
@@ -694,10 +745,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         // Launch slow phase in the background. The catch swallows the
         // error so the brave_search polling loop is not interrupted —
         // we record the failure on the plan_search_queries step instead.
+        const advancedQueryTarget = Math.max(
+          0,
+          DEFAULT_SEARCH_QUERY_COUNT - fastBundle.context.searchQueries.length
+        );
         slowPromise = this.runSlowPlanningAndAppendGptQueries(
           taskId,
           fastBundle.fastResult,
-          fastBundle.targetMarkets ?? []
+          fastBundle.targetMarkets ?? [],
+          [],
+          advancedQueryTarget
         )
           .then(async (result) => {
             // Record success on plan_search_queries step + update
@@ -719,9 +776,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
             });
             await this.updateTaskAiPlanningSignals(taskId, {
               enabled: true,
-              querySource: slowResult.aiQueryCount
-                ? "gpt55_only"
-                : "gpt55_failed_or_rejected",
+              querySource: slowResult.aiQueryCount ? "gpt55_only" : "gpt55_failed_or_rejected",
               gptSearchQueryCount: slowResult.aiQueryCount,
               gptRefillAttempts: slowResult.gptRefillAttempts,
               gptRefillAcceptedCount: slowResult.gptRefillAcceptedCount,
@@ -735,9 +790,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
             const message = searchErrorMessage(error);
             // Slow phase failure does NOT fail the task. Lane K
             // continues, querySource is downgraded to lane_k_only.
-            await this.markStepFailed(taskId, "plan_search_queries", message).catch(
-              () => {}
-            );
+            await this.markStepFailed(taskId, "plan_search_queries", message).catch(() => {});
             await this.updateTaskAiPlanningSignals(taskId, {
               enabled: true,
               querySource: "lane_k_only",
@@ -827,14 +880,99 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async recoverMissingInitialSearchPlanQueries(
+    taskId: string,
+    input: CreateTaskInput,
+    existingQueryCount: number
+  ): Promise<{ appendedCount: number; queryCount: number; reason: string }> {
+    const desiredCount = Math.max(
+      1,
+      Math.floor(input.targetCount ?? DEFAULT_SEARCH_QUERY_COUNT)
+    );
+    if (existingQueryCount >= desiredCount) {
+      return {
+        appendedCount: 0,
+        queryCount: existingQueryCount,
+        reason: "already_complete"
+      };
+    }
+
+    const task = await this.prisma.leadTask.findUnique({
+      where: { id: taskId },
+      select: { inputPayload: true }
+    });
+    const payload = toPlainObject(task?.inputPayload);
+    const productProfileAnalysis = (payload.productProfileAnalysis ??
+      null) as ProductProfileAnalysis | null;
+    const customerProfileAnalysis = (payload.customerProfileAnalysis ??
+      null) as CustomerProfileAnalysis | null;
+    const keywordGroups = (payload.keywordGroups ?? null) as KeywordGroups | null;
+    if (!productProfileAnalysis || !customerProfileAnalysis || !keywordGroups) {
+      return {
+        appendedCount: 0,
+        queryCount: existingQueryCount,
+        reason: "missing_payload"
+      };
+    }
+
+    const existingQueries = await this.prisma.searchQuery.findMany({
+      where: { taskId },
+      select: { query: true, country: true, strategyTemplate: true }
+    });
+    const missingCount = Math.max(0, desiredCount - existingQueries.length);
+    if (missingCount === 0) {
+      return {
+        appendedCount: 0,
+        queryCount: existingQueries.length,
+        reason: "already_complete"
+      };
+    }
+
+    const fastResult = {
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      keywordGroups,
+      aiKeywordExpansion: (payload.aiKeywordExpansion ?? null) as KeywordExpansionResult | null,
+      fallbackReasons: [] as string[],
+      channelCustomersRequested: Boolean(
+        ((payload.profileSignals ?? {}) as Record<string, unknown>)?.channelCustomersRequested
+      ),
+      serviceAvailable: true
+    } as Awaited<ReturnType<AgentWorkflowService["runFastPlanning"]>>;
+    const targetMarkets = keywordGroups.marketTerms?.length ? keywordGroups.marketTerms : [];
+    const priorAcceptedQueries = existingQueries.map((row) => ({
+      query: row.query,
+      country: row.country ?? null,
+      strategyType: row.strategyTemplate ?? null
+    }));
+
+    try {
+      const result = await this.runSlowPlanningAndAppendGptQueries(
+        taskId,
+        fastResult,
+        targetMarkets,
+        priorAcceptedQueries,
+        missingCount
+      );
+      return {
+        appendedCount: result.appendedCount,
+        queryCount: existingQueries.length + result.appendedCount,
+        reason: result.appendedCount > 0 ? "completed_partial_plan" : "no_new_queries"
+      };
+    } catch (error) {
+      return {
+        appendedCount: 0,
+        queryCount: existingQueries.length,
+        reason: `planning_error:${searchErrorMessage(error)}`
+      };
+    }
+  }
+
   // 2026-05 V1-MVP Step 6: helper to update the persisted aiPlanning
   // signals on inputPayload after slow phase resolves (success or
   // failure). Reads + merges so we don't clobber other inputPayload
   // fields written by the fast phase.
-  private async updateTaskAiPlanningSignals(
-    taskId: string,
-    aiPlanning: Record<string, unknown>
-  ) {
+  private async updateTaskAiPlanningSignals(taskId: string, aiPlanning: Record<string, unknown>) {
     const task = await this.prisma.leadTask.findUnique({
       where: { id: taskId },
       select: { inputPayload: true }
@@ -859,15 +997,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   }
 
   private resetStaleRunningSearchQueries(taskId: string) {
-    return this.prisma.searchQuery.updateMany({
-      where: {
-        taskId,
-        executionStatus: "running"
-      },
-      data: {
-        executionStatus: "pending"
-      }
-    });
+    return this.reconcileStaleRunningSearchQueries(taskId);
   }
 
   private async markPlanningWorkflowFailed(taskId: string, error: unknown) {
@@ -1096,12 +1226,29 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     return { workflow, draftCount };
   }
 
-  async listTasksForUser(userId: string, options: { search?: string; limit?: number } = {}) {
+  async listTasksForUser(
+    userId: string,
+    options: {
+      search?: string;
+      status?: "all" | "active" | "completed" | "stopped";
+      limit?: number;
+      offset?: number;
+    } = {}
+  ) {
     const limit = Math.min(Math.max(options.limit ?? 30, 1), 100);
+    const offset = Math.max(options.offset ?? 0, 0);
     const search = options.search?.trim();
     const searchClause = search
       ? Prisma.sql`AND COALESCE(lead_tasks.input_payload->>'prompt', '') ILIKE ${`%${escapeLikePattern(search)}%`} ESCAPE ${"\\"}`
       : Prisma.empty;
+    const statusClause =
+      options.status === "active"
+        ? Prisma.sql`AND lead_tasks.status IN ('running', 'searching')`
+        : options.status === "completed"
+          ? Prisma.sql`AND lead_tasks.status IN ('paused', 'completed')`
+          : options.status === "stopped"
+            ? Prisma.sql`AND lead_tasks.status IN ('failed', 'cancelled')`
+            : Prisma.empty;
 
     const tasks = await this.prisma.$queryRaw<LeadTaskListRow[]>(Prisma.sql`
       SELECT
@@ -1110,8 +1257,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         lead_tasks.created_at,
         lead_tasks.updated_at,
         lead_tasks.input_payload->>'prompt' AS prompt,
+        lead_tasks.input_payload,
         COALESCE(lead_counts.lead_count, 0)::int AS lead_count,
-        COALESCE(query_counts.query_count, 0)::int AS query_count
+        COALESCE(query_counts.query_count, 0)::int AS query_count,
+        COALESCE(pending_crm_counts.pending_crm_count, 0)::int AS pending_crm_count,
+        COALESCE(pending_email_counts.pending_email_count, 0)::int AS pending_email_count,
+        count(*) OVER()::int AS total_count
       FROM lead_tasks
       LEFT JOIN LATERAL (
         SELECT count(*)::int AS lead_count
@@ -1126,15 +1277,116 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         FROM search_queries
         WHERE search_queries.task_id = lead_tasks.id
       ) query_counts ON true
+      -- 2026-05 Stage 3 workbench KPI aggregation. Stays SQL-side so the
+      -- workbench doesn't need to fan out 30 detail fetches just to
+      -- build the top-level counters.
+      LEFT JOIN LATERAL (
+        -- "待同步 CRM" = leads in the main pool (review / qualified)
+        -- that haven't been approved into a CRM row yet. Approve flips
+        -- status to approved/contacted/email_sent and creates the CRM
+        -- row, so this counter naturally drains as the user works
+        -- through the pool.
+        SELECT count(*)::int AS pending_crm_count
+        FROM lead_candidates
+        WHERE lead_candidates.task_id = lead_tasks.id
+          AND lead_candidates.status IN ('review', 'qualified')
+      ) pending_crm_counts ON true
+      LEFT JOIN LATERAL (
+        -- "邮件待确认" = leads that have at least one outreach draft
+        -- in 'draft' status with no successful send_log yet. Once the
+        -- user confirms and sends, the draft flips out of 'draft' and
+        -- a send_log row lands, so this counter drops.
+        SELECT count(DISTINCT lead_candidates.id)::int AS pending_email_count
+        FROM lead_candidates
+        JOIN outreach_drafts
+          ON outreach_drafts.lead_id = lead_candidates.id
+         AND outreach_drafts.status = 'draft'
+        WHERE lead_candidates.task_id = lead_tasks.id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM send_logs
+            WHERE send_logs.draft_id = outreach_drafts.id
+              AND send_logs.status = 'sent'
+          )
+      ) pending_email_counts ON true
       WHERE lead_tasks.user_id = ${userId}
+        AND lead_tasks.deleted_at IS NULL
       ${searchClause}
+      ${statusClause}
       ORDER BY lead_tasks.created_at DESC
       LIMIT ${limit}
+      OFFSET ${offset}
+    `);
+
+    // 2026-05 Stage 3 follow-up: compute the workbench KPI summary over
+    // the user's FULL task history, independent of the list `limit`.
+    // The previous workbench KPIs aggregated only the latest 30 list
+    // rows, so a new task could push an old one out of the window and
+    // make the counters drop — which read like the user lost data.
+    // The list response now ships a separate `summary` block computed
+    // here in one extra round-trip; per-task `pendingCrmCount` /
+    // `pendingEmailCount` stay on the list rows for the pool cards.
+    const [summaryRow] = await this.prisma.$queryRaw<LeadTaskSummaryRow[]>(Prisma.sql`
+      SELECT
+        (
+          SELECT count(*)::int
+          FROM lead_tasks
+          WHERE lead_tasks.user_id = ${userId}
+            AND lead_tasks.deleted_at IS NULL
+        ) AS task_count,
+        COALESCE((
+          SELECT sum(lead_count)::int FROM (
+            SELECT count(*)::int AS lead_count
+            FROM lead_candidates
+            INNER JOIN lead_tasks
+              ON lead_tasks.id = lead_candidates.task_id
+            WHERE lead_tasks.user_id = ${userId}
+              AND lead_tasks.deleted_at IS NULL
+              AND lead_tasks.created_at >= date_trunc('day', now())
+              AND lead_candidates.status IN ('review', 'qualified', 'approved', 'contacted', 'email_sent')
+              AND lead_candidates.country_confidence IN ('high', 'medium')
+              AND lead_candidates.country_conflict = false
+            GROUP BY lead_tasks.id
+          ) per_task_today
+        ), 0) AS today_lead_count,
+        COALESCE((
+          SELECT count(*)::int
+          FROM lead_candidates
+          INNER JOIN lead_tasks
+            ON lead_tasks.id = lead_candidates.task_id
+          WHERE lead_tasks.user_id = ${userId}
+            AND lead_tasks.deleted_at IS NULL
+            AND lead_candidates.status IN ('review', 'qualified')
+        ), 0) AS pending_crm_count,
+        COALESCE((
+          SELECT count(DISTINCT lead_candidates.id)::int
+          FROM lead_candidates
+          INNER JOIN lead_tasks
+            ON lead_tasks.id = lead_candidates.task_id
+          INNER JOIN outreach_drafts
+            ON outreach_drafts.lead_id = lead_candidates.id
+           AND outreach_drafts.status = 'draft'
+          WHERE lead_tasks.user_id = ${userId}
+            AND lead_tasks.deleted_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM send_logs
+              WHERE send_logs.draft_id = outreach_drafts.id
+                AND send_logs.status = 'sent'
+            )
+        ), 0) AS pending_email_count
     `);
 
     return {
+      totalCount:
+        tasks.length > 0
+          ? toNumberCount(tasks[0]?.total_count ?? null)
+          : search || (options.status && options.status !== "all")
+            ? 0
+            : toNumberCount(summaryRow?.task_count ?? null),
       tasks: tasks.map((task) => {
         const prompt = task.prompt ?? "";
+        const payload = parseTaskPayload(task.input_payload);
         return {
           id: task.id,
           status: task.status,
@@ -1142,14 +1394,26 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           updatedAt: task.updated_at,
           prompt,
           title: prompt ? prompt.slice(0, 36) : "未命名任务",
+          targetMarkets: compactStringList(payload.keywordGroups?.marketTerms ?? [], 4),
           leadCount: toNumberCount(task.lead_count),
-          queryCount: toNumberCount(task.query_count)
+          queryCount: toNumberCount(task.query_count),
+          pendingCrmCount: toNumberCount(task.pending_crm_count),
+          pendingEmailCount: toNumberCount(task.pending_email_count)
         };
-      })
+      }),
+      summary: {
+        taskCount: toNumberCount(summaryRow?.task_count ?? null),
+        todayLeadCount: toNumberCount(summaryRow?.today_lead_count ?? null),
+        pendingCrmCount: toNumberCount(summaryRow?.pending_crm_count ?? null),
+        pendingEmailCount: toNumberCount(summaryRow?.pending_email_count ?? null)
+      }
     };
   }
 
   async getTaskForUser(userId: string, taskId: string) {
+    await this.ensureTaskForUser(userId, taskId);
+    await ensureApprovedCandidatesInCrm(this.prisma, userId, { taskId });
+
     const task = await this.prisma.leadTask.findFirst({
       where: { id: taskId, userId },
       select: {
@@ -1297,6 +1561,25 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     }
 
     return compactTaskForClient(task);
+  }
+
+  async softDeleteTaskForUser(userId: string, taskId: string) {
+    const updated = await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE lead_tasks
+      SET deleted_at = now(), updated_at = now()
+      WHERE id = ${taskId}
+        AND user_id = ${userId}
+        AND deleted_at IS NULL
+    `);
+
+    if (updated === 0) {
+      throw new NotFoundException("Lead task not found");
+    }
+
+    return {
+      ok: true,
+      taskId
+    };
   }
 
   async getTaskEventsForUser(userId: string, taskId: string) {
@@ -1459,7 +1742,46 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async executeBraveSearchForTask(userId: string, taskId: string, input: { limit?: number } = {}) {
+  async executeBraveSearchForTask(
+    userId: string,
+    taskId: string,
+    input: { limit?: number; appendIfEmpty?: boolean } = {}
+  ) {
+    await this.ensureTaskForUser(userId, taskId);
+    // 2026-05 Stage 2 follow-up: "继续搜索 30 条" path. When the task
+    // has no pending/running queries left, /search is a no-op without
+    // explicitly appending a new batch first. The pool detail page now
+    // sends `appendIfEmpty=true`; legacy callers (graph workflow's own
+    // brave_search node, polling resumes) leave it false so they keep
+    // the existing "drain pending queue" semantics.
+    let appendedCount = 0;
+    let appendReason: ContinuationAppendReason | undefined;
+    if (input.appendIfEmpty) {
+      const result = await this.appendContinuationSearchQueriesForTask(userId, taskId, {
+        limit: input.limit ?? DEFAULT_SEARCH_QUERY_COUNT
+      });
+      appendedCount = result.appendedCount;
+      appendReason = result.reason;
+
+      if (appendedCount === 0 && appendReason !== "pending_remaining") {
+        return {
+          ok: true,
+          executedQueries: 0,
+          successfulQueries: 0,
+          failedQueries: 0,
+          resultCount: 0,
+          createdCandidates: 0,
+          skippedCandidates: 0,
+          fallback: false,
+          errors: [],
+          hasMore: false,
+          remainingQueries: 0,
+          appendedQueries: appendedCount,
+          appendReason
+        };
+      }
+    }
+
     const graphRun = this.createSearchToEmailGraphHandlers(userId, taskId, input);
     const workflow = (await createLeadHuntWorkflowGraph({
       startAt: "brave_search",
@@ -1473,6 +1795,27 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     await this.updateTaskStatusFromWorkflow(taskId, workflow);
     await this.persistWorkflowSnapshot(taskId, workflow, "search-to-email");
     const searchResult = graphRun.getSearchResult();
+
+    // 2026-05 Stage 2 follow-up: only surface appendedQueries when the
+    // caller actually requested an append. The legacy graph-driven
+    // path (and existing tests) rely on the search result shape
+    // staying byte-identical.
+    if (input.appendIfEmpty) {
+      return searchResult
+        ? { ...searchResult, appendedQueries: appendedCount, appendReason }
+        : {
+            ok: false,
+            executedQueries: 0,
+            resultCount: 0,
+            createdCandidates: 0,
+            skippedCandidates: 0,
+            appendedQueries: appendedCount,
+            appendReason,
+            errors: [{ queryId: taskId, message: workflow.error ?? "Search workflow did not run" }],
+            hasMore: false,
+            remainingQueries: 0
+          };
+    }
 
     return (
       searchResult ?? {
@@ -1666,16 +2009,16 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // Reset any "running" queries left over by crashed/timeout workers
-    // so a later batch (or the recovery path) can re-claim them.
-    const stillRunning = await this.prisma.searchQuery.updateMany({
-      where: { taskId, executionStatus: "running" },
-      data: { executionStatus: "pending" }
-    });
-    if (stillRunning.count > 0) {
+    // Reconcile any "running" queries left over by crashed/timeout
+    // workers. Preserve already-returned Brave results as terminal so
+    // recovery does not retry the same high-cost query forever.
+    const reconciledRunning = await this.reconcileStaleRunningSearchQueries(taskId);
+    const reconciledCount =
+      reconciledRunning.completedWithResults + reconciledRunning.resetWithoutResults;
+    if (reconciledCount > 0) {
       stats.searchErrors.push({
         queryId: "*",
-        message: `${stillRunning.count} queries left in running state by worker pool exit (reset to pending)`
+        message: `${reconciledCount} queries left in running state by worker pool exit (${reconciledRunning.completedWithResults} completed with results, ${reconciledRunning.resetWithoutResults} reset to pending)`
       });
     }
 
@@ -1871,8 +2214,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       stats.resultCount += searchCount;
       stats.createdCandidates += saved.createdCount;
       stats.skippedCandidates += saved.skippedCount;
-      const qualifiedFromThisQuery = saved.candidates.filter(
-        (c: { status?: string | null }) => c.status === "qualified"
+      const qualifiedFromThisQuery = saved.candidates.filter((c: { status?: string | null }) =>
+        ["review", "qualified", "approved", "contacted", "email_sent"].includes(c.status ?? "")
       ).length;
       await this.prisma.searchQuery.update({
         where: { id: query.id },
@@ -2151,6 +2494,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   }
 
   async summarizeTaskForUser(userId: string, taskId: string) {
+    await this.ensureTaskForUser(userId, taskId);
     const task = await this.prisma.leadTask.findFirst({
       where: { id: taskId, userId },
       include: {
@@ -2236,6 +2580,7 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     taskId: string,
     input: { leadIds?: string[] } = {}
   ) {
+    await this.ensureTaskForUser(userId, taskId);
     const graphRun = this.createSearchToEmailGraphHandlers(userId, taskId);
 
     try {
@@ -2359,6 +2704,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       },
       data: { status: "approved" }
     });
+    await Promise.all(
+      approvedLeadIds.map((leadId) => upsertApprovedCandidateInCrm(this.prisma, leadId, "approved"))
+    );
 
     return {
       selected,
@@ -2628,10 +2976,14 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async ensureTaskForUser(userId: string, taskId: string) {
-    const task = await this.prisma.leadTask.findFirst({
-      where: { id: taskId, userId },
-      select: { id: true }
-    });
+    const [task] = await this.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT id
+      FROM lead_tasks
+      WHERE id = ${taskId}
+        AND user_id = ${userId}
+        AND deleted_at IS NULL
+      LIMIT 1
+    `);
 
     if (!task) {
       throw new NotFoundException("Lead task not found");
@@ -2754,7 +3106,8 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       siteEvidence,
       customerProfileAnalysis,
       keywordGroups,
-      targetMarkets
+      targetMarkets,
+      maxQueries: REVERSE_CUSTOMER_QUERY_COUNT
     });
 
     // 2026-05: Lane K keyword-combination queries (backend-assembled).
@@ -2764,40 +3117,62 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     // reduces GPT time (fewer queries to write) and improves hit rate
     // (short natural phrases vs complex operator queries).
     const keywordPool = aiPlanning.keywordPool;
-    const laneKTargetCount = Math.max(
-      0,
-      LANE_K_DEFAULT_QUERY_COUNT - reverseNetworkQueries.length
-    );
     const laneKQueries = buildLaneKQueriesFromKeywordGroups({
       keywordGroups,
       productProfileAnalysis,
       customerProfileAnalysis,
       targetMarkets: targetMarkets ?? [],
-      maxQueries: laneKTargetCount,
+      maxQueries: LANE_K_DEFAULT_QUERY_COUNT,
       keywordPool
     });
+    const advancedQueryCount = Math.max(
+      0,
+      DEFAULT_SEARCH_QUERY_COUNT - laneKQueries.length - reverseNetworkQueries.length
+    );
+    let advancedQueries = baseSearchQueries
+      .filter(
+        (q) =>
+          !laneKQueries.some((k) => k.query.toLowerCase() === q.query.toLowerCase()) &&
+          !reverseNetworkQueries.some((r) => r.query.toLowerCase() === q.query.toLowerCase())
+      )
+      .slice(0, advancedQueryCount);
+    if (advancedQueries.length < advancedQueryCount) {
+      const seen = new Set(
+        [...laneKQueries, ...reverseNetworkQueries, ...advancedQueries].map((query) =>
+          query.query.toLowerCase().trim()
+        )
+      );
+      const fallbackAdvancedQueries = buildAdvancedSearchQueriesFromKeywordGroups({
+        keywordGroups,
+        productProfileAnalysis,
+        customerProfileAnalysis,
+        targetMarkets: targetMarkets ?? [],
+        maxQueries: advancedQueryCount * 3,
+        keywordPool
+      }).filter((query) => {
+        const key = query.query.toLowerCase().trim();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      advancedQueries = [...advancedQueries, ...fallbackAdvancedQueries].slice(
+        0,
+        advancedQueryCount
+      );
+    }
 
     // 2026-05 P1: Lane K front-loaded. The user experience is "keywords
-    // search fast, advanced queries fill in later". We put the first 12
-    // Lane K queries at the front of the execution queue so the user
-    // sees results within 1-2 minutes. GPT precision queries and
-    // reverse-network queries follow. Any remaining Lane K queries
-    // (long-tail) go at the end.
+    // search fast, advanced queries add precision, reverse-network
+    // queries add lookalike coverage when reference customers exist.
     const LANE_K_FRONT_LOAD_COUNT = 12;
     const laneKFront = laneKQueries.slice(0, LANE_K_FRONT_LOAD_COUNT);
     const laneKTail = laneKQueries.slice(LANE_K_FRONT_LOAD_COUNT);
     const searchQueries: PlannedSearchQuery[] = [
       ...laneKFront,
-      ...baseSearchQueries.filter(
-        (q) => !laneKFront.some((k) => k.query.toLowerCase() === q.query.toLowerCase())
-      ),
-      ...reverseNetworkQueries.filter(
-        (q) =>
-          !laneKFront.some((k) => k.query.toLowerCase() === q.query.toLowerCase()) &&
-          !baseSearchQueries.some((b) => b.query.toLowerCase() === q.query.toLowerCase())
-      ),
+      ...advancedQueries,
+      ...reverseNetworkQueries,
       ...laneKTail
-    ].slice(0, DEFAULT_SEARCH_QUERY_COUNT + LANE_K_DEFAULT_QUERY_COUNT + 10);
+    ].slice(0, DEFAULT_SEARCH_QUERY_COUNT);
 
     return {
       productProfile: product,
@@ -3023,6 +3398,21 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       channelCustomersRequested: boolean;
     };
     targetMarkets?: string[];
+    // 2026-05 Stage 2 follow-up: when set, the first GPT call seeds
+    // its refillContext.acceptedQueries with prior queries so the
+    // model is told upfront not to repeat them. Used by the
+    // "继续搜索 30 条" path so a second batch doesn't collide with
+    // the first.
+    priorAcceptedQueries?: Array<{
+      query: string;
+      country: string | null;
+      strategyType: string | null;
+    }>;
+    // 2026-05 Stage 2 follow-up: cap on planned queries this slow
+    // planning pass is allowed to produce. Initial task creation
+    // sticks to DEFAULT_SEARCH_QUERY_COUNT (20). The continuation
+    // path passes 30 so "继续搜索 30 条" matches its label.
+    desiredQueryCount?: number;
   }): Promise<{
     searchQueries: PlannedSearchQuery[];
     keywordPool?: {
@@ -3039,16 +3429,27 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   }> {
     const fallbackReasons: string[] = [];
     let searchQueries: PlannedSearchQuery[] = [];
-    let keywordPool: {
-      productTerms: string[];
-      buyerRoles: string[];
-      scenarioTerms: string[];
-      excludeFromKeywords: string[];
-    } | undefined;
+    let keywordPool:
+      | {
+          productTerms: string[];
+          buyerRoles: string[];
+          scenarioTerms: string[];
+          excludeFromKeywords: string[];
+        }
+      | undefined;
     let aiQueryCount = 0;
     let gptRefillAttempts = 0;
     let gptRefillAcceptedCount = 0;
     let rejectedAiQueries: Array<{ query: string; country: string; reason: string }> = [];
+
+    // 2026-05 Stage 2 follow-up: caller-provided cap on the planned
+    // queries (continuation runs ask for 30; initial creation keeps
+    // DEFAULT_SEARCH_QUERY_COUNT=20). Used as the slice cap and as
+    // the refill target so refill attempts stop at the right size.
+    const desiredCount = Math.max(
+      1,
+      Math.floor(input.desiredQueryCount ?? DEFAULT_SEARCH_QUERY_COUNT)
+    );
 
     if (!this.leadHuntAiService) {
       return {
@@ -3062,14 +3463,20 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    const { productProfileAnalysis, customerProfileAnalysis, keywordGroups, aiKeywordExpansion, channelCustomersRequested } = input.fastResult;
+    const {
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      keywordGroups,
+      aiKeywordExpansion,
+      channelCustomersRequested
+    } = input.fastResult;
 
     try {
       await this.markOptionalPlanningStepRunning(input.taskId, "plan_search_queries");
       const searchTargetMarkets = input.targetMarkets?.length
         ? input.targetMarkets
         : keywordGroups.marketTerms;
-      const searchStrategyInput = buildSearchStrategyInput({
+      const baseStrategyInput = buildSearchStrategyInput({
         keywordGroups,
         aiKeywordExpansion,
         productProfileAnalysis: productProfileAnalysis as ProductProfileAnalysis,
@@ -3078,6 +3485,27 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         operatorLibrary: compactOperatorLibrary(),
         minQueryCount: SEARCH_STRATEGY_INITIAL_QUERY_COUNT
       });
+      // 2026-05 Stage 2 follow-up: continuation runs seed the very
+      // first GPT call with refillContext.acceptedQueries so the
+      // model is told upfront not to repeat the prior batch. Without
+      // this, GPT can return queries identical to what's already in
+      // search_queries; runSlowPlanningAndAppendGptQueries would
+      // dedupe them all out and append nothing.
+      const searchStrategyInput: SearchStrategyInput =
+        input.priorAcceptedQueries && input.priorAcceptedQueries.length > 0
+          ? {
+              ...baseStrategyInput,
+              refillContext: {
+                requiredAdditionalQueries: SEARCH_STRATEGY_INITIAL_QUERY_COUNT,
+                acceptedQueries: input.priorAcceptedQueries.map((q) => ({
+                  query: q.query,
+                  country: q.country,
+                  strategyType: q.strategyType
+                })),
+                rejectedQueries: []
+              }
+            }
+          : baseStrategyInput;
       const searchPlan = await withTimeout(
         this.leadHuntAiService.generateSearchStrategy(searchStrategyInput),
         SEARCH_STRATEGY_TIMEOUT_MS,
@@ -3098,18 +3526,18 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         searchTargetMarkets,
         channelCustomersRequested
       );
-      let aiQueries = limitPlannedSearchQueries(normalization.queries);
+      let aiQueries = limitPlannedSearchQueries(normalization.queries, desiredCount);
       rejectedAiQueries = normalization.rejected;
 
       while (
         aiQueries.length > 0 &&
-        aiQueries.length < DEFAULT_SEARCH_QUERY_COUNT &&
+        aiQueries.length < desiredCount &&
         gptRefillAttempts < SEARCH_STRATEGY_MAX_REFILL_ATTEMPTS
       ) {
         const queryCountBeforeRefill = aiQueries.length;
         gptRefillAttempts += 1;
         try {
-          const requiredAdditionalQueries = DEFAULT_SEARCH_QUERY_COUNT - aiQueries.length;
+          const requiredAdditionalQueries = desiredCount - aiQueries.length;
           const refillPlan = await withTimeout(
             this.leadHuntAiService.generateSearchStrategy({
               ...searchStrategyInput,
@@ -3133,12 +3561,12 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
           normalization = normalizeAiSearchPlan(
             refillPlan,
             keywordGroups,
-            DEFAULT_SEARCH_QUERY_COUNT,
+            desiredCount,
             searchTargetMarkets,
             channelCustomersRequested,
             aiQueries
           );
-          aiQueries = limitPlannedSearchQueries(normalization.queries);
+          aiQueries = limitPlannedSearchQueries(normalization.queries, desiredCount);
           gptRefillAcceptedCount += Math.max(0, aiQueries.length - queryCountBeforeRefill);
           rejectedAiQueries = uniqueRejectedAiQueries([
             ...rejectedAiQueries,
@@ -3156,9 +3584,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       aiQueryCount = aiQueries.filter(
         (query) => query.templateId === "gpt55_search_strategy"
       ).length;
-      if (aiQueries.length > 0 && aiQueries.length < DEFAULT_SEARCH_QUERY_COUNT) {
+      if (aiQueries.length > 0 && aiQueries.length < desiredCount) {
         fallbackReasons.push(
-          `GPT search plan incomplete: ${aiQueries.length}/${DEFAULT_SEARCH_QUERY_COUNT} executable queries accepted. No deterministic fallback queries were added.`
+          `GPT search plan incomplete: ${aiQueries.length}/${desiredCount} executable queries accepted. No deterministic fallback queries were added.`
         );
       }
       searchQueries = aiQueries;
@@ -3285,7 +3713,9 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   ): Promise<{
     context: TaskExecutionContext;
     fastResult: Awaited<ReturnType<AgentWorkflowService["runFastPlanning"]>>;
-    profileKeywordInput: Parameters<AgentWorkflowService["runFastPlanning"]>[0]["profileKeywordInput"];
+    profileKeywordInput: Parameters<
+      AgentWorkflowService["runFastPlanning"]
+    >[0]["profileKeywordInput"];
     ruleKeywordGroups: KeywordGroups;
     siteEvidence: ProfileSiteEvidence;
     targetMarkets: string[];
@@ -3400,23 +3830,20 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
       siteEvidence,
       customerProfileAnalysis,
       keywordGroups,
-      targetMarkets
+      targetMarkets,
+      maxQueries: REVERSE_CUSTOMER_QUERY_COUNT
     });
 
     // Lane K queries (deterministic, no GPT keywordPool yet — slow
     // phase may produce one later but Lane K doesn't need it). Use the
     // full LANE_K_DEFAULT_QUERY_COUNT budget here, minus reverse slots,
     // because GPT queries are not yet in the mix.
-    const laneKTargetCount = Math.max(
-      0,
-      LANE_K_DEFAULT_QUERY_COUNT - reverseNetworkQueries.length
-    );
     const laneKQueries = buildLaneKQueriesFromKeywordGroups({
       keywordGroups,
       productProfileAnalysis,
       customerProfileAnalysis,
       targetMarkets: targetMarkets ?? [],
-      maxQueries: laneKTargetCount
+      maxQueries: LANE_K_DEFAULT_QUERY_COUNT
     });
 
     // Front-load: K front 12 + reverse + K tail. GPT queries are
@@ -3487,7 +3914,19 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   private async runSlowPlanningAndAppendGptQueries(
     taskId: string,
     fastResult: Awaited<ReturnType<AgentWorkflowService["runFastPlanning"]>>,
-    targetMarkets: string[]
+    targetMarkets: string[],
+    // 2026-05 Stage 2 follow-up: continuation path (continuing search
+    // on a drained task) seeds GPT's refillContext with prior queries
+    // so the new batch doesn't collide with what's already there.
+    priorAcceptedQueries: Array<{
+      query: string;
+      country: string | null;
+      strategyType: string | null;
+    }> = [],
+    // 2026-05 Stage 2 follow-up: caller-controlled cap. Initial
+    // creation passes nothing (defaults to 20). The continuation
+    // path passes 30 so "继续搜索 30 条" matches its label.
+    desiredQueryCount?: number
   ): Promise<{
     slowResult: Awaited<ReturnType<AgentWorkflowService["runSlowPlanning"]>>;
     appendedCount: number;
@@ -3501,24 +3940,44 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
         aiKeywordExpansion: fastResult.aiKeywordExpansion,
         channelCustomersRequested: fastResult.channelCustomersRequested
       },
-      targetMarkets
+      targetMarkets,
+      priorAcceptedQueries,
+      desiredQueryCount
     });
-
-    if (!slowResult.searchQueries.length) {
-      return { slowResult, appendedCount: 0 };
-    }
 
     // Dedupe against existing queries (Lane K + reverse already inserted).
     const existing = await this.prisma.searchQuery.findMany({
       where: { taskId },
       select: { query: true }
     });
-    const existingSet = new Set(
-      existing.map((q) => q.query.toLowerCase().trim())
-    );
-    const newQueries = slowResult.searchQueries.filter(
-      (q) => !existingSet.has(q.query.toLowerCase().trim())
-    );
+    const existingSet = new Set(existing.map((q) => q.query.toLowerCase().trim()));
+    const desiredCount = Math.max(1, Math.floor(desiredQueryCount ?? DEFAULT_SEARCH_QUERY_COUNT));
+    let newQueries = slowResult.searchQueries
+      .filter((q) => !existingSet.has(q.query.toLowerCase().trim()))
+      .slice(0, desiredCount);
+
+    if (newQueries.length < desiredCount) {
+      const seen = new Set([
+        ...existingSet,
+        ...newQueries.map((query) => query.query.toLowerCase().trim())
+      ]);
+      const fallbackCap = Math.max(desiredCount, existing.length + desiredCount * 2);
+      const fallbackQueries = buildAdvancedSearchQueriesFromKeywordGroups({
+        keywordGroups: fastResult.keywordGroups,
+        productProfileAnalysis: fastResult.productProfileAnalysis,
+        customerProfileAnalysis: fastResult.customerProfileAnalysis,
+        targetMarkets,
+        maxQueries: fallbackCap,
+        keywordPool: slowResult.keywordPool
+      }).filter((query) => {
+        const key = query.query.toLowerCase().trim();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      newQueries = [...newQueries, ...fallbackQueries].slice(0, desiredCount);
+    }
 
     if (newQueries.length === 0) {
       return { slowResult, appendedCount: 0 };
@@ -3540,6 +3999,342 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
     });
 
     return { slowResult, appendedCount: newQueries.length };
+  }
+
+  // 2026-05 Stage 2 follow-up: "继续搜索 30 条" path. Appends a fresh
+  // batch of pending search_queries to a task that has already drained
+  // its existing queue. Reuses the slow planning pipeline + dedupes
+  // against existing queries so we don't re-issue the same Brave call
+  // and waste credits. Pre-existing candidates / approved status /
+  // CRM rows are not touched — this only adds new pending rows.
+  //
+  // Returns the number of new queries actually inserted (0 when the
+  // task still has pending/running work, or when GPT returned only
+  // duplicates).
+  // 2026-05 Stage 2 follow-up: "继续搜索 30 条" path. Appends a fresh
+  // batch of pending search_queries to a task that has already drained
+  // its existing queue. Reuses the slow planning pipeline + dedupes
+  // against existing queries so we don't re-issue the same Brave call
+  // and waste credits. Pre-existing candidates / approved status /
+  // CRM rows are not touched — this only adds new pending rows.
+  //
+  // Returns the count of new queries inserted plus a structured reason
+  // (none / pending_remaining / missing_payload / ai_unavailable /
+  // ai_error / no_new_queries / appended). The caller surfaces the
+  // reason on the response so the frontend can show "未生成新的搜索
+  // 指令" instead of pretending nothing happened.
+  private async appendContinuationSearchQueriesForTask(
+    userId: string,
+    taskId: string,
+    input: { limit: number }
+  ): Promise<{ appendedCount: number; reason: ContinuationAppendReason }> {
+    const task = await this.prisma.leadTask.findFirst({
+      where: { id: taskId, userId },
+      select: { id: true, inputPayload: true, targetCount: true }
+    });
+    if (!task) {
+      throw new NotFoundException("Lead task not found");
+    }
+
+    // Skip the append when there's still work to drain — the worker
+    // pool will pick those up on the brave_search call below. This is
+    // the legacy "resume / continue draining" semantics.
+    const pendingCount = await this.prisma.searchQuery.count({
+      where: {
+        taskId,
+        executionStatus: { in: ["pending", "running"] }
+      }
+    });
+    if (pendingCount > 0) {
+      return { appendedCount: 0, reason: "pending_remaining" };
+    }
+
+    const payload = toPlainObject(task.inputPayload);
+    const productProfileAnalysis = (payload.productProfileAnalysis ??
+      null) as ProductProfileAnalysis | null;
+    const customerProfileAnalysis = (payload.customerProfileAnalysis ??
+      null) as CustomerProfileAnalysis | null;
+    const keywordGroups = (payload.keywordGroups ?? null) as KeywordGroups | null;
+    if (!productProfileAnalysis || !customerProfileAnalysis || !keywordGroups) {
+      // Task was created before fast planning persisted these fields;
+      // we can't safely re-run slow planning without them.
+      await this.markContinuationPlanStepCompleted(taskId, 0, "missing_payload");
+      return { appendedCount: 0, reason: "missing_payload" };
+    }
+    const aiKeywordExpansion = (payload.aiKeywordExpansion ??
+      null) as KeywordExpansionResult | null;
+    const channelCustomersRequested = Boolean(
+      ((payload.profileSignals ?? {}) as Record<string, unknown>)?.channelCustomersRequested
+    );
+    const targetMarkets =
+      (keywordGroups.marketTerms?.length ? keywordGroups.marketTerms : []) ?? [];
+
+    // Reuse the slow planning + dedupe pipeline. It already inserts
+    // pending rows via prisma.searchQuery.createMany after deduping
+    // against existing queries. We synthesize a minimal "fastResult"
+    // shape from the persisted inputPayload — only the fields that
+    // runSlowPlanning actually reads.
+    const fastResult = {
+      productProfileAnalysis,
+      customerProfileAnalysis,
+      keywordGroups,
+      aiKeywordExpansion,
+      fallbackReasons: [] as string[],
+      channelCustomersRequested,
+      serviceAvailable: true
+    } as Awaited<ReturnType<AgentWorkflowService["runFastPlanning"]>>;
+
+    // Pull existing queries to seed GPT's refillContext. Without this
+    // the model is blind to the prior batch and will frequently
+    // regenerate the exact same queries — runSlowPlanning's dedupe
+    // would then strip every one of them and we'd append nothing.
+    const existingQueries = await this.prisma.searchQuery.findMany({
+      where: { taskId },
+      select: { query: true, country: true, strategyTemplate: true }
+    });
+    const priorAcceptedQueries = existingQueries.map((row) => ({
+      query: row.query,
+      country: row.country ?? null,
+      strategyType: row.strategyTemplate ?? null
+    }));
+
+    const desiredBatchCount = Math.max(1, Math.floor(input.limit));
+    const existingSet = new Set(existingQueries.map((query) => query.query.toLowerCase().trim()));
+    const seen = new Set(existingSet);
+    const takeNewQueries = (queries: PlannedSearchQuery[], cap: number) => {
+      const output: PlannedSearchQuery[] = [];
+      for (const query of queries) {
+        if (output.length >= cap) break;
+        const key = query.query.toLowerCase().trim();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        output.push(query);
+      }
+      return output;
+    };
+
+    const laneKQueries = takeNewQueries(
+      buildLaneKQueriesFromKeywordGroups({
+        keywordGroups,
+        productProfileAnalysis,
+        customerProfileAnalysis,
+        targetMarkets,
+        maxQueries: Math.max(existingQueries.length + desiredBatchCount * 3, desiredBatchCount)
+      }),
+      Math.min(LANE_K_DEFAULT_QUERY_COUNT, desiredBatchCount)
+    );
+    const siteEvidence = (payload.siteEvidence ?? { referenceCustomerSites: [] }) as
+      | ProfileSiteEvidence
+      | Record<string, unknown>;
+    const reverseQueryBudget = Math.min(
+      REVERSE_CUSTOMER_QUERY_COUNT,
+      Math.max(0, desiredBatchCount - laneKQueries.length)
+    );
+    const discoveredReverseSeeds =
+      reverseQueryBudget > 0
+        ? await this.prisma.leadCandidate.findMany({
+            where: {
+              taskId,
+              status: { in: ["qualified", "review", "approved", "contacted", "email_sent"] },
+              website: { not: null }
+            },
+            select: {
+              companyName: true,
+              website: true,
+              sourceUrl: true
+            },
+            orderBy: { updatedAt: "desc" },
+            take: reverseQueryBudget * 4
+          })
+        : [];
+    const discoveredReverseQueries = takeNewQueries(
+      buildReverseCustomerNetworkQueries({
+        siteEvidence: emptyProfileSiteEvidence(),
+        customerProfileAnalysis,
+        keywordGroups,
+        targetMarkets,
+        maxQueries: reverseQueryBudget * 4,
+        seedCustomers: discoveredReverseSeeds
+      }),
+      reverseQueryBudget
+    );
+    const profileReverseQueries =
+      discoveredReverseQueries.length < reverseQueryBudget
+        ? takeNewQueries(
+            buildReverseCustomerNetworkQueries({
+              siteEvidence: siteEvidence as ProfileSiteEvidence,
+              customerProfileAnalysis,
+              keywordGroups,
+              targetMarkets,
+              maxQueries: Math.max(reverseQueryBudget * 4, reverseQueryBudget)
+            }),
+            reverseQueryBudget - discoveredReverseQueries.length
+          )
+        : [];
+    const reverseNetworkQueries = [...discoveredReverseQueries, ...profileReverseQueries];
+    const fastContinuationQueries = [...laneKQueries, ...reverseNetworkQueries];
+
+    if (fastContinuationQueries.length > 0) {
+      await this.prisma.searchQuery.createMany({
+        data: fastContinuationQueries.map((query) => ({
+          taskId,
+          provider: query.provider,
+          operatorSource: query.operatorSource,
+          executionStatus: "pending",
+          operatorName: query.operatorName,
+          strategyTemplate: query.strategyTemplate,
+          query: query.query,
+          keywordGroups: query.keywordGroups,
+          country: query.country,
+          effectivenessScore: query.effectivenessScore
+        }))
+      });
+    }
+
+    const advancedQueryTarget = Math.max(0, desiredBatchCount - fastContinuationQueries.length);
+    const continuationPriorAcceptedQueries = [
+      ...priorAcceptedQueries,
+      ...fastContinuationQueries.map((query) => ({
+        query: query.query,
+        country: query.country ?? null,
+        strategyType: query.strategyTemplate ?? null
+      }))
+    ];
+
+    try {
+      let advancedAppendedCount = 0;
+      if (advancedQueryTarget > 0) {
+        if (!this.leadHuntAiService) {
+          const fallbackAdvancedQueries = takeNewQueries(
+            buildAdvancedSearchQueriesFromKeywordGroups({
+              keywordGroups,
+              productProfileAnalysis,
+              customerProfileAnalysis,
+              targetMarkets,
+              maxQueries: Math.max(
+                existingQueries.length + advancedQueryTarget * 3,
+                advancedQueryTarget
+              )
+            }),
+            advancedQueryTarget
+          );
+          if (fallbackAdvancedQueries.length > 0) {
+            await this.prisma.searchQuery.createMany({
+              data: fallbackAdvancedQueries.map((query) => ({
+                taskId,
+                provider: query.provider,
+                operatorSource: query.operatorSource,
+                executionStatus: "pending",
+                operatorName: query.operatorName,
+                strategyTemplate: query.strategyTemplate,
+                query: query.query,
+                keywordGroups: query.keywordGroups,
+                country: query.country,
+                effectivenessScore: query.effectivenessScore
+              }))
+            });
+            advancedAppendedCount = fallbackAdvancedQueries.length;
+          } else if (fastContinuationQueries.length === 0) {
+            await this.markContinuationPlanStepCompleted(taskId, 0, "ai_unavailable");
+            return { appendedCount: 0, reason: "ai_unavailable" };
+          }
+        } else {
+          const result = await this.runSlowPlanningAndAppendGptQueries(
+            taskId,
+            fastResult,
+            targetMarkets,
+            continuationPriorAcceptedQueries,
+            advancedQueryTarget
+          );
+          advancedAppendedCount = result.appendedCount;
+        }
+      }
+      const appendedCount = fastContinuationQueries.length + advancedAppendedCount;
+      // Mark task as running again so the polling effect picks the new
+      // work up. updateTaskStatusFromWorkflow runs after the worker
+      // pool finishes and will move it to paused/completed/failed.
+      if (appendedCount > 0) {
+        await this.touchRunningTask(taskId);
+        await this.markContinuationPlanStepCompleted(taskId, appendedCount, "appended");
+        return { appendedCount, reason: "appended" };
+      }
+      // GPT returned only duplicates of priorAcceptedQueries — no new
+      // pending rows landed.
+      await this.markContinuationPlanStepCompleted(taskId, 0, "no_new_queries");
+      return { appendedCount: 0, reason: "no_new_queries" };
+    } catch (error) {
+      // GPT timeout / rate-limit shouldn't fail the whole /search call —
+      // worker pool will simply find no pending queries and the route
+      // returns executedQueries=0 with appendedQueries=0 so the
+      // frontend can surface "no new queries generated".
+      void error;
+      let fallbackAdvancedCount = 0;
+      if (advancedQueryTarget > 0) {
+        const fallbackAdvancedQueries = takeNewQueries(
+          buildAdvancedSearchQueriesFromKeywordGroups({
+            keywordGroups,
+            productProfileAnalysis,
+            customerProfileAnalysis,
+            targetMarkets,
+            maxQueries: Math.max(
+              existingQueries.length + advancedQueryTarget * 3,
+              advancedQueryTarget
+            )
+          }),
+          advancedQueryTarget
+        );
+        if (fallbackAdvancedQueries.length > 0) {
+          await this.prisma.searchQuery.createMany({
+            data: fallbackAdvancedQueries.map((query) => ({
+              taskId,
+              provider: query.provider,
+              operatorSource: query.operatorSource,
+              executionStatus: "pending",
+              operatorName: query.operatorName,
+              strategyTemplate: query.strategyTemplate,
+              query: query.query,
+              keywordGroups: query.keywordGroups,
+              country: query.country,
+              effectivenessScore: query.effectivenessScore
+            }))
+          });
+          fallbackAdvancedCount = fallbackAdvancedQueries.length;
+        }
+      }
+      const fallbackAppendedCount = fastContinuationQueries.length + fallbackAdvancedCount;
+      if (fallbackAppendedCount > 0) {
+        await this.touchRunningTask(taskId);
+        await this.markContinuationPlanStepCompleted(taskId, fallbackAppendedCount, "appended");
+        return { appendedCount: fallbackAppendedCount, reason: "appended" };
+      }
+      await this.markContinuationPlanStepCompleted(taskId, 0, "ai_error");
+      return { appendedCount: 0, reason: "ai_error" };
+    }
+  }
+
+  // 2026-05 Stage 2 follow-up: continuation runs reuse runSlowPlanning,
+  // which marks plan_search_queries as `running`. Without an explicit
+  // closure, the agent_steps row stays "running" even though the task
+  // moved to paused/completed/failed afterwards. The frontend has a
+  // terminal-state gate that papers over this in the UI, but the DB
+  // is still dirty. Fold both success and failure paths back to
+  // `completed` with a note of why so traces stay accurate.
+  private async markContinuationPlanStepCompleted(
+    taskId: string,
+    appendedCount: number,
+    reason: ContinuationAppendReason
+  ) {
+    try {
+      await this.markStepCompleted(taskId, "plan_search_queries", {
+        continuation: true,
+        appendedCount,
+        reason
+      });
+    } catch {
+      // Step may not be in `running` state at all (e.g. AI service
+      // unavailable path never marked it). markStepCompleted is
+      // idempotent in those cases — swallow any spurious errors.
+    }
   }
 
   private async markOptionalPlanningStepRunning(
@@ -3610,15 +4405,14 @@ export class AgentWorkflowService implements OnModuleInit, OnModuleDestroy {
   }
 }
 
-function limitPlannedSearchQueries(queries: PlannedSearchQuery[]) {
-  return queries.slice(0, DEFAULT_SEARCH_QUERY_COUNT);
+function limitPlannedSearchQueries(
+  queries: PlannedSearchQuery[],
+  cap: number = DEFAULT_SEARCH_QUERY_COUNT
+) {
+  return queries.slice(0, Math.max(1, Math.floor(cap)));
 }
 
-async function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  label: string
-): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
@@ -3881,7 +4675,12 @@ function selectSearchPlanningBuyerTerms(
 ) {
   return uniqueStrings([...expansion.purchaseIntentTerms, ...keywordGroups.customerIntentTerms])
     .filter((term) => !isMainCustomerIntelligenceQuery(term))
-    .filter((term) => !/\b(?:procurement|purchasing|rfq|tender|vendor registration|supplier registration)\b/i.test(term))
+    .filter(
+      (term) =>
+        !/\b(?:procurement|purchasing|rfq|tender|vendor registration|supplier registration)\b/i.test(
+          term
+        )
+    )
     .slice(0, 14);
 }
 
@@ -4068,7 +4867,9 @@ function normalizeAiSearchPlan(
       continue;
     }
 
-    if (!isStrategyTypeWithinBudget(output, strategyType, channelCustomersRequested, minQueryCount)) {
+    if (
+      !isStrategyTypeWithinBudget(output, strategyType, channelCustomersRequested, minQueryCount)
+    ) {
       rejected.push({
         query: rawQueryText,
         country: rawCountry,
@@ -4122,6 +4923,16 @@ function normalizeAiSearchPlan(
       continue;
     }
 
+    const weakReferencePivot = detectWeakReferenceCustomerPivot(queryText);
+    if (weakReferencePivot) {
+      rejected.push({
+        query: rawQueryText,
+        country: rawCountry,
+        reason: `weak_reference_customer_pivot:${weakReferencePivot}`
+      });
+      continue;
+    }
+
     if (!hasEnoughQuerySignals(queryText, keywordGroups, country)) {
       rejected.push({
         query: rawQueryText,
@@ -4131,10 +4942,34 @@ function normalizeAiSearchPlan(
       continue;
     }
 
+    // 2026-05 V1-MVP+: enforce the prompt's own ANTI-PATTERN list at
+    // the validator level. The prompt explicitly bans "solution
+    // provider", "solutions provider", "technology provider",
+    // "platform", "ecosystem", marketing superlatives ("top 10", "best
+    // 10"), and report/news/training words because those queries
+    // surface OEM ecosystem pages and operator/carrier home pages
+    // instead of reachable B2B buyers (the very issue that brought
+    // Salam.sa, GBI Inc, Kalaam Telecom into the customer pool). Once
+    // the GPT writes such a query, the backend used to accept it; now
+    // we reject it so the GPT refill pass can replace it with a
+    // concrete buyer-role query.
+    const forbiddenAntiPattern = detectForbiddenSearchAntiPattern(queryText);
+    if (forbiddenAntiPattern) {
+      rejected.push({
+        query: rawQueryText,
+        country: rawCountry,
+        reason: `forbidden_anti_pattern:${forbiddenAntiPattern}`
+      });
+      continue;
+    }
+
     seen.add(queryText.toLowerCase());
     output.push({
       provider: "brave",
-      operatorSource: query.operatorSource as OperatorSource,
+      operatorSource:
+        strategyType === "channel_customer"
+          ? "gpt_channel_buyer_search"
+          : "gpt_advanced_search",
       executionStatus: executionStatus as "supported" | "experimental",
       operatorName:
         strategyType === "channel_customer"
@@ -4194,6 +5029,89 @@ function isAiIntelligenceSearchQuery(
       rawQueryText
     )
   );
+}
+
+// 2026-05 V1-MVP+: detect the ANTI-PATTERN shapes the search-strategy
+// prompt explicitly forbids. Returns the matched pattern label (or
+// null when the query is clean). Keep these checks fast and
+// case-insensitive. The validator runs against the FINAL normalized
+// query text (after backend exclusion suffix is appended), so the
+// regexes target the GPT-authored portion in the middle.
+function detectForbiddenSearchAntiPattern(queryText: string): string | null {
+  const text = queryText.toLowerCase();
+
+  // OEM solution-provider / platform / ecosystem phrasing. These
+  // queries reliably surface OEM partner pages and operator carrier
+  // home pages instead of reachable B2B buyers (Salam.sa, GBI Inc,
+  // Kalaam Telecom were all imported via this anti-pattern).
+  if (
+    /\b(?:solution|solutions|technology|tech)\s+(?:provider|providers)\b/.test(text) ||
+    /\b(?:platform|ecosystem|alliance|initiative|consortium)\b/.test(text)
+  ) {
+    return "solution_provider_phrasing";
+  }
+
+  // Marketing superlatives / list articles. These return Medium /
+  // GoodFirms / Clutch top-N articles, not buyer companies.
+  if (
+    /\btop\s*\d+\s+\w+/.test(text) ||
+    /\bbest\s+\d+/.test(text) ||
+    /\b(?:leading|premier|top[\s-]?rated)\s+\w+\s+(?:companies|suppliers|distributors)\b/.test(text)
+  ) {
+    return "marketing_superlative";
+  }
+
+  // Market research / event / case study queries — these are
+  // intelligence pages, not customer pages.
+  if (
+    /\b(?:market|industry)\s+report\b/.test(text) ||
+    /\bwhitepaper\b/.test(text) ||
+    /\bcase\s+study\b/.test(text) ||
+    /\bsurvey\b/.test(text) ||
+    /\b(?:exhibitor|participant)\s+list\b/.test(text) ||
+    /\bconference\b/.test(text)
+  ) {
+    return "market_report_or_event";
+  }
+
+  // China-supplier directory adjacent vocabulary. Even with target
+  // country these tilt toward Alibaba-style results instead of local
+  // buyer companies.
+  if (
+    /\bwholesale\b/.test(text) ||
+    /\bfactory\s+price\b/.test(text) ||
+    /\b(?:manufacturer|oem)\s+in\s+china\b/.test(text) ||
+    /\bchina\s+(?:supplier|exporter)\b/.test(text)
+  ) {
+    return "china_supplier_directory";
+  }
+
+  // Free-host or template-site filter — never returns real B2B
+  // buyer company sites in GCC/Africa markets.
+  if (
+    /site:sites\.google\.com\b/.test(text) ||
+    /site:wixsite\.com\b/.test(text) ||
+    /site:weebly\.com\b/.test(text) ||
+    /site:business\.site\b/.test(text) ||
+    /site:godaddysites\.com\b/.test(text) ||
+    /site:blogspot\.\w+/.test(text)
+  ) {
+    return "free_host_template_site";
+  }
+
+  return null;
+}
+
+function detectWeakReferenceCustomerPivot(queryText: string): string | null {
+  const pivot = queryText.match(
+    /"([^"]{2,80})"\s*(?:\([^)]*\b(?:client|clients|partner|partners|case stud(?:y|ies)|deployment|deployments|reference|references)\b[^)]*\)|"(?:client|clients|partner|partners|case stud(?:y|ies)|deployment|deployments|reference|references)")/i
+  );
+  if (!pivot?.[1]) {
+    return null;
+  }
+
+  const alias = trimReferenceCompanyName(pivot[1]);
+  return isWeakReferenceCustomerAlias(alias) ? alias : null;
 }
 
 function uniqueRejectedAiQueries(
@@ -4517,9 +5435,7 @@ function reduceQueryComplexity(query: string) {
   output = compactOrGroups(output);
   output = limitNegativeTerms(output, 3);
   while (output.length > 160) {
-    const shortened = output
-      .replace(/\s+-[^\s]+(?=(?:\s+-[^\s]+)*$)/, "")
-      .trim();
+    const shortened = output.replace(/\s+-[^\s]+(?=(?:\s+-[^\s]+)*$)/, "").trim();
     if (!shortened || shortened === output) {
       break;
     }
@@ -4795,28 +5711,45 @@ function shortenLongQuotedPhrases(query: string) {
 // 2026-05 P1: A reference company name may come back from GPT as a
 // slash-joined alias bundle (e.g. "HCT Group / High Cloud Technologies"
 // or "stc / Saudi Telecom Company"). Brave exact-matches the full quoted
-// string and returns 0 results. We pick the SHORTEST alias from the
-// slash split, which is usually the canonical short brand name. As a
-// secondary safeguard, we also drop trailing legal-entity suffixes that
-// hurt exact match (LLC, FZE, FZCO, etc.).
-function trimReferenceCompanyName(name: string): string {
+// string and returns 0 results. Prefer compact aliases, but avoid weak
+// cloud-only aliases such as "Highcloud" when a more specific alias is
+// available; those pivots return MapQuest/Clutch/cloud-hosting noise.
+export function trimReferenceCompanyName(name: string): string {
   const aliases = name
-    .split(/\s*[\/|,]\s*/)
+    .split(/\s*[/|,]\s*/)
     .map((alias) => alias.trim())
     .filter(Boolean);
   if (aliases.length === 0) {
     return name.trim();
   }
-  // Prefer the alias that has 2-3 words (most searchable). Fall back to
-  // the shortest alias by word count.
-  const sortedByWordCount = [...aliases].sort(
-    (a, b) => a.split(/\s+/).length - b.split(/\s+/).length
-  );
-  const idealAlias = sortedByWordCount.find((a) => {
-    const wc = a.split(/\s+/).length;
-    return wc >= 1 && wc <= 4;
+  const sortedAliases = [...aliases].sort((a, b) => {
+    const weakDelta =
+      Number(isWeakReferenceCustomerAlias(a)) - Number(isWeakReferenceCustomerAlias(b));
+    if (weakDelta !== 0) {
+      return weakDelta;
+    }
+    return a.split(/\s+/).length - b.split(/\s+/).length;
   });
-  return (idealAlias ?? sortedByWordCount[0] ?? name).trim();
+  const idealAlias = sortedAliases.find((a) => {
+    const wc = a.split(/\s+/).length;
+    return wc >= 1 && wc <= 4 && !isWeakReferenceCustomerAlias(a);
+  });
+  return (idealAlias ?? sortedAliases[0] ?? name).trim();
+}
+
+function isWeakReferenceCustomerAlias(name: string) {
+  const normalized = name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!normalized) {
+    return true;
+  }
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && /^(?:cloud|highcloud|hicloud|cloudone|cloud1)$/.test(words[0]!)) {
+    return true;
+  }
+  if (words.length <= 2 && words.some((word) => word === "cloud" || word === "highcloud")) {
+    return true;
+  }
+  return false;
 }
 
 function isSafeQueryNegativeTerm(term: string) {
@@ -4853,7 +5786,10 @@ function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, coun
   // anchor as a substitute entry point so the validator doesn't reject
   // perfectly good Lane-A/B/D queries.
   const hasLocalTldAnchor = /\bsite:\.[a-z]{2,3}(?:\.[a-z]{2})?\b/i.test(query);
-  const hasReferenceSiteAnchor = /\bsite:[a-z0-9.-]+\.(?:com|co|io|net|ae|sa|qa|om|kw|ng|br|ru|de|fr|it|es|nl|in)\b/i.test(query);
+  const hasReferenceSiteAnchor =
+    /\bsite:[a-z0-9.-]+\.(?:com|co|io|net|ae|sa|qa|om|kw|ng|br|ru|de|fr|it|es|nl|in)\b/i.test(
+      query
+    );
   const hasBrandOrGroupAnchor =
     /\(\s*"[^"]+"(?:\s+OR\s+"[^"]+")+\s*\)/i.test(query) &&
     extractKnownBrandTerms([query]).length >= 2;
@@ -4872,9 +5808,10 @@ function hasEnoughQuerySignals(query: string, keywordGroups: KeywordGroups, coun
   // 2026-05: Lane F catalog/inventory queries already carry buying
   // intent in the catalog vocabulary. Treat catalog vocabulary as a
   // buyer-role substitute for this lane.
-  const inventoryIntentPivot = /(?:"in stock"|"available stock"|"ready stock"|"spot stock"|"spare parts list"|"product catalog"|"product catalogue"|"stock list"|"available inventory")/i.test(
-    query
-  );
+  const inventoryIntentPivot =
+    /(?:"in stock"|"available stock"|"ready stock"|"spot stock"|"spare parts list"|"product catalog"|"product catalogue"|"stock list"|"available inventory")/i.test(
+      query
+    );
   const hasBuyerRoleSubstitute = referenceNamePivot || inventoryIntentPivot;
   const hasSellerOnlyTrap =
     querySellerOnlyTerms.some((term) => lower.includes(term)) && !hasBuyerRole;
@@ -4896,10 +5833,7 @@ function isConcreteQueryProductTerm(term: string) {
     return false;
   }
 
-  return (
-    normalized.length >= 4 ||
-    /\b(?:rru|bbu|aau|olt|sfp|das)\b/i.test(normalized)
-  );
+  return normalized.length >= 4 || /\b(?:rru|bbu|aau|olt|sfp|das)\b/i.test(normalized);
 }
 
 function extractKnownBrandTerms(values: string[]) {
@@ -5107,21 +6041,24 @@ function buildLaneKQueriesFromKeywordGroups(input: {
 
   const productProfile = productProfileAnalysis as ProductProfileAnalysis;
   const customerProfile = customerProfileAnalysis as CustomerProfileAnalysis;
+  const keywordProductTerms = asStringArray(keywordGroups.productTerms);
+  const keywordCustomerIntentTerms = asStringArray(keywordGroups.customerIntentTerms);
+  const keywordScenarioTerms = asStringArray(keywordGroups.scenarioTerms);
 
   const fallbackProductTerms = uniqueStrings([
     ...asStringArray(productProfile?.keyProducts).slice(0, 6),
     ...asStringArray(productProfile?.productCategories).slice(0, 4),
-    ...keywordGroups.productTerms.slice(0, 6)
+    ...keywordProductTerms.slice(0, 6)
   ])
     .filter((term) => isConcreteQueryProductTerm(term))
     .slice(0, 8);
   const fallbackBuyerRoles = uniqueStrings([
     ...asStringArray(customerProfile?.idealCustomerTypes).slice(0, 6),
-    ...keywordGroups.customerIntentTerms.slice(0, 6)
+    ...keywordCustomerIntentTerms.slice(0, 6)
   ]).slice(0, 6);
   const fallbackScenarioTerms = uniqueStrings([
     ...asStringArray(productProfile?.targetUseCases).slice(0, 4),
-    ...keywordGroups.scenarioTerms.slice(0, 4)
+    ...keywordScenarioTerms.slice(0, 4)
   ]).slice(0, 6);
 
   return buildLaneKQueries({
@@ -5130,7 +6067,7 @@ function buildLaneKQueriesFromKeywordGroups(input: {
         ? keywordPool.productTerms
         : fallbackProductTerms.length > 0
           ? fallbackProductTerms
-          : keywordGroups.productTerms.slice(0, 8),
+          : keywordProductTerms.slice(0, 8),
     buyerRoles:
       keywordPool?.buyerRoles?.length && keywordPool.buyerRoles.length > 0
         ? keywordPool.buyerRoles
@@ -5141,15 +6078,12 @@ function buildLaneKQueriesFromKeywordGroups(input: {
       keywordPool?.scenarioTerms?.length && keywordPool.scenarioTerms.length > 0
         ? keywordPool.scenarioTerms
         : fallbackScenarioTerms,
-    countries: (targetMarkets ?? []).filter(
-      (market) => market && !isMacroMarket(market)
-    ),
+    countries: (targetMarkets ?? []).filter((market) => market && !isMacroMarket(market)),
     keywordGroups,
     maxQueries,
     excludeTerms: keywordPool?.excludeFromKeywords
   });
 }
-
 
 //
 // 2026-05: Instead of asking GPT to write 30+ complex search queries
@@ -5208,7 +6142,7 @@ function buildLaneKQueries(input: LaneKInput): PlannedSearchQuery[] {
     seen.add(key);
     queries.push({
       provider: "brave",
-      operatorSource: "brave_official",
+      operatorSource: "lane_k_keyword_combination",
       executionStatus: "supported",
       operatorName: `Lane K ${tier} keyword combination`,
       strategyTemplate: `lane-K-${tier}`,
@@ -5229,6 +6163,51 @@ function buildLaneKQueries(input: LaneKInput): PlannedSearchQuery[] {
   // before other countries got any Lane K queries at all.
   const countryPool = countries.length ? countries : ["UAE"];
 
+  const productAnchorTerms = laneKProductAnchorTerms(productTerms);
+  const productOr = laneKOrGroup(productAnchorTerms.length ? productAnchorTerms : productTerms);
+  const precisionBuyerRoles = laneKBuyerRoleAnchorTerms(buyerRoles);
+  const localContactEntry = '("contact" OR "services" OR "projects")';
+  const telecomPrecisionEligible = isTelecomLaneKContext(
+    productAnchorTerms,
+    buyerRoles,
+    scenarioTerms
+  );
+
+  // Precision seeds first. The previous K2 loop could consume the full
+  // 12-query fast budget with broad "product + system integrator" phrases,
+  // leaving no tower/base-station/contact/local-TLD searches for the actual
+  // buyer profile.
+  if (productOr && telecomPrecisionEligible) {
+    const precisionBuilders = [
+      (country: string) =>
+        `(distributor OR stockist OR reseller OR importer) ${productOr} ${country} ("contact" OR "spare parts")`,
+      (country: string) =>
+        `("rectifier" OR "-48V" OR "telecom power") ("maintenance" OR "power systems" OR "field service") ${country} ("contact" OR services)`,
+      (country: string) =>
+        `("telecom contractor" OR "tower contractor" OR "network maintenance company") ${productOr} ${country} ("contact" OR services)`,
+      (country: string) =>
+        `("tower maintenance" OR "base station maintenance" OR "RAN maintenance") ${productOr} ${country} ${localContactEntry}`,
+      (country: string) => {
+        const countrySite = marketToSite(country);
+        const localSite = countrySite && countrySite !== ".com" ? `site:${countrySite}` : "";
+        return localSite
+          ? `${localSite} ("telecom contractor" OR "tower maintenance" OR "base station maintenance") ${productOr} ("contact" OR services)`
+          : "";
+      }
+    ];
+
+    for (const buildPrecisionQuery of precisionBuilders) {
+      for (const country of countryPool) {
+        if (queries.length >= maxQueries) break;
+        const text = buildPrecisionQuery(country);
+        if (text) {
+          addQuery(text, country, text.includes("distributor OR stockist") ? "K2" : "K3");
+        }
+      }
+      if (queries.length >= maxQueries) break;
+    }
+  }
+
   // K2 true round-robin: rotate (product, role, country) using modular
   // indexing so all 3 axes get coverage even at low maxQueries.
   // For maxQueries=20 with 8 products × 4 roles × 5 countries:
@@ -5239,12 +6218,32 @@ function buildLaneKQueries(input: LaneKInput): PlannedSearchQuery[] {
   //   slot 4: product[4] role[0] country[4]
   //   slot 5: product[5] role[1] country[0]
   //   ... (each slot rotates all axes by 1)
-  const k2Cap = Math.min(maxQueries, productTerms.length * buyerRoles.length * countryPool.length);
-  for (let slot = 0; slot < k2Cap * 3 && queries.length < k2Cap; slot++) {
-    const product = productTerms[slot % productTerms.length]!;
-    const role = buyerRoles[Math.floor(slot / productTerms.length) % buyerRoles.length]!;
+  const laneKProductPool = (productAnchorTerms.length ? productAnchorTerms : productTerms).slice(
+    0,
+    8
+  );
+  const laneKBuyerPool = (precisionBuyerRoles.length ? precisionBuyerRoles : buyerRoles).slice(
+    0,
+    8
+  );
+  const k2Budget = Math.min(
+    Math.max(0, maxQueries - queries.length),
+    Math.max(2, Math.ceil(maxQueries * 0.35))
+  );
+  const k2Cap = Math.min(
+    k2Budget,
+    laneKProductPool.length * laneKBuyerPool.length * countryPool.length
+  );
+  const k2TargetLength = queries.length + k2Cap;
+  for (let slot = 0; slot < k2Cap * 3 && queries.length < k2TargetLength; slot++) {
+    const product = laneKProductPool[slot % laneKProductPool.length]!;
+    const role =
+      laneKBuyerPool[Math.floor(slot / laneKProductPool.length) % laneKBuyerPool.length]!;
     const country = countryPool[slot % countryPool.length]!;
     addQuery(`${product} ${role} ${country}`, country, "K2");
+    if (queries.length >= maxQueries) {
+      break;
+    }
   }
 
   // K3 round-robin: same pattern with scenario × role × country
@@ -5276,7 +6275,194 @@ function buildLaneKQueries(input: LaneKInput): PlannedSearchQuery[] {
   return queries;
 }
 
+function laneKProductAnchorTerms(productTerms: string[]) {
+  const anchors: string[] = [];
+  for (const rawTerm of productTerms) {
+    const term = rawTerm.trim();
+    const lower = term.toLowerCase();
+    if (!term) continue;
+    if (/\bhuawei\b/i.test(term)) anchors.push("Huawei");
+    if (/\bzte\b/i.test(term)) anchors.push("ZTE");
+    if (/\beltek\b/i.test(term)) anchors.push("Eltek");
+    if (/\bericsson\b/i.test(term)) anchors.push("Ericsson");
+    if (/\bnokia\b/i.test(term)) anchors.push("Nokia");
+    if (/\brru\b/i.test(term)) anchors.push("RRU");
+    if (/\bbbu\b/i.test(term)) anchors.push("BBU");
+    if (/\baau\b/i.test(term)) anchors.push("AAU");
+    if (/\brectifier\b/i.test(term)) anchors.push("rectifier");
+    if (/(?:^|[^0-9])-?48v\b/i.test(term)) anchors.push("-48V");
+    if (lower.includes("telecom power")) anchors.push("telecom power");
+    if (lower.includes("base station")) anchors.push("base station");
+    if (lower.includes("radio unit")) anchors.push("radio unit");
+    if (lower.includes("baseband")) anchors.push("baseband");
+    if (lower === "olt") anchors.push("OLT");
+    if (
+      term.length <= 28 &&
+      term.split(/\s+/).length <= 3 &&
+      !laneKLooksLikeExactModelTerm(term)
+    ) {
+      anchors.push(term);
+    }
+  }
+  return uniqueStrings(anchors).slice(0, 8);
+}
+
+function laneKLooksLikeExactModelTerm(term: string) {
+  return /\b(?:[a-z]{1,6}\d{2,}[a-z0-9-]*|\d{4,}[a-z0-9-]*)\b/i.test(term);
+}
+
+function laneKBuyerRoleAnchorTerms(buyerRoles: string[]) {
+  const preferred = [
+    "tower maintenance",
+    "base station maintenance",
+    "RAN maintenance",
+    "telecom contractor",
+    "tower contractor",
+    "network maintenance company",
+    "telecom equipment distributor",
+    "stockist",
+    "system integrator"
+  ];
+  const source = buyerRoles.join(" ").toLowerCase();
+  return uniqueStrings([
+    ...preferred.filter((role) => source.includes(role) || role !== "system integrator"),
+    ...buyerRoles.filter((role) => role.length <= 42 && role.split(/\s+/).length <= 5)
+  ]).slice(0, 8);
+}
+
+function isTelecomLaneKContext(
+  productAnchors: string[],
+  buyerRoles: string[],
+  scenarioTerms: string[]
+) {
+  const text = [...productAnchors, ...buyerRoles, ...scenarioTerms].join(" ").toLowerCase();
+  return /\b(?:huawei|zte|eltek|ericsson|nokia|rru|bbu|aau|rectifier|-48v|telecom|base station|ran|radio access network|cell site|tower|wireless|isp|wisp|olt|baseband)\b/i.test(
+    text
+  );
+}
+
+function laneKOrGroup(terms: string[]) {
+  const compactTerms = uniqueStrings(terms)
+    .map((term) => term.trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .map(quoteSearchTerm)
+    .filter(Boolean);
+  if (compactTerms.length === 0) return "";
+  return compactTerms.length === 1 ? compactTerms[0]! : `(${compactTerms.join(" OR ")})`;
+}
+
 // ---- End Lane K ----
+
+function buildAdvancedSearchQueriesFromKeywordGroups(input: {
+  keywordGroups: KeywordGroups;
+  productProfileAnalysis: Record<string, unknown>;
+  customerProfileAnalysis: Record<string, unknown>;
+  targetMarkets: string[];
+  maxQueries: number;
+  keywordPool?: {
+    productTerms?: string[];
+    buyerRoles?: string[];
+    scenarioTerms?: string[];
+    excludeFromKeywords?: string[];
+  };
+}): PlannedSearchQuery[] {
+  const productProfile = input.productProfileAnalysis as ProductProfileAnalysis;
+  const customerProfile = input.customerProfileAnalysis as CustomerProfileAnalysis;
+  const productTerms = uniqueStrings([
+    ...(input.keywordPool?.productTerms ?? []),
+    ...asStringArray(productProfile?.keyProducts),
+    ...asStringArray(productProfile?.productCategories),
+    ...asStringArray(input.keywordGroups.productTerms)
+  ])
+    .filter(isConcreteQueryProductTerm)
+    .slice(0, 10);
+  const buyerRoles = uniqueStrings([
+    ...(input.keywordPool?.buyerRoles ?? []),
+    ...asStringArray(customerProfile?.idealCustomerTypes),
+    ...asStringArray(input.keywordGroups.customerIntentTerms),
+    "telecom contractor",
+    "system integrator",
+    "project procurement",
+    "maintenance company"
+  ]).slice(0, 8);
+  const scenarios = uniqueStrings([
+    ...(input.keywordPool?.scenarioTerms ?? []),
+    ...asStringArray(productProfile?.targetUseCases),
+    ...asStringArray(input.keywordGroups.scenarioTerms),
+    "maintenance",
+    "deployment",
+    "installation",
+    "procurement"
+  ]).slice(0, 8);
+  const countries = (input.targetMarkets ?? []).filter(
+    (market) => market && !isMacroMarket(market)
+  );
+  if (!productTerms.length || !buyerRoles.length || !countries.length) {
+    return [];
+  }
+
+  const intentGroups = [
+    ["procurement", "purchase", "sourcing"],
+    ["maintenance", "repair", "field service"],
+    ["deployment", "installation", "project"],
+    ["partner", "integrator", "contractor"],
+    ["operator", "network rollout", "infrastructure"]
+  ];
+  const queries: PlannedSearchQuery[] = [];
+  const seen = new Set<string>();
+  const maxQueries = Math.max(1, Math.floor(input.maxQueries));
+
+  for (let slot = 0; slot < maxQueries * 4 && queries.length < maxQueries; slot++) {
+    const product = productTerms[slot % productTerms.length]!;
+    const role = buyerRoles[Math.floor(slot / productTerms.length) % buyerRoles.length]!;
+    const scenario = scenarios[slot % scenarios.length]!;
+    const country = countries[slot % countries.length]!;
+    const intent = intentGroups[slot % intentGroups.length]!;
+    const text = [
+      quoteSearchTerm(product),
+      `(${intent.map(quoteSearchTerm).join(" OR ")})`,
+      quoteSearchTerm(role),
+      scenario ? quoteSearchTerm(scenario) : "",
+      country
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 140)
+      .trim();
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    queries.push({
+      provider: "brave",
+      operatorSource: "advanced_buyer_intent_search",
+      executionStatus: "supported",
+      operatorName: "Advanced buyer intent search",
+      strategyTemplate: "advanced buyer intent template",
+      strategyType: "main_customer",
+      query: text,
+      keywordGroups: input.keywordGroups,
+      country,
+      effectivenessScore: 0.82,
+      templateId: "advanced_buyer_intent_template"
+    });
+  }
+
+  return queries;
+}
+
+function quoteSearchTerm(value: string) {
+  const cleaned = value
+    .replace(/["“”]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) {
+    return "";
+  }
+  return /\s/.test(cleaned) ? `"${cleaned}"` : cleaned;
+}
 
 //      adjacent vendors who will buy similar products).
 //
@@ -5289,48 +6475,92 @@ function buildReverseCustomerNetworkQueries(input: {
   customerProfileAnalysis: Record<string, unknown>;
   keywordGroups: KeywordGroups;
   targetMarkets?: string[];
+  maxQueries?: number;
+  seedCustomers?: Array<{
+    companyName?: string | null;
+    website?: string | null;
+    sourceUrl?: string | null;
+  }>;
 }): PlannedSearchQuery[] {
   const readReferenceSites = (input.siteEvidence.referenceCustomerSites ?? []).filter(
     (site: WebsiteEvidence) => site.status === "read" && Boolean(site.finalUrl)
   );
-  if (readReferenceSites.length === 0) {
+  const referenceCompanies = asStringArray(input.customerProfileAnalysis.referenceCompanies);
+  const referenceSeeds: Array<{ domain: string; referenceName: string | null }> = [];
+  const seenDomains = new Set<string>();
+  const addReferenceSeed = (domain: string | null, referenceName: string | null) => {
+    if (!domain || seenDomains.has(domain)) {
+      return;
+    }
+    seenDomains.add(domain);
+    referenceSeeds.push({ domain, referenceName });
+  };
+
+  for (let index = 0; index < readReferenceSites.length; index += 1) {
+    const site = readReferenceSites[index]!;
+    const domain = referenceSiteDomain(site);
+    addReferenceSeed(
+      domain,
+      referenceCompanies[index] ?? (domain ? referenceCompanyFromDomain(domain) : null)
+    );
+  }
+
+  for (const seed of input.seedCustomers ?? []) {
+    const domain = referenceSeedDomain(seed.website) ?? referenceSeedDomain(seed.sourceUrl);
+    addReferenceSeed(
+      domain,
+      seed.companyName ?? (domain ? referenceCompanyFromDomain(domain) : null)
+    );
+  }
+
+  if (referenceSeeds.length === 0) {
     return [];
   }
 
-  const referenceCompanies = asStringArray(input.customerProfileAnalysis.referenceCompanies);
   const targetMarkets = (input.targetMarkets ?? []).filter(
     (market) => market && !isMacroMarket(market)
   );
   const primaryMarket = targetMarkets[0] ?? "";
   const secondaryMarket = targetMarkets[1] ?? primaryMarket;
   const queries: PlannedSearchQuery[] = [];
+  const maxQueries = Math.max(0, Math.floor(input.maxQueries ?? Number.POSITIVE_INFINITY));
+  if (maxQueries === 0) {
+    return [];
+  }
 
-  for (let index = 0; index < readReferenceSites.length; index += 1) {
-    const site = readReferenceSites[index]!;
-    const domain = referenceSiteDomain(site);
-    if (!domain) {
-      continue;
-    }
-
-    // Pattern A: mine the reference's own client / partner pages.
+  for (const referenceSeed of referenceSeeds) {
+    const { domain } = referenceSeed;
+    const referenceName = trimReferenceCompanyName(
+      referenceSeed.referenceName ?? referenceCompanyFromDomain(domain) ?? domain
+    );
+    const primaryTrailingMarket = primaryMarket ? ` ${primaryMarket}` : "";
+    // Pattern A: look for off-site pages that mention the reference as a
+    // client/partner/deployment signal. Searching inside the reference's
+    // own site (`site:reference.com`) mostly returns the reference company
+    // itself and burns a precious query slot without discovering a new lead.
     queries.push({
       provider: "brave",
-      operatorSource: "brave_official",
+      operatorSource: "reverse_customer_network_mining",
       executionStatus: "supported",
       operatorName: "Reverse customer network mining",
       strategyTemplate: "lane-D reference-customer reverse network",
       strategyType: "main_customer",
       query:
-        `site:${domain} ("clients" OR "partners" OR "case studies" OR "deployments")`.slice(0, 140),
+        `"${referenceName}" ("client" OR "partner" OR "case study" OR "deployment")${primaryTrailingMarket} (telecom OR network OR maintenance) -site:${domain}`.slice(
+          0,
+          180
+        ),
       keywordGroups: input.keywordGroups,
       country: primaryMarket || null,
       effectivenessScore: 0.9,
       templateId: "reverse_network_site"
     });
+    if (queries.length >= maxQueries) {
+      break;
+    }
 
     // Pattern B: pivot off the reference COMPANY name to find buyers
     // whose own pages talk about the reference.
-    const referenceName = referenceCompanies[index] ?? referenceCompanyFromDomain(domain);
     if (referenceName) {
       const market = secondaryMarket || primaryMarket;
       const trailingMarket = market ? ` ${market}` : "";
@@ -5341,48 +6571,70 @@ function buildReverseCustomerNetworkQueries(input: {
       const safeName = trimReferenceCompanyName(referenceName);
       queries.push({
         provider: "brave",
-        operatorSource: "brave_official",
+        operatorSource: "reverse_customer_network_mining",
         executionStatus: "supported",
         operatorName: "Reverse customer network mining",
         strategyTemplate: "lane-D reference-customer name pivot",
         strategyType: "main_customer",
-        query: `"${safeName}" ("client" OR "partner" OR "deployment")${trailingMarket}`.slice(
-          0,
-          140
-        ),
+        query:
+          `"${safeName}" ("system integrator" OR contractor OR distributor OR "tower maintenance")${trailingMarket} -site:${domain}`.slice(
+            0,
+            180
+          ),
         keywordGroups: input.keywordGroups,
         country: market || null,
         effectivenessScore: 0.85,
         templateId: "reverse_network_name"
       });
+      if (queries.length >= maxQueries) {
+        break;
+      }
+
+      queries.push({
+        provider: "brave",
+        operatorSource: "reverse_customer_network_mining",
+        executionStatus: "supported",
+        operatorName: "Reverse customer network mining",
+        strategyTemplate: "lane-D reference-customer brand-adjacent network",
+        strategyType: "main_customer",
+        query:
+          `"${safeName}" (Huawei OR ZTE OR Eltek) (distributor OR contractor OR "maintenance company")${trailingMarket} -site:${domain}`.slice(
+            0,
+            180
+          ),
+        keywordGroups: input.keywordGroups,
+        country: market || null,
+        effectivenessScore: 0.82,
+        templateId: "reverse_network_brand"
+      });
+      if (queries.length >= maxQueries) {
+        break;
+      }
+
+      queries.push({
+        provider: "brave",
+        operatorSource: "reverse_customer_network_mining",
+        executionStatus: "supported",
+        operatorName: "Reverse customer network mining",
+        strategyTemplate: "lane-D reference-customer infrastructure pivot",
+        strategyType: "main_customer",
+        query:
+          `"${safeName}" ("base station" OR "telecom power" OR rectifier) (partner OR supplier OR contractor)${trailingMarket} -site:${domain}`.slice(
+            0,
+            180
+          ),
+        keywordGroups: input.keywordGroups,
+        country: market || null,
+        effectivenessScore: 0.8,
+        templateId: "reverse_network_infrastructure"
+      });
+      if (queries.length >= maxQueries) {
+        break;
+      }
     }
   }
 
-  return queries;
-}
-
-function mergeSearchQueriesPreservingOrder(
-  base: PlannedSearchQuery[],
-  injected: PlannedSearchQuery[]
-): PlannedSearchQuery[] {
-  if (injected.length === 0) {
-    return base;
-  }
-  const seen = new Set(base.map((query) => normalizeForDedup(query.query)));
-  const merged = [...base];
-  for (const query of injected) {
-    const key = normalizeForDedup(query.query);
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    merged.push(query);
-  }
-  return merged;
-}
-
-function normalizeForDedup(query: string) {
-  return query.replace(/\s+/g, " ").trim().toLowerCase();
+  return queries.slice(0, maxQueries);
 }
 
 function referenceSiteDomain(site: WebsiteEvidence) {
@@ -5392,6 +6644,20 @@ function referenceSiteDomain(site: WebsiteEvidence) {
   }
   try {
     return new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function referenceSeedDomain(value: string | null | undefined) {
+  const raw = value?.trim();
+  if (!raw) {
+    return null;
+  }
+
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    return new URL(withProtocol).hostname.replace(/^www\./i, "").toLowerCase();
   } catch {
     return null;
   }
@@ -5822,7 +7088,8 @@ function normalizeGraphWorkflowForClient(value: unknown, task: Record<string, un
   if (task.status === "paused" && waitingStep?.nodeName) {
     return {
       ...workflow,
-      phase: workflow.phase === "planning" ? "search-to-email" : (workflow.phase ?? "search-to-email"),
+      phase:
+        workflow.phase === "planning" ? "search-to-email" : (workflow.phase ?? "search-to-email"),
       status: "paused",
       currentNode: waitingStep.nodeName,
       pausedAt: waitingStep.nodeName,
@@ -5859,7 +7126,9 @@ function findAgentStep(value: unknown, status: string) {
 
 function taskUpdatedAtIso(task: Record<string, unknown>) {
   const updatedAt = task.updatedAt;
-  return updatedAt instanceof Date ? updatedAt.toISOString() : String(updatedAt ?? new Date().toISOString());
+  return updatedAt instanceof Date
+    ? updatedAt.toISOString()
+    : String(updatedAt ?? new Date().toISOString());
 }
 
 function compactString(value: unknown, maxLength: number) {
@@ -6241,6 +7510,17 @@ function parseTaskPayload(value: Prisma.JsonValue | null): {
   profileSignals?: {
     referenceCustomerUrlsUsed?: string[];
     referenceCustomerUrlsRead?: string[];
+    // 2026-05 Stage 2 follow-up: marketSelection is persisted by
+    // resolveTargetMarketSelection at planning time. buildIcpCriteria
+    // reads marketSource to decide whether to override profile
+    // targetRegions with the prompt-named markets.
+    marketSelection?: {
+      targetMarkets?: string[];
+      secondaryMarkets?: string[];
+      promptMarkets?: string[];
+      profileMarkets?: string[];
+      marketSource?: "prompt" | "profile" | "none";
+    } | null;
   } | null;
 } {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -6268,7 +7548,19 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
   const keywordGroups = payload.keywordGroups ?? {};
   const marketTerms = asStringArray(keywordGroups.marketTerms).slice(0, 40);
   const profileRegions = asStringArray(payload.customerProfile?.targetRegions).slice(0, 40);
-  const targetRegions = mergeQualificationTargetRegions(marketTerms, profileRegions);
+  // 2026-05 Stage 2 follow-up: when the user's prompt explicitly named
+  // target markets (marketSource === "prompt"), those markets win
+  // over the long-lived customerProfile.targetRegions. Earlier we
+  // merged both — which meant a Germany task would still inherit a
+  // user's saved Middle East/Africa/Brazil profile and let Egypt-
+  // verified candidates pass as "in target". The new rule keeps
+  // profile markets only when prompt didn't call any out (or asked
+  // for Global), preserving the legacy "profile-only task" flow.
+  const marketSource = payload.profileSignals?.marketSelection?.marketSource;
+  const targetRegions =
+    marketSource === "prompt" && marketTerms.length > 0
+      ? marketTerms
+      : mergeQualificationTargetRegions(marketTerms, profileRegions);
   const productProfile = payload.productProfile;
   const ownDomains = domainsFromUrls([
     productProfile?.websiteUrl,
@@ -6313,12 +7605,23 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
     // becomes an independent alias, then keep the original combined
     // form too (in case the candidate literally contains it).
     referenceCustomerNames: uniqueStrings([
-      ...asStringArray(payload.customerProfileAnalysis?.referenceCompanies).flatMap(
-        (name) => splitReferenceCompanyAliases(name)
+      ...asStringArray(payload.customerProfileAnalysis?.referenceCompanies).flatMap((name) =>
+        splitReferenceCompanyAliases(name)
       ),
       ...referenceCustomerDomains.map((d) => domainToReferenceCompanyName(d))
-    ]).filter(Boolean).slice(0, 30),
-    disqualifiers: [
+    ])
+      .filter(Boolean)
+      .slice(0, 30),
+    disqualifiers: uniqueStrings([
+      // 2026-05 Stage 2 follow-up: pull GPT-derived negatives in
+      // addition to the static blocklist. productProfileAnalysis.
+      // negativeKeywords are seller-specific ("consumer phones",
+      // "retail electronics") and customerProfileAnalysis.
+      // disqualifiers are buyer-specific ("training center"). Both
+      // get -20 via the existing matchedRisks path so off-target
+      // pages get penalized without changing the scoring pipeline.
+      ...asStringArray(payload.productProfileAnalysis?.negativeKeywords),
+      ...asStringArray(payload.customerProfileAnalysis?.disqualifiers),
       "job",
       "career",
       "training",
@@ -6333,7 +7636,10 @@ function buildIcpCriteria(payload: ReturnType<typeof parseTaskPayload>): IcpScor
       "GlobalSources",
       "IndiaMART",
       "TradeIndia"
-    ]
+    ])
+      .map((term) => term.trim())
+      .filter(Boolean)
+      .slice(0, 30)
   };
 }
 
@@ -6388,9 +7694,7 @@ function domainToReferenceCompanyName(domain: string): string {
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .split(/[-_]/)
     .filter(Boolean);
-  return parts
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+  return parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 }
 
 // 2026-05 V1-MVP: split a combined-alias reference company name into
@@ -6415,7 +7719,7 @@ export function splitReferenceCompanyAliases(name: string): string[] {
   // single split below. \s+aka\s+ to match " aka ", " AKA ", etc.
   const normalizedForSplit = trimmed.replace(/\s+aka\s+/gi, "/");
   const parts = normalizedForSplit
-    .split(/\s*[\/;,]\s*/)
+    .split(/\s*[/;,]\s*/)
     .map((part) => part.trim())
     .filter(Boolean);
   if (parts.length <= 1) {

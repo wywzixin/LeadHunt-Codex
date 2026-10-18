@@ -22,6 +22,22 @@ const systemTemplateCoverTones: Record<string, CoverTone> = {
   "new-product": "launch"
 };
 
+const systemTemplateCoverImages: Record<string, string> = {
+  "project-supply": "/images/template-covers/project-supply.webp",
+  "spare-stock": "/images/template-covers/spare-stock.webp",
+  "repair-service": "/images/template-covers/repair-service.webp",
+  "new-product": "/images/template-covers/new-product.webp"
+};
+
+function coverToneByIndex(index: number): CoverTone {
+  return (["project", "spare", "repair", "launch"] as CoverTone[])[index % 4] ?? "project";
+}
+
+function templateCoverTone(template: MailTemplate, index: number): CoverTone {
+  if (template.type === "custom") return "custom";
+  return systemTemplateCoverTones[template.id] ?? coverToneByIndex(index);
+}
+
 export default function TemplatesPage() {
   const [customTemplates, setCustomTemplates] = useState<MailTemplate[]>([]);
   const [activeType, setActiveType] = useState<"system" | "custom">("system");
@@ -30,10 +46,10 @@ export default function TemplatesPage() {
   const [editingTemplate, setEditingTemplate] = useState<MailTemplate | null>(null);
   const [previewTemplate, setPreviewTemplate] = useState<MailTemplate | null>(null);
   const [draft, setDraft] = useState<TemplateDraft>(emptyDraft);
-  const [status, setStatus] = useState("系统模板可直接用于邮件生成，自建模板会保存在本机开发环境。");
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [status, setStatus] = useState("");
 
   const templates = activeType === "system" ? systemMailTemplates : customTemplates;
-  const cardTemplates = activeType === "system" ? systemMailTemplates : customTemplates;
   const filteredTemplates = useMemo(() => {
     const keyword = search.trim().toLowerCase();
     if (!keyword) return templates;
@@ -41,7 +57,6 @@ export default function TemplatesPage() {
       [template.name, template.subject, template.summary].some((value) => value.toLowerCase().includes(keyword))
     );
   }, [search, templates]);
-  const selectedTemplate = [...systemMailTemplates, ...customTemplates].find((template) => template.id === selectedId);
 
   useEffect(() => {
     try {
@@ -69,9 +84,10 @@ export default function TemplatesPage() {
 
   function openCreate() {
     setEditingTemplate(null);
+    setEditorOpen(true);
     setDraft({
-    name: "UAE 经销商跟进模板",
-    subject: "Product availability for your team",
+      name: "UAE 经销商跟进模板",
+      subject: "Product availability for your team",
       summary: "适用于自建经销商或现货商跟进邮件。",
       body: [
         "Dear Team,",
@@ -93,6 +109,7 @@ export default function TemplatesPage() {
       return;
     }
     setEditingTemplate(template);
+    setEditorOpen(true);
     setDraft({
       name: template.name,
       subject: template.subject,
@@ -102,6 +119,7 @@ export default function TemplatesPage() {
   }
 
   function closeEditor() {
+    setEditorOpen(false);
     setEditingTemplate(null);
     setDraft(emptyDraft);
   }
@@ -136,23 +154,24 @@ export default function TemplatesPage() {
       persistCustomTemplates([nextTemplate, ...customTemplates]);
       setActiveType("custom");
       setSelectedId(nextTemplate.id);
-      setStatus("自建模板已保存，邮件确认弹窗可以选择使用。");
+      setStatus("自建模板已保存。");
     }
 
-    setEditingTemplate(null);
-    setDraft(emptyDraft);
+    closeEditor();
   }
 
-  function deleteSelectedTemplate() {
-    const template = customTemplates.find((item) => item.id === selectedId);
-    if (!template) {
-      setStatus("系统模板不能删除，请切换到自建模板后再删除。");
+  function deleteTemplate(template: MailTemplate) {
+    if (template.type === "system") {
+      setStatus("系统模板不能删除。");
       return;
     }
-    const nextTemplates = customTemplates.filter((item) => item.id !== selectedId);
+    if (typeof window !== "undefined" && !window.confirm(`确定删除模板「${template.name}」？`)) {
+      return;
+    }
+    const nextTemplates = customTemplates.filter((item) => item.id !== template.id);
     persistCustomTemplates(nextTemplates);
     setSelectedId(nextTemplates[0]?.id ?? "");
-    setStatus("自建模板已删除。");
+    setStatus(`已删除「${template.name}」。`);
   }
 
   return (
@@ -165,169 +184,251 @@ export default function TemplatesPage() {
       title="邮件模板"
     >
       <section className="templateShell">
-        <header className="templateTop">
-          <nav className="templatePrimaryTabs" aria-label="邮件模板页面切换">
-            <a href="/campaigns">发送记录</a>
-            <a href="/campaigns">发邮件</a>
-            <a className="active" href="/templates">
+        <header className="templateTopBar">
+          <nav className="templateTopTabs" role="tablist" aria-label="邮件营销页面切换">
+            <a className="templateTopLink" href="/campaigns">
+              发邮件
+            </a>
+            <a className="templateTopLink" href="/campaigns">
+              发送记录
+            </a>
+            <a className="templateTopLink active" href="/templates" aria-current="page">
               邮件模板
             </a>
           </nav>
-          <div className="templateTopActions">
-            <button className="templateCreate" type="button" data-create-template="true" onClick={openCreate}>
-              <Plus aria-hidden="true" size={16} />
-              新建模板
-            </button>
-            <button className="templateDelete" type="button" onClick={deleteSelectedTemplate}>
-              <Trash2 aria-hidden="true" size={16} />
-              删除模板
-            </button>
-          </div>
+          {status ? <p className="templateStatus" aria-live="polite">{status}</p> : null}
         </header>
 
         <section className="templateTablePanel">
-          <div className="templateToolbar">
-            <div className="templateSegmented">
-              <button className={activeType === "system" ? "active" : ""} type="button" onClick={() => setActiveType("system")}>
+          <header className="templateToolbar">
+            <div className="templateSegmented" role="tablist" aria-label="模板类型">
+              <button
+                aria-selected={activeType === "system"}
+                className={activeType === "system" ? "active" : ""}
+                onClick={() => setActiveType("system")}
+                role="tab"
+                type="button"
+              >
                 系统模板
               </button>
-              <button className={activeType === "custom" ? "active" : ""} type="button" onClick={() => setActiveType("custom")}>
+              <button
+                aria-selected={activeType === "custom"}
+                className={activeType === "custom" ? "active" : ""}
+                onClick={() => setActiveType("custom")}
+                role="tab"
+                type="button"
+              >
                 自建模板
               </button>
             </div>
             <label className="templateSearch">
-              <Search aria-hidden="true" size={17} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索模板名称 / 主题" />
+              <Search aria-hidden="true" size={15} />
+              <input
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="搜索模板名称 / 主题"
+                value={search}
+              />
             </label>
+            <button className="templatePrimaryAction" data-create-template="true" onClick={openCreate} type="button">
+              <Plus aria-hidden="true" size={15} />
+              新建模板
+            </button>
+          </header>
+
+          <div className="templateTableWrap">
+            <table className="templateTable">
+              <thead>
+                <tr>
+                  <th>模板名称</th>
+                  <th>邮件主题</th>
+                  <th>创建时间</th>
+                  <th>创建者</th>
+                  <th className="templateColAction">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredTemplates.length ? (
+                  filteredTemplates.map((template) => (
+                    <tr
+                      className={selectedId === template.id ? "active" : ""}
+                      data-template-row={template.id}
+                      key={template.id}
+                      onClick={() => setSelectedId(template.id)}
+                    >
+                      <td className="templateNameCell">
+                        <strong>{template.name}</strong>
+                        {template.summary ? <small>{template.summary}</small> : null}
+                      </td>
+                      <td className="templateSubjectCell" title={template.subject}>
+                        {template.subject}
+                      </td>
+                      <td className="templateDateCell">{template.createdAt}</td>
+                      <td className="templateOwnerCell">{template.owner}</td>
+                      <td className="templateColAction">
+                        <button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setPreviewTemplate(template);
+                          }}
+                          type="button"
+                        >
+                          <Eye aria-hidden="true" size={13} />
+                          预览
+                        </button>
+                        <button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openEdit(template);
+                          }}
+                          type="button"
+                        >
+                          <Pencil aria-hidden="true" size={13} />
+                          {template.type === "system" ? "另存为自建" : "编辑"}
+                        </button>
+                        {template.type === "custom" ? (
+                          <button
+                            className="templateRowDanger"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              deleteTemplate(template);
+                            }}
+                            type="button"
+                          >
+                            <Trash2 aria-hidden="true" size={13} />
+                            删除
+                          </button>
+                        ) : null}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="templateEmpty" colSpan={5}>
+                      {search ? "没有匹配的模板，换一个关键词试试。" : activeType === "custom" ? "还没有自建模板，点击右上角新建一个。" : "没有匹配的系统模板。"}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
 
-          <div className="templateTable">
-            <div className="templateTableHead">
-              <span />
-              <span>模板名称</span>
-              <span>模板主题</span>
-              <span>创建时间</span>
-              <span>创建用户</span>
-              <span>操作</span>
-            </div>
-            {filteredTemplates.map((template) => (
-              <div className="templateTableRow" key={template.id} data-template-row={template.id}>
-                <label>
-                  <input
-                    checked={selectedId === template.id}
-                    onChange={() => setSelectedId(template.id)}
-                    type="checkbox"
-                  />
-                </label>
-                <strong>{template.name}</strong>
-                <span>{template.subject}</span>
-                <span>{template.createdAt}</span>
-                <span>{template.owner}</span>
-                <div>
-                  <button type="button" onClick={() => openEdit(template)}>
-                    <Pencil aria-hidden="true" size={14} /> 编辑
-                  </button>
-                  <button type="button" onClick={() => setPreviewTemplate(template)}>
-                    <Eye aria-hidden="true" size={14} /> 预览
-                  </button>
-                </div>
-              </div>
-            ))}
-            {!filteredTemplates.length ? <div className="templateEmpty">当前没有匹配的模板。</div> : null}
-            <footer className="templateTableFooter">
-              <span>共 {filteredTemplates.length} 条</span>
-              <button type="button">10 条 / 页</button>
-              <div>
+          <footer className="templatePager">
+            <span>共 {filteredTemplates.length} 条</span>
+            <div className="templatePagerRight">
+              <button className="templatePageSize" type="button">
+                10 条/页
+              </button>
+              <div className="templatePageButtons">
                 <button aria-label="上一页" disabled type="button">
-                  <ChevronLeft aria-hidden="true" size={16} />
+                  <ChevronLeft aria-hidden="true" size={14} />
                 </button>
                 <button className="active" type="button">
                   1
                 </button>
                 <button aria-label="下一页" disabled type="button">
-                  <ChevronRight aria-hidden="true" size={16} />
+                  <ChevronRight aria-hidden="true" size={14} />
                 </button>
               </div>
-            </footer>
-          </div>
+            </div>
+          </footer>
         </section>
 
-        <section className="templatePreviewPanel">
-          <div className="templatePreviewHead">
+        <section className="templateGalleryPanel" aria-label="模板预览画廊">
+          <header className="templateGalleryHead">
             <div>
-              <h2>邮件生成模板库</h2>
-              <p aria-live="polite">{status}</p>
+              <h2>模板预览</h2>
+              <p>点击卡片快速预览模板正文，适合通过封面快速识别。</p>
             </div>
-            <button type="button" onClick={() => selectedTemplate && setPreviewTemplate(selectedTemplate)}>
-              <Eye aria-hidden="true" size={15} /> 预览选中模板
-            </button>
-          </div>
-          <div className="templateMiniTabs">
-            <button className={activeType === "system" ? "active" : ""} type="button" onClick={() => setActiveType("system")}>
-              系统模板
-            </button>
-            <button className={activeType === "custom" ? "active" : ""} type="button" onClick={() => setActiveType("custom")}>
-              个人模板
-            </button>
-          </div>
+          </header>
           <div className="templateCards">
-            {cardTemplates.map((sample, index) => (
-              <article
-                className={selectedId === sample.id ? "active" : ""}
-                key={sample.id}
-                onClick={() => setSelectedId(sample.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    setSelectedId(sample.id);
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-              >
-                <TemplateCover template={sample} index={index} />
-                <h3>{sample.name}</h3>
-                <p>{sample.summary}</p>
-              </article>
-            ))}
-            {!cardTemplates.length ? <div className="templateCardsEmpty">还没有个人模板，点击右上角新建一个。</div> : null}
+            {filteredTemplates.length ? (
+              filteredTemplates.map((template, index) => (
+                <article
+                  className={selectedId === template.id ? "active" : ""}
+                  key={template.id}
+                  onClick={() => {
+                    setSelectedId(template.id);
+                    setPreviewTemplate(template);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setSelectedId(template.id);
+                      setPreviewTemplate(template);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <TemplateCover template={template} index={index} />
+                  <h3>{template.name}</h3>
+                  <p>{template.summary || template.subject}</p>
+                </article>
+              ))
+            ) : (
+              <div className="templateCardsEmpty">
+                {activeType === "custom" ? "还没有自建模板，可在上方表格中点击新建。" : "没有匹配的模板。"}
+              </div>
+            )}
           </div>
         </section>
       </section>
 
-      {draft.name || editingTemplate ? (
-        <div className="templateModalBackdrop">
+      {editorOpen ? (
+        <div className="templateModalBackdrop" onClick={(event) => event.target === event.currentTarget && closeEditor()}>
           <section className="templateModal" role="dialog" aria-modal="true" aria-label="编辑邮件模板">
             <header>
               <div>
                 <span>{editingTemplate ? "编辑模板" : "新建模板"}</span>
                 <h2>{editingTemplate ? editingTemplate.name : "自建邮件模板"}</h2>
               </div>
-              <button type="button" aria-label="关闭" onClick={closeEditor}>
+              <button aria-label="关闭" onClick={closeEditor} type="button">
                 <X aria-hidden="true" size={18} />
               </button>
             </header>
             <label>
-              <span>模板名称</span>
-              <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+              <span>
+                模板名称 <em>*</em>
+              </span>
+              <input
+                onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+                placeholder="例如：UAE 经销商跟进模板"
+                value={draft.name}
+              />
             </label>
             <label>
-              <span>邮件主题</span>
-              <input value={draft.subject} onChange={(event) => setDraft({ ...draft, subject: event.target.value })} />
+              <span>
+                邮件主题 <em>*</em>
+              </span>
+              <input
+                onChange={(event) => setDraft({ ...draft, subject: event.target.value })}
+                placeholder="例如：Product availability for your team"
+                value={draft.subject}
+              />
             </label>
             <label>
               <span>模板说明</span>
-              <input value={draft.summary} onChange={(event) => setDraft({ ...draft, summary: event.target.value })} />
+              <input
+                onChange={(event) => setDraft({ ...draft, summary: event.target.value })}
+                placeholder="一句话描述什么场景适合用这个模板"
+                value={draft.summary}
+              />
             </label>
             <label className="templateBodyField">
-              <span>邮件正文</span>
-              <textarea value={draft.body} onChange={(event) => setDraft({ ...draft, body: event.target.value })} />
+              <span>
+                邮件正文 <em>*</em>
+              </span>
+              <textarea
+                onChange={(event) => setDraft({ ...draft, body: event.target.value })}
+                placeholder="支持 {{companyName}} {{country}} 等变量"
+                value={draft.body}
+              />
             </label>
             <footer>
-              <button type="button" onClick={closeEditor}>
+              <button onClick={closeEditor} type="button">
                 取消
               </button>
-              <button className="primary" type="button" data-save-template="true" onClick={saveTemplate}>
+              <button className="primary" data-save-template="true" onClick={saveTemplate} type="button">
                 保存模板
               </button>
             </footer>
@@ -336,14 +437,17 @@ export default function TemplatesPage() {
       ) : null}
 
       {previewTemplate ? (
-        <div className="templateModalBackdrop">
+        <div
+          className="templateModalBackdrop"
+          onClick={(event) => event.target === event.currentTarget && setPreviewTemplate(null)}
+        >
           <section className="templateModal templatePreviewModal" role="dialog" aria-modal="true" aria-label="预览邮件模板">
             <header>
               <div>
                 <span>预览模板</span>
                 <h2>{previewTemplate.name}</h2>
               </div>
-              <button type="button" aria-label="关闭预览" onClick={() => setPreviewTemplate(null)}>
+              <button aria-label="关闭预览" onClick={() => setPreviewTemplate(null)} type="button">
                 <X aria-hidden="true" size={18} />
               </button>
             </header>
@@ -357,21 +461,30 @@ export default function TemplatesPage() {
 }
 
 function TemplateCover({ template, index }: { template: MailTemplate; index: number }) {
-  const tone = template.type === "custom" ? "custom" : systemTemplateCoverTones[template.id] ?? coverToneByIndex(index);
+  const coverImage = template.type === "system" ? systemTemplateCoverImages[template.id] : undefined;
+  if (coverImage) {
+    return (
+      <div className="mailTemplateCover mailTemplateCoverImage" aria-hidden="true">
+        <img alt="" src={coverImage} />
+      </div>
+    );
+  }
+
+  const tone = templateCoverTone(template, index);
   return (
-    <div className={`templateCover templateCover-${tone}`} aria-hidden="true">
-      <div className="templateCoverTop">
+    <div className={`mailTemplateCover mailTemplateCover-${tone}`} aria-hidden="true">
+      <div className="mailTemplateCoverTop">
         <span />
         <span />
         <span />
       </div>
-      <div className="templateCoverMain">
+      <div className="mailTemplateCoverMain">
         <i />
         <i />
         <i />
         <em />
       </div>
-      <div className="templateCoverPanel">
+      <div className="mailTemplateCoverPanel">
         <span />
         <span />
         <span />
@@ -379,8 +492,4 @@ function TemplateCover({ template, index }: { template: MailTemplate; index: num
       <b />
     </div>
   );
-}
-
-function coverToneByIndex(index: number): CoverTone {
-  return (["project", "spare", "repair", "launch"] as CoverTone[])[index % 4] ?? "project";
 }

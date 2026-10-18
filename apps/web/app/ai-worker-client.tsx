@@ -1,25 +1,39 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Bell,
+  Building2,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Circle,
+  Clock,
   Database,
-  ExternalLink,
-  GraduationCap,
+  Download,
+  Factory,
+  Filter,
+  Globe2,
   Mail,
-  Paperclip,
+  MessageCircle,
+  MoreHorizontal,
+  PhoneCall,
+  Play,
+  RadioTower,
   Search,
-  Settings,
+  Send,
   Sparkles,
+  Star,
+  SunMedium,
   Target,
+  Trash2,
+  Users,
   UsersRound,
   X
 } from "lucide-react";
+import { useAppMessage } from "./app-message";
 import { AppShell } from "./app-shell";
+import { TableLoadingState } from "./table-loading-state";
 import {
   MailConfirmationModal,
   type MailConfirmationLead,
@@ -30,88 +44,8 @@ import {
 const defaultTaskPrompt =
   "帮我找某类产品相关的买家客户，优先找维护商、工程商、运营商、采购方、项目方和运维客户。";
 
-const landingShortcuts = [
-  { label: "找客户", icon: Target },
-  { label: "营销触达", icon: Mail },
-  { label: "客户管理", icon: UsersRound },
-  { label: "外贸导师", icon: GraduationCap },
-  { label: "我的配置", icon: Settings }
-];
-
-const landingExamples = [
-  {
-    icon: Target,
-    title: "找 B2B 买家客户",
-    description:
-      "读取已保存的产品画像和客户画像，搜索维护商、工程商、运营商、采购方和运维客户，并筛选可做首轮触达的目标。",
-    prompt: "帮我找某类产品的买家客户，优先找维护公司、工程商、运营商、采购方和网络运维客户。"
-  },
-  {
-    icon: UsersRound,
-    title: "按客户画像找同类客户",
-    description:
-      "使用已保存的参考客户画像，提炼客户类型、关键词、采购场景与地域特征，用于搜索同类客户。",
-    prompt: "按已保存的客户画像，帮我找同类型买家客户。"
-  },
-  {
-    icon: Mail,
-    title: "生成开发信并同步 CRM",
-    description:
-      "面向高相关客户生成首封英文开发信，确认发送后自动写入 CRM，并设置 3 天后二次跟进提醒。",
-    prompt: "面向高相关客户生成首封英文开发信，确认发送后自动写入 CRM，并设置 3 天后二次跟进提醒。"
-  }
-];
-
-const fallbackKeywordRows: KeywordRow[] = [
-  {
-    label: "产品扩展词",
-    values: [
-      "product category",
-      "core product",
-      "spare parts",
-      "components",
-      "equipment",
-      "materials"
-    ]
-  },
-  {
-    label: "客户类型词",
-    values: [
-      "maintenance company",
-      "system integrator",
-      "engineering contractor",
-      "operator",
-      "procurement",
-      "service provider"
-    ]
-  },
-  {
-    label: "品牌/型号词",
-    values: [
-      "brand + model",
-      "model replacement",
-      "SKU RFQ",
-      "product group maintenance",
-      "key spare parts"
-    ]
-  },
-  {
-    label: "场景/市场词",
-    values: ["UAE", "Saudi Arabia", "project rollout", "maintenance service", "vendor registration"]
-  },
-  {
-    label: "ICP 风险词",
-    values: ["jobs", "news", "training", "blog", "marketplace"]
-  }
-];
-
-const fallbackSearchQueries = [
-  '("maintenance company" OR "field service") "product category" UAE -job -news -marketplace -directory',
-  '("system integrator" OR contractor) "core product" Saudi Arabia -yellowpages -Alibaba',
-  '("repair service" OR replacement) "spare parts" Nigeria -marketplace -directory',
-  '("project contractor" OR "deployment contractor") equipment Brazil -job -blog -forum',
-  '("vendor registration" OR RFQ OR procurement) "product category" Philippines -marketplace -directory'
-];
+// landingShortcuts / landingExamples were the legacy AiWorkerLanding
+// catalog. They were removed alongside that component in 2026-05.
 
 const fallbackMailLead: MailConfirmationLead = {
   companyName: "Gulf Telecom Supplies FZE",
@@ -122,12 +56,22 @@ const fallbackMailLead: MailConfirmationLead = {
 };
 
 const leadPageSize = 10;
-const crmPageSize = 3;
+const crmPageSize = 5;
+// 2026-05 responsive cleanup: pool library page size is a pure data
+// concern, not a layout concern. Layout density (column count, card
+// width) is owned by CSS grid `auto-fill minmax(...)` so the same 30
+// rows look right on 13" laptops and 4K monitors. We previously had a
+// JS-driven `resolveWorkbenchPoolPageSize(width, height)` that returned
+// 6/9/15/18 by viewport — that coupled business state to viewport size
+// and broke on ultrawide / HiDPI / window-drag. Reverted to a fixed 30
+// per page so users see the same data set across devices.
+const workbenchPoolPageSize = 30;
 const taskPollIntervalMs = 2500;
 const maxTaskPollAttempts = 720;
 
-type ViewState = "landing" | "conversation";
+type ViewState = "workbench" | "pool" | "conversation";
 type StepState = "done" | "active" | "pending" | "failed";
+type WorkbenchPoolStatusFilter = "all" | "active" | "completed" | "stopped";
 
 type KeywordGroups = {
   brandTerms?: string[];
@@ -234,6 +178,11 @@ type SearchQuery = {
   resultCount?: number | null;
   qualifiedCount?: number | null;
   effectivenessScore?: number | null;
+  // 2026-05 polish: ISO timestamp from Prisma. The search-run page
+  // uses the earliest createdAt among the latest batch's pending /
+  // running queries to compute "this batch started at T", then
+  // filters the new-lead table to candidates created on or after T.
+  createdAt?: string;
   searchResults?: SearchResult[];
 };
 
@@ -287,6 +236,9 @@ type LeadCandidate = {
   countryConflict?: boolean | null;
   sourceUrl?: string | null;
   status?: string;
+  // 2026-05 polish: ISO timestamp from Prisma. Kept for diagnostics
+  // and ordering when continuation searches append to the same pool.
+  createdAt?: string;
   contacts?: LeadContact[];
   icpScore?: IcpScore | null;
   outreachDrafts?: OutreachDraftState[];
@@ -317,12 +269,31 @@ type LeadTaskListItem = {
   updatedAt: string;
   prompt: string;
   title: string;
+  targetMarkets?: string[];
   leadCount: number;
   queryCount: number;
+  // 2026-05 Stage 3 workbench KPI aggregation. Optional for backwards
+  // compatibility — older API responses without these fields fall
+  // through to 0 in the workbench KPI cards.
+  pendingCrmCount?: number;
+  pendingEmailCount?: number;
 };
 
 type LeadTaskListResponse = {
   tasks: LeadTaskListItem[];
+  totalCount?: number;
+  // 2026-05 Stage 3 follow-up: workbench KPI summary computed over the
+  // user's full task history, independent of the list `limit`. The
+  // workbench top strip uses this so a new task can't push an old one
+  // out of the listed window and make the counters drop.
+  summary?: LeadTaskSummary;
+};
+
+type LeadTaskSummary = {
+  taskCount: number;
+  todayLeadCount: number;
+  pendingCrmCount: number;
+  pendingEmailCount: number;
 };
 
 type SearchRunResult = {
@@ -345,34 +316,6 @@ type ApprovalResult = {
   draftCount: number;
 };
 
-type KeywordRow = {
-  label: string;
-  values: string[];
-};
-
-type ProfileSourceRow = {
-  label: string;
-  values: string[];
-};
-
-type FlowRow = {
-  title: string;
-  description: string;
-  state: StepState;
-};
-
-type ActivityStep = {
-  title: string;
-  detail: string;
-  state: StepState;
-};
-
-type ActivityMetric = {
-  label: string;
-  value: string;
-  tone?: "blue" | "green" | "orange" | "gray";
-};
-
 type ActivityLog = {
   title: string;
   detail: string;
@@ -387,16 +330,6 @@ type LeadQualityCounts = {
   evidenceReview: number;
   rejected: number;
   other: number;
-};
-
-type DisplaySearchResult = {
-  id: string;
-  title: string;
-  domain: string;
-  url: string;
-  country: string;
-  query: string;
-  status: string;
 };
 
 type DisplayLead = {
@@ -423,24 +356,54 @@ type CrmRow = DisplayLead & {
   owner: string;
 };
 
+type CrmSyncDialogState = {
+  detail: string;
+  kind: "loading" | "success";
+  title: string;
+};
+
 export function AiWorkerClient() {
+  const appMessage = useAppMessage();
   const [mailOpen, setMailOpen] = useState(false);
   const [crmOpen, setCrmOpen] = useState(false);
+  const [crmSyncTargetIds, setCrmSyncTargetIds] = useState<string[] | null>(null);
   const [crmPage, setCrmPage] = useState(1);
+  const [crmSyncDialog, setCrmSyncDialog] = useState<CrmSyncDialogState | null>(null);
+  const [leadDetail, setLeadDetail] = useState<DisplayLead | null>(null);
   const [status, setStatus] = useState("等待分配任务");
   const [error, setError] = useState("");
-  const [command, setCommand] = useState("");
-  const [view, setView] = useState<ViewState>("landing");
+  // 2026-05 LeadHunt 2.0: workbench is the only home view. The legacy
+  // landing has been retired (kept in branch history if needed).
+  const [view, setView] = useState<ViewState>("workbench");
   const [landingPrompt, setLandingPrompt] = useState("");
-  const [taskSearch, setTaskSearch] = useState("");
+  // 2026-05 LeadHunt 2.0: the legacy AiWorkerLanding had a "search tasks"
+  // input bound to this state and a hosting-mode toggle. Both were retired
+  // along with that screen. The remaining `loadTaskHistory(taskSearch)`
+  // calls always pass an empty filter today; we keep the variable as a
+  // const so callers don't need to change. When the workbench grows a
+  // history filter, restore useState here.
+  const taskSearch = "";
   const [taskPrompt, setTaskPrompt] = useState(defaultTaskPrompt);
-  const [hostingMode, setHostingMode] = useState<"semi" | "full">("semi");
   const [taskHistory, setTaskHistory] = useState<LeadTaskListItem[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
+  const [taskHistoryPage, setTaskHistoryPage] = useState(1);
+  const [taskHistorySearch, setTaskHistorySearch] = useState("");
+  const [taskHistoryStatus, setTaskHistoryStatus] = useState<WorkbenchPoolStatusFilter>("all");
+  const [taskHistoryTotal, setTaskHistoryTotal] = useState(0);
+  // 2026-05 responsive cleanup: page size is now a fixed business
+  // constant (see workbenchPoolPageSize at the top of the file). The
+  // previous viewport-driven dynamic value is gone; CSS handles density.
+  // 2026-05 Stage 3 follow-up: workbench KPI summary covers the full
+  // user history so new tasks pushing old ones out of the limit=30
+  // listing window can't make the counters appear to drop.
+  const [taskSummary, setTaskSummary] = useState<LeadTaskSummary | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [poolLoading, setPoolLoading] = useState(false);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [currentTask, setCurrentTask] = useState<LeadTask | null>(null);
   const [searchResult, setSearchResult] = useState<SearchRunResult | null>(null);
   const [creating, setCreating] = useState(false);
   const [searching, setSearching] = useState(false);
+  const searchTriggerInFlightRef = useRef(false);
   const [approving, setApproving] = useState(false);
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
   const [mailLead, setMailLead] = useState<MailConfirmationLead | null>(null);
@@ -460,47 +423,34 @@ export function AiWorkerClient() {
   );
   const pendingFollowupCount = useMemo(
     () =>
-      actionableDisplayLeads.reduce(
-        (total, lead) => total + pendingFollowups(lead.raw).length,
-        0
-      ),
+      actionableDisplayLeads.reduce((total, lead) => total + pendingFollowups(lead.raw).length, 0),
     [actionableDisplayLeads]
   );
-  const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
-  const keywordRows = useMemo(
-    () => buildKeywordRows(currentTask, view !== "landing"),
-    [currentTask, view]
-  );
-  const profileSourceRows = useMemo(() => buildProfileSourceRows(currentTask), [currentTask]);
-  const flowRows = useMemo(
-    () =>
-      buildFlowRows(currentTask, {
-        creating,
-        searching,
-        approving,
-        leadCount: actionableDisplayLeads.length,
-        leadQualityCounts,
-        sentCount,
-        crmSyncedCount,
-        pendingFollowupCount
-      }),
-    [
-      approving,
-      creating,
-      crmSyncedCount,
-      currentTask,
-      actionableDisplayLeads.length,
-      leadQualityCounts,
-      pendingFollowupCount,
-      searching,
-      sentCount
-    ]
-  );
+  // sentCount and leadQualityCounts kept for the CRM/mail dialogs and
+  // status messages that still consume them; the search-in-progress JSX
+  // no longer uses them directly. Touch them here so eslint's no-unused
+  // rule stays happy.
+  void sentCount;
+  void summarizeLeadQualityCounts;
   const crmRows = useMemo(() => buildCrmRows(actionableDisplayLeads), [actionableDisplayLeads]);
-  const crmPageCount = Math.max(1, Math.ceil(crmRows.length / crmPageSize));
-  const crmPageRows = crmRows.slice((crmPage - 1) * crmPageSize, crmPage * crmPageSize);
-  const selectedDisplayLead =
-    displayLeads.find((lead) => lead.id === selectedLeadId) ?? displayLeads[0] ?? null;
+  const crmModalRows = useMemo(() => {
+    const baseRows = crmSyncTargetIds
+      ? crmRows.filter((row) => crmSyncTargetIds.includes(row.id))
+      : crmRows;
+    const pendingRows = baseRows.filter((row) => !row.raw.crmLead);
+    return pendingRows.length ? pendingRows : baseRows;
+  }, [crmRows, crmSyncTargetIds]);
+  const crmPendingRows = crmModalRows.filter((row) => !row.raw.crmLead);
+  const crmAlreadySyncedRows = crmModalRows.filter((row) => Boolean(row.raw.crmLead));
+  const crmPageCount = Math.max(1, Math.ceil(crmModalRows.length / crmPageSize));
+  const crmPageRows = crmModalRows.slice((crmPage - 1) * crmPageSize, crmPage * crmPageSize);
+  const crmModalPendingCount = crmPendingRows.length;
+  const crmModalSyncedCount = crmAlreadySyncedRows.length;
+  const crmModalSyncedDisplayCount = crmModalPendingCount
+    ? crmModalSyncedCount
+    : crmModalRows.length;
+  const crmModalCountryCount = countDistinct(crmModalRows.map((row) => row.country));
+  const crmModalIsPending = crmModalPendingCount > 0;
   const selectedActionableLead =
     actionableDisplayLeads.find((lead) => lead.id === selectedLeadId) ??
     actionableDisplayLeads[0] ??
@@ -521,7 +471,12 @@ export function AiWorkerClient() {
   }, [actionableDisplayLeads]);
 
   useEffect(() => {
-    if (!currentTask?.id || !isBackendTaskActive(currentTask)) {
+    // 2026-05 LeadHunt 2.0: poll while the task is active OR while we
+    // optimistically marked the page as searching. The latter covers
+    // the race window after firing POST /search where the backend
+    // hasn't yet flipped the task row to "running".
+    const taskActive = currentTask ? isBackendTaskActive(currentTask) : false;
+    if (!currentTask?.id || (!taskActive && !searching && !creating)) {
       return;
     }
 
@@ -538,6 +493,16 @@ export function AiWorkerClient() {
           const refreshed = await refreshTask(currentTask.id);
           applyTaskProgress(refreshed);
           if (!isBackendTaskActive(refreshed)) {
+            if (searchTriggerInFlightRef.current) {
+              continue;
+            }
+            // Backend has reached a terminal state (completed / failed
+            // / paused / cancelled, or has no running agentSteps left).
+            // Release the optimistic flags here — applyTaskProgress
+            // intentionally only lifts them — so the polling effect
+            // can exit instead of looping.
+            setSearching(false);
+            setCreating(false);
             void loadTaskHistory(taskSearch);
             return;
           }
@@ -545,6 +510,13 @@ export function AiWorkerClient() {
           if (!cancelled) {
             setError(errorMessage(requestError));
             setStatus("任务状态刷新失败，后端任务可能仍在执行。");
+            // Release the optimistic flags on transient failures too —
+            // otherwise a single 401/network blip leaves the page
+            // disabled forever ("继续搜索 30 条" stays grayed out).
+            // The next user action (or a manual refresh) will re-run
+            // the polling loop.
+            setSearching(false);
+            setCreating(false);
           }
           return;
         }
@@ -562,7 +534,7 @@ export function AiWorkerClient() {
     return () => {
       cancelled = true;
     };
-  }, [currentTask?.id, currentTask?.status]);
+  }, [currentTask?.id, currentTask?.status, searching, creating]);
 
   useEffect(() => {
     if (!displayLeads.length) {
@@ -581,17 +553,37 @@ export function AiWorkerClient() {
     }
   }, [crmPage, crmPageCount]);
 
-  async function loadTaskHistory(query?: string) {
+  async function loadTaskHistory(
+    input?:
+      | string
+      | {
+          search?: string;
+          status?: WorkbenchPoolStatusFilter;
+          page?: number;
+        }
+  ) {
     setHistoryLoading(true);
+    const nextSearch = typeof input === "string" ? input : (input?.search ?? taskHistorySearch);
+    const nextStatus = typeof input === "string" ? "all" : (input?.status ?? taskHistoryStatus);
+    const nextPage = typeof input === "string" ? 1 : Math.max(1, input?.page ?? taskHistoryPage);
     try {
       const params = new URLSearchParams();
-      if (query?.trim()) params.set("search", query.trim());
-      params.set("limit", "30");
+      if (nextSearch.trim()) params.set("search", nextSearch.trim());
+      if (nextStatus !== "all") params.set("status", nextStatus);
+      params.set("limit", String(workbenchPoolPageSize));
+      params.set("offset", String((nextPage - 1) * workbenchPoolPageSize));
       const url = `/api/lead-tasks?${params.toString()}`;
       const payload = await apiRequest<LeadTaskListResponse>(url);
+      setTaskHistorySearch(nextSearch);
+      setTaskHistoryStatus(nextStatus);
+      setTaskHistoryPage(nextPage);
       setTaskHistory(payload.tasks);
+      setTaskSummary(payload.summary ?? null);
+      setTaskHistoryTotal(payload.totalCount ?? payload.summary?.taskCount ?? payload.tasks.length);
     } catch {
       setTaskHistory([]);
+      setTaskSummary(null);
+      setTaskHistoryTotal(0);
     } finally {
       setHistoryLoading(false);
     }
@@ -601,11 +593,17 @@ export function AiWorkerClient() {
     void loadTaskHistory();
   }, []);
 
-  async function openHistoryTask(taskId: string) {
-    setView("conversation");
-    setStatus("正在恢复任务...");
+  // 2026-05 LeadHunt 2.0: workbench → pool view. Loads the task's full
+  // candidate list and switches into the pool detail page (instead of
+  // the legacy conversation view).
+  async function openPoolFromHistory(taskId: string) {
+    setCurrentTask(null);
+    setView("pool");
+    setPoolLoading(true);
+    setStatus("正在加载客户池...");
     setError("");
     setMailLead(null);
+    setLeadDetail(null);
     try {
       const refreshed = await apiRequest<LeadTask>(`/api/lead-tasks/${taskId}`);
       setCurrentTask(refreshed);
@@ -614,12 +612,64 @@ export function AiWorkerClient() {
         typeof payload?.prompt === "string" ? payload.prompt : defaultTaskPrompt;
       setTaskPrompt(restoredPrompt);
       applyTaskProgress(refreshed);
-      if ((refreshed.leadCandidates?.length ?? 0) > 0) {
-        setSelectedLeadId(buildDisplayLeads(refreshed)[0]?.id ?? null);
-      }
     } catch (requestError) {
       setError(errorMessage(requestError));
-      setStatus("恢复任务失败，请检查登录状态。");
+      setStatus("加载客户池失败，请检查登录状态。");
+    } finally {
+      setPoolLoading(false);
+    }
+  }
+
+  async function openSearchRunFromHistory(taskId: string) {
+    setView("conversation");
+    setError("");
+    setMailLead(null);
+    setLeadDetail(null);
+    setStatus("正在恢复搜索进度...");
+    try {
+      const refreshed = await refreshTask(taskId);
+      const payload = refreshed.inputPayload as { prompt?: string } | null;
+      setTaskPrompt(typeof payload?.prompt === "string" ? payload.prompt : defaultTaskPrompt);
+      applyTaskProgress(refreshed);
+      void loadTaskHistory(taskSearch);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+      setStatus("加载搜索进度失败，请稍后重试。");
+    }
+  }
+
+  async function deleteLeadTask(taskId: string) {
+    if (deletingTaskId) return;
+
+    setDeletingTaskId(taskId);
+    setError("");
+    setStatus("正在删除客户池...");
+    try {
+      await apiRequest<{ ok: boolean; taskId: string }>(`/api/lead-tasks/${taskId}`, {
+        method: "DELETE"
+      });
+      appMessage.success("客户池已删除", {
+        description: "已从工作台隐藏；已加入 CRM 的客户不会删除。",
+        duration: 2500
+      });
+      if (currentTask?.id === taskId) {
+        setCurrentTask(null);
+        setView("workbench");
+      }
+      const nextPage =
+        taskHistory.length === 1 && taskHistoryPage > 1 ? taskHistoryPage - 1 : taskHistoryPage;
+      await loadTaskHistory({ page: nextPage });
+      setStatus("客户池已从工作台隐藏。");
+    } catch (requestError) {
+      const message = errorMessage(requestError);
+      setError(message);
+      setStatus("删除客户池失败，请稍后重试。");
+      appMessage.error("删除客户池失败", {
+        description: message,
+        duration: 4000
+      });
+    } finally {
+      setDeletingTaskId(null);
     }
   }
 
@@ -655,19 +705,103 @@ export function AiWorkerClient() {
     }
   }
 
+  // 2026-05 LeadHunt 2.0: real task-search trigger.
+  // Calls `POST /api/lead-tasks/:taskId/search` to kick a new batch of
+  // queries on the backend. Polling effect picks up status and lead
+  // updates afterwards. Always switches to the conversation view so
+  // the user sees the run-batch card live.
   async function runTaskSearch(taskId = currentTask?.id) {
     if (!taskId) {
       setStatus("请先创建任务，后端会自动完成本轮搜索。");
       return;
     }
 
-    try {
-      const refreshedTask = await refreshTask(taskId);
-      applyTaskProgress(refreshedTask);
-    } catch (requestError) {
-      setError(errorMessage(requestError));
-      setStatus("任务状态刷新失败；后端会自动执行搜索，稍后可从任务历史打开查看。");
-    }
+    setView("conversation");
+    setSearching(true);
+    searchTriggerInFlightRef.current = true;
+    setError("");
+    setStatus("已发起新一批搜索，正在等待后端 LLM 规划与 Brave 调用...");
+
+    // Fire-and-forget the workflow trigger. The endpoint blocks until
+    // the LangGraph batch finishes, so the polling effect will keep
+    // updating the page once currentTask flips to running.
+    type SearchTriggerResponse = {
+      ok?: boolean;
+      executedQueries?: number;
+      appendedQueries?: number;
+      // 2026-05 Stage 2 follow-up: reason why a continuation append
+      // produced (or didn't produce) new queries. Surfaced to the
+      // user when N=0 so the click doesn't feel silent.
+      appendReason?:
+        | "appended"
+        | "pending_remaining"
+        | "missing_payload"
+        | "ai_unavailable"
+        | "ai_error"
+        | "no_new_queries";
+    };
+    void apiRequest<SearchTriggerResponse>(`/api/lead-tasks/${taskId}/search`, {
+      method: "POST",
+      // 2026-05 Stage 2 follow-up: appendIfEmpty=true tells the
+      // backend to generate and insert a new batch of pending
+      // queries when the task has already drained its queue. Without
+      // it, /search on a finished task is a no-op (returns 201 with
+      // executedQueries=0) and "继续搜索 30 条" looks broken.
+      body: JSON.stringify({ limit: 30, appendIfEmpty: true })
+    })
+      .then(async (response) => {
+        // 2026-05 Stage 2 follow-up: surface a concrete reason when
+        // the backend couldn't actually append — without this the
+        // user sees the page flip back to a finished pool and has no
+        // idea why "继续搜索 30 条" produced nothing.
+        if (response?.appendReason && response.appendReason !== "appended") {
+          searchTriggerInFlightRef.current = false;
+          const message =
+            {
+              pending_remaining: "上一批 query 还在执行中，正在继续消费，无需再追加。",
+              missing_payload: "该任务缺少产品/客户画像数据，无法继续生成新一批搜索指令。",
+              ai_unavailable: "AI 规划服务暂不可用，未生成新的搜索指令。",
+              ai_error: "生成新一批搜索指令失败，可稍后重试。",
+              no_new_queries: "未生成新的搜索指令；可调整搜索方向或更换关键词后重试。"
+            }[response.appendReason] ?? "未生成新的搜索指令。";
+          setStatus(message);
+          // Release the optimistic searching flag so the page doesn't
+          // sit on "正在等待后端 LLM 规划..." forever.
+          setSearching(false);
+          return;
+        }
+
+        if (response?.appendReason === "appended" || (response?.appendedQueries ?? 0) > 0) {
+          setSearching(true);
+          const refreshed = await refreshTask(taskId);
+          searchTriggerInFlightRef.current = false;
+          applyTaskProgress(refreshed);
+          if (!isBackendTaskActive(refreshed)) {
+            setSearching(false);
+            setCreating(false);
+            void loadTaskHistory(taskSearch);
+          }
+        }
+        searchTriggerInFlightRef.current = false;
+      })
+      .catch((requestError) => {
+        searchTriggerInFlightRef.current = false;
+        // We don't fail the page on a search-trigger error — the polling
+        // loop will surface failed steps as they arrive. Log to status
+        // so the user sees the upstream cause.
+        setError(errorMessage(requestError));
+        setStatus("发起搜索失败，可在状态恢复后重试。");
+        setSearching(false);
+      });
+
+    // Note: we deliberately do NOT call refreshTask + applyTaskProgress
+    // here. If we did, applyTaskProgress would race with the backend —
+    // the task row hasn't flipped to running yet, so isTaskSearching
+    // returns false and immediately resets our optimistic
+    // setSearching(true). That would cause the polling effect to bail
+    // out before the new batch ever shows up. Instead we rely on the
+    // searching=true flag to keep the polling loop alive until the
+    // next tick picks up the real status change.
   }
 
   async function refreshTask(taskId: string) {
@@ -683,8 +817,16 @@ export function AiWorkerClient() {
     );
     const failedMessage = firstFailedStepError(task);
 
-    setCreating(isTaskPlanning(task));
-    setSearching(isTaskSearching(task));
+    // 2026-05 LeadHunt 2.0: only LIFT the optimistic searching/creating
+    // flags; never drop them based on a single snapshot. The user just
+    // clicked "继续搜索 30 条" — the backend may not have flipped the
+    // task row to running yet, so `isTaskSearching` would otherwise
+    // immediately tear down the polling loop and the new batch would
+    // never show up. Once the backend lands a terminal state, the
+    // polling effect itself releases the flags via the dedicated reset
+    // below.
+    if (isTaskPlanning(task)) setCreating(true);
+    if (isTaskSearching(task)) setSearching(true);
     setSearchResult(hasSearchData ? result : null);
     if (failedMessage || task.status === "failed") {
       setError(failedMessage || "任务执行失败。");
@@ -699,8 +841,8 @@ export function AiWorkerClient() {
     }
   }
 
-  async function approveSelectedLead() {
-    const lead = selectedDisplayLead;
+  function openSelectedLeadMail() {
+    const lead = selectedActionableLead;
     if (!lead) {
       setStatus("当前还没有候选客户，请先执行搜索。");
       return;
@@ -716,42 +858,79 @@ export function AiWorkerClient() {
     setSelectedLeadId(lead.id);
     setMailLead(localMailLead);
     setMailOpen(true);
+    setError("");
+    setStatus(`已打开 ${lead.companyName} 的邮件预览弹窗。`);
+  }
 
-    if (!currentTask) {
-      setMailLead({ ...localMailLead, id: undefined });
-      setStatus("已打开邮件确认弹窗；当前没有可关联的后端任务，先使用候选客户信息预填草稿。");
-      return;
-    }
-
+  // 2026-05 Stage 2: bulk approve from the pool detail page. Posts
+  // every selected leadId to the existing /approve endpoint so the
+  // backend builds CRM rows + email drafts for them, then refreshes
+  // the task so the UI reflects the new crmLead/draft entries.
+  async function approveSelectedLeads(
+    taskId: string,
+    leadIds: string[]
+  ): Promise<ApprovalResult | null> {
+    if (!leadIds.length) return null;
     setApproving(true);
     setError("");
-    setStatus(`已打开 ${lead.companyName} 的邮件确认弹窗，正在后台生成开发信草稿...`);
+    setStatus(`正在批量加入 CRM：已选择 ${leadIds.length} 家客户...`);
+    setCrmSyncDialog({
+      kind: "loading",
+      title: "正在同步到 CRM",
+      detail:
+        leadIds.length === 1
+          ? "正在写入 1 家客户，请稍候。"
+          : `正在写入 ${leadIds.length} 家客户，请稍候。`
+    });
+    const selectedLeadNames = leadIds
+      .map((leadId) => displayLeads.find((lead) => lead.id === leadId)?.companyName)
+      .filter((companyName): companyName is string => Boolean(companyName));
 
     try {
-      const result = await apiRequest<ApprovalResult>(`/api/lead-tasks/${currentTask.id}/approve`, {
+      const result = await apiRequest<ApprovalResult>(`/api/lead-tasks/${taskId}/approve`, {
         method: "POST",
-        body: JSON.stringify({ leadIds: [lead.id] })
+        body: JSON.stringify({ leadIds })
       });
-      const refreshed = await refreshTask(currentTask.id);
-      const approvedLead =
-        refreshed.leadCandidates?.find((candidate) => candidate.id === result.approvedLeadIds[0]) ??
-        lead.raw;
-      const modalCandidate = buildDisplayLead(approvedLead);
-      setSelectedLeadId(approvedLead.id);
-      setMailLead(toMailLead(modalCandidate));
-      setMailOpen(true);
+      if (result.approvedCount > 0) {
+        setCrmSyncDialog({
+          kind: "success",
+          title: "已加入 CRM",
+          detail:
+            result.approvedCount === 1
+              ? `${selectedLeadNames[0] ?? "客户"} 已同步到 CRM 客户。`
+              : `${result.approvedCount} 家客户已同步到 CRM 客户。`
+        });
+      } else {
+        setCrmSyncDialog({
+          kind: "success",
+          title: "已在 CRM 中",
+          detail: "所选客户已经在 CRM 客户列表中，没有重复写入。"
+        });
+      }
+      await refreshTask(taskId).catch(() => undefined);
+      // 2026-05 Stage 3 follow-up: refresh task history so the
+      // workbench KPI strip (待同步 CRM, 邮件待确认) reflects the
+      // approve immediately. Without this, returning to the workbench
+      // shows the cached pre-approve counters until the next mount.
+      void loadTaskHistory(taskSearch);
       setStatus(
-        `已审批 ${result.approvedCount} 家客户，并生成 ${result.draftCount} 封开发信草稿。`
+        `已加入 CRM ${result.approvedCount} 家客户，并生成 ${result.draftCount} 封开发信草稿。`
       );
+      return result;
     } catch (requestError) {
       const message = errorMessage(requestError);
       setError(message);
-      setMailLead({ ...localMailLead, id: undefined });
       setStatus(
         isMissingLeadTaskError(message)
-          ? "当前页面的任务不属于当前登录账号或已失效；已先打开本地邮件确认弹窗。重新创建任务后可走完整草稿与 CRM 链路。"
-          : "开发信草稿接口失败；已先打开邮件确认弹窗，可检查收件人和正文后再处理。"
+          ? "当前任务不属于当前登录账号或已失效，批量加入 CRM 已取消。"
+          : "批量加入 CRM 失败；可重试或先单条审批。"
       );
+      appMessage.error("加入 CRM 失败", {
+        description: "请稍后重试，或先单条处理。",
+        duration: 4000
+      });
+      setCrmSyncDialog(null);
+      return null;
     } finally {
       setApproving(false);
     }
@@ -762,45 +941,63 @@ export function AiWorkerClient() {
   }
 
   function backToLanding() {
-    setView("landing");
-    setCommand("");
+    setView("workbench");
     setStatus(currentTask ? "任务已保留，可确认客户或重新执行搜索" : "等待分配任务");
+    void loadTaskHistory(taskSearch);
   }
 
-  function openCrmPreview() {
+  function openCrmPreview(leadId?: string) {
+    setCrmSyncTargetIds(leadId ? [leadId] : null);
     setCrmPage(1);
     setCrmOpen(true);
-    setStatus(crmRows.length ? "已打开 CRM 同步预览。" : "当前暂无可同步主客户，CRM 预览为空。");
+    const syncableCount = leadId
+      ? crmRows.filter((row) => row.id === leadId && !row.raw.crmLead).length
+      : crmRows.filter((row) => !row.raw.crmLead).length;
+    setStatus(syncableCount ? "已打开 CRM 同步确认。" : "当前客户已同步或暂无可同步主客户。");
   }
 
   function changeCrmPage(nextPage: number) {
     setCrmPage(Math.min(Math.max(nextPage, 1), crmPageCount));
   }
 
+  async function confirmCrmSync() {
+    if (!currentTask?.id) {
+      setStatus("当前没有可关联的后端任务，无法同步到 CRM。");
+      appMessage.error("无法同步 CRM", {
+        description: "当前任务不存在，请重新打开客户池后再试。",
+        duration: 4000
+      });
+      return;
+    }
+
+    const targetIds = crmPendingRows.map((row) => row.id);
+    if (!targetIds.length) {
+      setCrmOpen(false);
+      setCrmSyncTargetIds(null);
+      window.location.href = "/customers";
+      return;
+    }
+
+    const result = await approveSelectedLeads(currentTask.id, targetIds);
+    if (!result) {
+      return;
+    }
+
+    setCrmOpen(false);
+    setCrmSyncTargetIds(null);
+  }
+
   async function handleMailSent(result: MailSendResult) {
     if (currentTask) {
       await refreshTask(currentTask.id).catch(() => undefined);
     }
+    setMailOpen(false);
+    appMessage.success(result.scheduled ? "定时发送已安排" : "邮件已发送", {
+      description: formatMailSuccessDetail(result),
+      duration: 3200
+    });
     setStatus(formatMailSentStatus(result));
     setError("");
-  }
-
-  function sendCommand() {
-    const text = command.trim();
-    if (!text) return;
-    setCommand("");
-
-    if (/搜索|重新执行|search/i.test(text)) {
-      void runTaskSearch();
-      return;
-    }
-
-    if (/邮件|开发信|发信|mail/i.test(text)) {
-      void approveSelectedLead();
-      return;
-    }
-
-    setStatus(text);
   }
 
   return (
@@ -814,34 +1011,101 @@ export function AiWorkerClient() {
     >
       <main className="aiProjectApp">
         <section className="projectWorkspace">
-          {view === "landing" ? (
-            <AiWorkerLanding
+          {view === "workbench" ? (
+            <AiWorkerWorkbench
               prompt={landingPrompt}
               onPromptChange={setLandingPrompt}
               onSubmit={submitLanding}
-              taskSearch={taskSearch}
-              onTaskSearchChange={setTaskSearch}
               submitting={creating || searching}
-              hostingMode={hostingMode}
-              onHostingModeChange={setHostingMode}
               taskHistory={taskHistory}
+              taskSummary={taskSummary}
+              taskHistoryTotal={taskHistoryTotal}
+              taskHistoryPage={taskHistoryPage}
+              taskHistoryPageSize={workbenchPoolPageSize}
+              taskHistorySearch={taskHistorySearch}
+              taskHistoryStatus={taskHistoryStatus}
               historyLoading={historyLoading}
-              onSelectHistoryTask={openHistoryTask}
-              onRefreshHistory={() => void loadTaskHistory(taskSearch)}
+              onSelectHistoryTask={openPoolFromHistory}
+              onOpenSearchRun={openSearchRunFromHistory}
+              onRefreshHistory={() => void loadTaskHistory()}
+              onHistorySearchChange={(search) => void loadTaskHistory({ search, page: 1 })}
+              onHistoryStatusChange={(historyStatus) =>
+                void loadTaskHistory({ status: historyStatus, page: 1 })
+              }
+              onHistoryPageChange={(page) => void loadTaskHistory({ page })}
+              onDeleteTask={(taskId) => void deleteLeadTask(taskId)}
+              deletingTaskId={deletingTaskId}
+              onContinueSearch={(taskId) => {
+                // Finished pool card "继续搜索 30 条" — load the task's
+                // full state (prompt, market terms, prior queries) into
+                // the conversation view, then re-trigger the search
+                // agent. Without the explicit load step, currentTask
+                // stays null and the search page shows the fallback
+                // chips ("UAE/Saudi Arabia/...") instead of the real
+                // task title and target markets.
+                setView("conversation");
+                void (async () => {
+                  try {
+                    const refreshed = await refreshTask(taskId);
+                    const payload = refreshed.inputPayload as { prompt?: string } | null;
+                    setTaskPrompt(
+                      typeof payload?.prompt === "string" ? payload.prompt : defaultTaskPrompt
+                    );
+                    applyTaskProgress(refreshed);
+                  } catch (requestError) {
+                    // If we can't even load the task, don't fire a
+                    // search against it — the polling loop wouldn't
+                    // know which task to follow and the user would
+                    // see a half-loaded conversation view.
+                    setError(errorMessage(requestError));
+                    setStatus("加载任务失败，未触发新一轮搜索。");
+                    return;
+                  }
+                  void runTaskSearch(taskId);
+                })();
+              }}
+            />
+          ) : view === "pool" ? (
+            <AiWorkerPool
+              task={currentTask}
+              taskHistoryItem={taskHistory.find((task) => task.id === currentTask?.id) ?? null}
+              leads={displayLeads}
+              loading={poolLoading}
+              approving={approving}
+              onBack={() => setView("workbench")}
+              onOpenSearchRun={() => {
+                if (currentTask?.id) {
+                  void openSearchRunFromHistory(currentTask.id);
+                }
+              }}
+              onContinueSearch={() => {
+                if (currentTask?.id) {
+                  setView("conversation");
+                  void runTaskSearch(currentTask.id);
+                }
+              }}
+              onBulkApprove={(leadIds) => {
+                if (currentTask?.id && leadIds.length > 0) {
+                  void approveSelectedLeads(currentTask.id, leadIds);
+                }
+              }}
+              onOpenLeadDetail={(lead) => {
+                setSelectedLeadId(lead.id);
+                setLeadDetail(lead);
+              }}
+              onApproveLead={(leadId) => {
+                if (currentTask?.id) {
+                  void approveSelectedLeads(currentTask.id, [leadId]);
+                }
+              }}
             />
           ) : (
             <AiWorkerConversation
               prompt={taskPrompt}
               status={status}
               error={error}
-              command={command}
               currentTask={currentTask}
-              keywordRows={keywordRows}
-              profileSourceRows={profileSourceRows}
-              flowRows={flowRows}
               leads={displayLeads}
-              crmRows={crmRows}
-              sentCount={sentCount}
               crmSyncedCount={crmSyncedCount}
               pendingFollowupCount={pendingFollowupCount}
               searchResult={searchResult}
@@ -850,11 +1114,16 @@ export function AiWorkerClient() {
               approving={approving}
               selectedLeadId={selectedLeadId}
               onSelectLead={setSelectedLeadId}
-              onCommandChange={setCommand}
-              onSendCommand={sendCommand}
-              onOpenMail={() => void approveSelectedLead()}
+              onOpenLeadDetail={(lead) => {
+                setSelectedLeadId(lead.id);
+                setLeadDetail(lead);
+              }}
+              onOpenMail={openSelectedLeadMail}
               onOpenCrm={openCrmPreview}
               onBack={backToLanding}
+              onContinueSearch={() => {
+                if (currentTask?.id) void runTaskSearch(currentTask.id);
+              }}
             />
           )}
         </section>
@@ -868,80 +1137,129 @@ export function AiWorkerClient() {
               aria-labelledby="crm-data-title"
             >
               <header className="crmDataHeader">
-                <div>
-                  <span>CRM 数据</span>
-                  <h2 id="crm-data-title">本次同步客户</h2>
+                <div
+                  className={
+                    crmModalIsPending ? "crmDataHeroIcon pending" : "crmDataHeroIcon synced"
+                  }
+                >
+                  <Database size={42} aria-hidden="true" />
+                  <span className="crmDataHeroBadge" aria-hidden="true">
+                    <CheckCircle2 size={22} />
+                  </span>
+                </div>
+                <div className="crmDataHeroText">
+                  <span>{crmModalIsPending ? "CRM 同步确认" : "CRM 同步完成"}</span>
+                  <h2 id="crm-data-title">
+                    {crmModalIsPending
+                      ? "准备写入 CRM 客户列表"
+                      : `${crmModalSyncedDisplayCount} 家客户已同步到 CRM`}
+                  </h2>
+                  <p>
+                    {crmModalIsPending
+                      ? `将 ${crmModalPendingCount} 家待同步客户写入 CRM，重复客户会自动跳过。`
+                      : "可直接进入客户列表继续跟进，重复客户已自动跳过。"}
+                  </p>
                 </div>
                 <button
                   className="crmDataClose"
                   type="button"
-                  aria-label="关闭 CRM 数据弹窗"
-                  onClick={() => setCrmOpen(false)}
+                  aria-label="关闭 CRM 同步弹窗"
+                  onClick={() => {
+                    setCrmOpen(false);
+                    setCrmSyncTargetIds(null);
+                  }}
                 >
                   <X size={20} aria-hidden="true" />
                 </button>
               </header>
 
               <div className="crmDataSummary">
-                <div>
-                  <strong>{crmRows.length}</strong>
-                  <span>客户</span>
+                <div className="crmDataMetricCard">
+                  <span className="crmDataMetricLabel">
+                    <span className="crmDataMetricIcon synced">
+                      <CheckCircle2 size={22} aria-hidden="true" />
+                    </span>
+                    已同步
+                  </span>
+                  <strong>{crmModalSyncedDisplayCount}</strong>
                 </div>
-                <div>
-                  <strong>{countDistinct(crmRows.map((row) => row.country))}</strong>
-                  <span>国家 / 地区</span>
+                <div className="crmDataMetricCard">
+                  <span className="crmDataMetricLabel">
+                    <span className="crmDataMetricIcon pending">
+                      <Clock size={22} aria-hidden="true" />
+                    </span>
+                    待同步
+                  </span>
+                  <strong>{crmModalPendingCount}</strong>
                 </div>
-                <div>
-                  <strong>{averageScore(crmRows)}</strong>
-                  <span>平均 ICP</span>
-                </div>
-                <div>
-                  <strong>王亚伟</strong>
-                  <span>默认负责人</span>
+                <div className="crmDataMetricCard">
+                  <span className="crmDataMetricLabel">
+                    <span className="crmDataMetricIcon country">
+                      <Globe2 size={22} aria-hidden="true" />
+                    </span>
+                    覆盖国家
+                  </span>
+                  <strong>{crmModalCountryCount}</strong>
                 </div>
               </div>
 
-              <div className="crmDataTableWrap">
+              <div className={crmPageCount > 1 ? "crmDataTableWrap paged" : "crmDataTableWrap"}>
                 <table className="crmDataTable">
                   <thead>
                     <tr>
                       <th>公司名称</th>
                       <th>国家</th>
-                      <th>行业</th>
-                      <th>电话</th>
+                      <th>客户类型</th>
                       <th>邮箱</th>
-                      <th>数据来源</th>
-                      <th>客户简述</th>
-                      <th>客户阶段</th>
-                      <th>负责人</th>
-                      <th>评分</th>
+                      <th>电话</th>
+                      <th>官网</th>
+                      <th>状态</th>
                     </tr>
                   </thead>
                   <tbody>
                     {crmPageRows.length ? (
-                      crmPageRows.map((row) => (
-                        <tr key={row.id}>
-                          <td className="leadCompanyCell">{row.companyName}</td>
-                          <td>{row.country}</td>
-                          <td>{row.industry}</td>
-                          <td>{row.phone}</td>
-                          <td>{row.email}</td>
-                          <td>{row.source}</td>
-                          <td>{row.tag}</td>
-                          <td>
-                            <span className="crmStageTag">{row.stage}</span>
-                          </td>
-                          <td>{row.owner}</td>
-                          <td>
-                            <b className="crmScore">{row.score}</b>
-                          </td>
-                        </tr>
-                      ))
+                      crmPageRows.map((row) => {
+                        const synced = Boolean(row.raw.crmLead);
+                        const email = row.email !== "-" ? row.email : "—";
+                        const phone = row.phone !== "-" ? row.phone : "—";
+
+                        return (
+                          <tr key={row.id}>
+                            <td className="leadCompanyCell">
+                              <strong>{row.companyName}</strong>
+                            </td>
+                            <td>{row.country}</td>
+                            <td>{row.industry}</td>
+                            <td className="crmDataContactCell" title={email}>
+                              {email}
+                            </td>
+                            <td className="crmDataPhoneCell" title={phone}>
+                              {phone}
+                            </td>
+                            <td>
+                              {row.website && row.website !== "-" ? (
+                                <a
+                                  href={websiteHref(row.website)}
+                                  target="_blank"
+                                  rel="noreferrer noopener"
+                                >
+                                  {formatWebsiteShort(row.website)}
+                                </a>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td>
+                              <span className={synced ? "crmStageTag synced" : "crmStageTag"}>
+                                {synced ? "已同步" : "待同步"}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })
                     ) : (
                       <tr>
-                        <td colSpan={10}>
-                          暂无可同步客户，先执行 AI 搜索后会在这里预览 CRM 字段。
-                        </td>
+                        <td colSpan={7}>暂无可同步客户，先执行 AI 搜索后再同步到 CRM。</td>
                       </tr>
                     )}
                   </tbody>
@@ -950,39 +1268,109 @@ export function AiWorkerClient() {
 
               <footer className="crmDataFooter">
                 <span>
-                  第 {crmPage} / {crmPageCount} 页，已整理 {crmRows.length} 条同步记录
+                  共 {crmModalRows.length} 家客户 · 第 {crmPage} / {crmPageCount} 页
                 </span>
-                <div className="crmDataPager">
+                <div className="crmDataFooterActions">
+                  {crmPageCount > 1 ? (
+                    <div className="crmDataPager">
+                      <button
+                        type="button"
+                        aria-label="上一页"
+                        disabled={crmPage === 1}
+                        onClick={() => changeCrmPage(crmPage - 1)}
+                      >
+                        <ChevronLeft size={18} aria-hidden="true" />
+                      </button>
+                      <span className="crmDataPagerText">
+                        {crmPage} / {crmPageCount}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="下一页"
+                        disabled={crmPage === crmPageCount}
+                        onClick={() => changeCrmPage(crmPage + 1)}
+                      >
+                        <ChevronRight size={18} aria-hidden="true" />
+                      </button>
+                    </div>
+                  ) : null}
                   <button
+                    className="crmDataSecondary"
                     type="button"
-                    aria-label="上一页"
-                    disabled={crmPage === 1}
-                    onClick={() => changeCrmPage(crmPage - 1)}
+                    onClick={() => {
+                      setCrmOpen(false);
+                      setCrmSyncTargetIds(null);
+                    }}
                   >
-                    <ChevronLeft size={18} aria-hidden="true" />
+                    {crmModalIsPending ? "取消" : "关闭"}
                   </button>
-                  {Array.from({ length: crmPageCount }, (_, index) => index + 1).map((page) => (
-                    <button
-                      className={page === crmPage ? "active" : ""}
-                      type="button"
-                      key={page}
-                      onClick={() => changeCrmPage(page)}
-                    >
-                      {page}
-                    </button>
-                  ))}
                   <button
+                    className="crmDataPrimary"
                     type="button"
-                    aria-label="下一页"
-                    disabled={crmPage === crmPageCount}
-                    onClick={() => changeCrmPage(crmPage + 1)}
+                    disabled={approving || (!crmModalPendingCount && !crmModalRows.length)}
+                    onClick={() => void confirmCrmSync()}
                   >
-                    <ChevronRight size={18} aria-hidden="true" />
+                    {crmModalIsPending
+                      ? `确认同步 ${crmModalPendingCount} 家`
+                      : "查看 CRM 客户列表"}
                   </button>
                 </div>
               </footer>
             </section>
           </div>
+        ) : null}
+
+        {crmSyncDialog ? (
+          <div className="crmSyncFeedbackBackdrop" role="presentation">
+            <section
+              className="crmSyncFeedbackDialog"
+              role="dialog"
+              aria-modal="true"
+              aria-label={crmSyncDialog.title}
+            >
+              <span
+                className={
+                  crmSyncDialog.kind === "loading"
+                    ? "crmSyncFeedbackIcon loading"
+                    : "crmSyncFeedbackIcon success"
+                }
+                aria-hidden="true"
+              >
+                {crmSyncDialog.kind === "loading" ? null : <CheckCircle2 size={28} />}
+              </span>
+              <h2>{crmSyncDialog.title}</h2>
+              <p>{crmSyncDialog.detail}</p>
+              {crmSyncDialog.kind === "success" ? (
+                <div className="crmSyncFeedbackActions">
+                  <button
+                    className="crmDataSecondary"
+                    type="button"
+                    onClick={() => setCrmSyncDialog(null)}
+                  >
+                    关闭
+                  </button>
+                  <button
+                    className="crmDataPrimary"
+                    type="button"
+                    onClick={() => {
+                      setCrmSyncDialog(null);
+                      window.location.href = "/customers";
+                    }}
+                  >
+                    查看 CRM 客户列表
+                  </button>
+                </div>
+              ) : null}
+            </section>
+          </div>
+        ) : null}
+
+        {leadDetail ? (
+          <LeadDetailModal
+            lead={leadDetail}
+            task={currentTask}
+            onClose={() => setLeadDetail(null)}
+          />
         ) : null}
 
         <MailConfirmationModal
@@ -997,274 +1385,2053 @@ export function AiWorkerClient() {
   );
 }
 
-type LandingProps = {
-  prompt: string;
-  onPromptChange: (value: string) => void;
-  onSubmit: () => void;
-  taskSearch: string;
-  onTaskSearchChange: (value: string) => void;
-  submitting: boolean;
-  hostingMode: "semi" | "full";
-  onHostingModeChange: (mode: "semi" | "full") => void;
-  taskHistory: LeadTaskListItem[];
-  historyLoading: boolean;
-  onSelectHistoryTask: (taskId: string) => void;
-  onRefreshHistory: () => void;
-};
-
-function AiWorkerLanding({
-  prompt,
-  onPromptChange,
-  onSubmit,
-  taskSearch,
-  onTaskSearchChange,
-  submitting,
-  hostingMode,
-  onHostingModeChange,
-  taskHistory,
-  historyLoading,
-  onSelectHistoryTask,
-  onRefreshHistory
-}: LandingProps) {
-  const [hostingDialogOpen, setHostingDialogOpen] = useState(false);
-  const [draftHostingMode, setDraftHostingMode] = useState<"semi" | "full">(hostingMode);
-  const filteredHistory = useMemo(() => {
-    const keyword = taskSearch.trim().toLowerCase();
-    if (!keyword) return taskHistory;
-    return taskHistory.filter(
-      (task) =>
-        task.title.toLowerCase().includes(keyword) || task.prompt.toLowerCase().includes(keyword)
-    );
-  }, [taskHistory, taskSearch]);
-  function pickExample(text: string) {
-    onPromptChange(text);
-  }
-
-  function openHostingDialog() {
-    setDraftHostingMode(hostingMode);
-    setHostingDialogOpen(true);
-  }
-
-  function confirmHostingMode() {
-    onHostingModeChange(draftHostingMode);
-    setHostingDialogOpen(false);
-  }
+function LeadDetailModal({
+  lead,
+  task,
+  onClose
+}: {
+  lead: DisplayLead;
+  task: LeadTask | null;
+  onClose: () => void;
+}) {
+  const emails = pickFirstContactValue(lead.raw.contacts, "email").all;
+  const phones = pickFirstContactValue(lead.raw.contacts, "phone").all;
+  const sourceQueries = leadDetailSourceQueries(lead, task);
+  const website = lead.website && lead.website !== "-" ? lead.website : "";
+  const sourceUrl =
+    lead.sourceUrl && lead.sourceUrl !== "-" ? lead.sourceUrl : lead.raw.sourceUrl || "";
+  const country = leadDetailCountry(lead);
+  const address = lead.address || inferLeadAddress(lead.raw.countryEvidence);
+  const customerType = lead.tag && lead.tag !== "-" ? lead.tag : "";
 
   return (
-    <div className="aiLanding">
-      <aside className="aiLandingTasks" aria-label="历史任务">
-        <div className="aiLandingTaskHead">
-          <button className="aiLandingTaskBtn primary" type="button" onClick={onRefreshHistory}>
-            <span aria-hidden="true">+</span> 新任务
-          </button>
-          <button className="aiLandingTaskBtn" type="button">
-            <Settings size={15} aria-hidden="true" /> 我的配置
-          </button>
-        </div>
-        <label className="aiLandingTaskSearch">
-          <Search size={15} aria-hidden="true" />
-          <input
-            type="search"
-            value={taskSearch}
-            onChange={(event) => onTaskSearchChange(event.target.value)}
-            placeholder="搜索任务"
-            aria-label="搜索历史任务"
-          />
-        </label>
-        <div className="aiLandingTaskTitle">
-          历史任务
-          <span className="aiLandingTaskCount">
-            {historyLoading ? "..." : `${filteredHistory.length}`}
-          </span>
-        </div>
-        {filteredHistory.length === 0 ? (
-          <div className="aiLandingTaskEmpty">
-            <div className="aiLandingTaskEmptyIcon" aria-hidden="true" />
-            <strong>{historyLoading ? "正在读取历史任务..." : "暂无历史任务"}</strong>
-            <span>{historyLoading ? "请稍候" : "创建任务后将在此展示"}</span>
+    <div className="leadDetailBackdrop" role="presentation" onClick={onClose}>
+      <section
+        className="leadDetailModal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lead-detail-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="leadDetailHeader">
+          <div className="leadDetailTitle">
+            <span>客户档案</span>
+            <h2 id="lead-detail-title">{lead.companyName}</h2>
+            <p>
+              {[country, customerType, website ? formatWebsiteShort(website) : ""]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
           </div>
-        ) : (
-          <ul className="aiLandingTaskList" aria-label="历史任务列表">
-            {filteredHistory.map((task) => (
-              <li key={task.id}>
-                <button
-                  type="button"
-                  className="aiLandingTaskItem"
-                  onClick={() => onSelectHistoryTask(task.id)}
-                >
-                  <strong>{task.title || "未命名任务"}</strong>
-                  <small>
-                    {formatHistoryDate(task.createdAt)} · 主客户 {task.leadCount} · 指令{" "}
-                    {task.queryCount}
-                  </small>
-                  <span className={`aiLandingTaskStatus status-${task.status}`}>{task.status}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </aside>
-
-      <section className="aiLandingHero">
-        <div className="aiLandingHeroInner">
-          <h1 className="aiLandingTitle">外贸获客 寻找下一个客户</h1>
-          <p className="aiLandingSubtitle">
-            你的 AI 外贸员 7×24 小时工作，先理解产品与客户画像，再自动搜索潜在客户、判断
-            ICP、生成开发信，并同步 CRM 跟进。
-          </p>
-
-          <div className="aiLandingComposer">
-            <div className="aiLandingComposerHead">分配一个任务，开始对话吧</div>
-            <textarea
-              className="aiLandingComposerInput"
-              value={prompt}
-              onChange={(event) => onPromptChange(event.target.value)}
-              placeholder="例如：帮我找某类产品买家客户，先筛选目标客户，再生成首封开发信"
-              aria-label="分配一个任务"
-            />
-            <div className="aiLandingComposerBottom">
-              <button
-                className="aiLandingHostingPill"
-                type="button"
-                aria-expanded={hostingDialogOpen}
-                aria-haspopup="dialog"
-                onClick={openHostingDialog}
-              >
-                <span className="hostingLabel">当前：</span>
-                <strong>{hostingMode === "semi" ? "半托管" : "全托管"}</strong>
-                <ChevronDown size={14} aria-hidden="true" />
-              </button>
-              <button className="aiLandingAttach" type="button" aria-label="添加附件">
-                <Paperclip size={16} aria-hidden="true" />
-              </button>
-              <span className="aiLandingComposerSpacer" />
-              <button
-                className="aiLandingSend"
-                type="button"
-                aria-label="发送任务"
-                onClick={onSubmit}
-                disabled={submitting || prompt.trim().length === 0}
-              >
-                ↑
-              </button>
+          <div className="leadDetailHeaderActions">
+            <div className="leadDetailScoreBadge" aria-label={`推荐指数 ${lead.score}`}>
+              <span>推荐指数</span>
+              <strong>{lead.score}</strong>
             </div>
-          </div>
-
-          {hostingDialogOpen ? (
-            <div
-              className="hostingModeBackdrop"
-              role="presentation"
-              onClick={() => setHostingDialogOpen(false)}
+            <button
+              type="button"
+              className="leadDetailClose"
+              aria-label="关闭客户详情"
+              onClick={onClose}
             >
-              <section
-                className="hostingModeDialog"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="hosting-mode-title"
-                onClick={(event) => event.stopPropagation()}
-              >
-                <button
-                  className="hostingModeClose"
-                  type="button"
-                  aria-label="关闭托管模式选择"
-                  onClick={() => setHostingDialogOpen(false)}
-                >
-                  <X size={16} aria-hidden="true" />
-                </button>
-                <button
-                  className={
-                    draftHostingMode === "semi" ? "hostingModeOption active" : "hostingModeOption"
-                  }
-                  type="button"
-                  onClick={() => setDraftHostingMode("semi")}
-                >
-                  {draftHostingMode === "semi" ? (
-                    <CheckCircle2 size={20} aria-hidden="true" />
-                  ) : (
-                    <Circle size={20} aria-hidden="true" />
-                  )}
-                  <span className="hostingModeBadge">半</span>
-                  <span className="hostingModeCopy">
-                    <strong id="hosting-mode-title">半托管状态</strong>
-                    <small>AI 执行关键步骤前会征求您的确认</small>
-                  </span>
-                  <em>运行中</em>
-                </button>
-                <button
-                  className={
-                    draftHostingMode === "full" ? "hostingModeOption active" : "hostingModeOption"
-                  }
-                  type="button"
-                  onClick={() => setDraftHostingMode("full")}
-                >
-                  {draftHostingMode === "full" ? (
-                    <CheckCircle2 size={20} aria-hidden="true" />
-                  ) : (
-                    <Circle size={20} aria-hidden="true" />
-                  )}
-                  <span className="hostingModeBadge">全</span>
-                  <span className="hostingModeCopy">
-                    <strong>全托管状态</strong>
-                    <small>满足条件后自动执行任务，适合成熟规则下批量运行</small>
-                  </span>
-                  <em>可切换</em>
-                </button>
-                <button className="hostingModeConfirm" type="button" onClick={confirmHostingMode}>
-                  确定
-                </button>
-              </section>
+              <X size={20} aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+
+        <div className="leadDetailBody">
+          <section className="leadDetailPanel leadDetailProfilePanel">
+            <div className="leadDetailPanelTitle">
+              <Building2 size={16} aria-hidden="true" />
+              <h3>基础信息</h3>
             </div>
-          ) : null}
+            <div className="leadDetailInfoGrid">
+              <DetailValue label="公司名称" value={lead.companyName} empty="公司名称待补充" />
+              <DetailValue label="国家/地区" value={country} empty="国家待补充" />
+              <DetailValue label="地址" value={address} empty="未抓取到地址" wide />
+              <DetailValue label="客户类型" value={customerType} empty="客户类型待补充" />
+            </div>
+          </section>
 
-          <div className="aiLandingShortcuts">
-            {landingShortcuts.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button className="aiLandingShortcut" type="button" key={item.label}>
-                  <Icon size={16} aria-hidden="true" />
-                  {item.label}
-                </button>
-              );
-            })}
-          </div>
+          <section className="leadDetailPanel">
+            <div className="leadDetailPanelTitle">
+              <Mail size={16} aria-hidden="true" />
+              <h3>联系方式</h3>
+            </div>
+            <DetailList label="邮箱" values={emails} empty="暂无邮箱" />
+            <DetailList label="电话" values={phones} empty="暂无电话" />
+          </section>
 
-          <div className="aiLandingExamples">
-            {landingExamples.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button
-                  className="aiLandingExampleCard"
-                  type="button"
-                  key={item.title}
-                  onClick={() => pickExample(item.prompt)}
-                >
-                  <div className="aiLandingExampleHead">
-                    <Icon size={16} aria-hidden="true" />
-                    <strong>{item.title}</strong>
-                  </div>
-                  <p>{item.description}</p>
-                </button>
-              );
-            })}
-          </div>
+          <section className="leadDetailPanel">
+            <div className="leadDetailPanelTitle">
+              <Globe2 size={16} aria-hidden="true" />
+              <h3>官网与来源</h3>
+            </div>
+            <div className="leadDetailField">
+              <span>官网</span>
+              {website ? (
+                <a href={websiteHref(website)} target="_blank" rel="noreferrer noopener">
+                  {formatWebsiteShort(website)}
+                </a>
+              ) : (
+                <em>暂无官网</em>
+              )}
+            </div>
+            <div className="leadDetailField">
+              <span>来源页面</span>
+              {sourceUrl ? (
+                <a href={websiteHref(sourceUrl)} target="_blank" rel="noreferrer noopener">
+                  {lead.sourceLabel || formatSourceLinkLabel(sourceUrl)}
+                </a>
+              ) : (
+                <em>暂无来源页面</em>
+              )}
+            </div>
+            <div className="leadDetailField leadDetailQueryField">
+              <span>匹配搜索词</span>
+              {sourceQueries.length ? (
+                <ul className="leadDetailQueryList">
+                  {sourceQueries.map((query) => (
+                    <li key={`${query.query}-${query.country ?? ""}`}>
+                      <strong>
+                        {query.country || lead.raw.queryCountry || lead.country || "全市场"}
+                      </strong>
+                      <span>{query.query}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <em>暂无关联 query</em>
+              )}
+            </div>
+          </section>
         </div>
       </section>
     </div>
   );
 }
 
+function DetailValue({
+  label,
+  value,
+  empty,
+  wide
+}: {
+  label: string;
+  value: string;
+  empty: string;
+  wide?: boolean;
+}) {
+  const normalized = value && value !== "-" ? value : "";
+  return (
+    <div className={`leadDetailField${wide ? " wide" : ""}`}>
+      <span>{label}</span>
+      {normalized ? <strong>{normalized}</strong> : <em>{empty}</em>}
+    </div>
+  );
+}
+
+function DetailList({ label, values, empty }: { label: string; values: string[]; empty: string }) {
+  return (
+    <div className="leadDetailField">
+      <span>{label}</span>
+      {values.length ? (
+        <ul className="leadDetailContactList">
+          {values.map((value, index) => (
+            <li key={`${value}-${index}`}>{value}</li>
+          ))}
+        </ul>
+      ) : (
+        <em>{empty}</em>
+      )}
+    </div>
+  );
+}
+
+function leadDetailCountry(lead: DisplayLead) {
+  return (
+    [lead.country, lead.raw.inferredCountry, lead.raw.queryCountry, lead.raw.country]
+      .map((value) => formatDisplayCountry(value))
+      .find((value) => value && value !== "-") ?? ""
+  );
+}
+
+type LeadCountryEvidenceItem = {
+  type?: string;
+  value?: string;
+};
+
+function inferLeadAddress(countryEvidence: unknown) {
+  return (
+    leadCountryEvidenceItems(countryEvidence)
+      .map((item) => cleanLeadAddressEvidence(item.value))
+      .find((value) => Boolean(value) && isLikelyLeadAddress(value)) ?? ""
+  );
+}
+
+function leadCountryEvidenceItems(value: unknown): LeadCountryEvidenceItem[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .filter((item) => item.type === "official_text")
+    .map((item) => ({
+      type: typeof item.type === "string" ? item.type : undefined,
+      value: typeof item.value === "string" ? item.value : undefined
+    }));
+}
+
+function cleanLeadAddressEvidence(value?: string) {
+  return (value ?? "")
+    .replace(/\bQuery context:\s*.*$/gis, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, "")
+    .trim();
+}
+
+function isLikelyLeadAddress(value: string) {
+  if (value.length < 12 || value.length > 220) return false;
+  if (/^https?:\/\//i.test(value)) return false;
+  if (/^[+\d\s().-]+$/.test(value)) return false;
+  return /\b(?:address|office|offices|headquarters|hq|located|based|location|locations|branch|branches|street|st\.|road|rd\.|avenue|ave\.|building|tower|floor|suite|unit|po box|p\.o\. box|city)\b/i.test(
+    value
+  );
+}
+
+function leadDetailSourceQueries(lead: DisplayLead, task: LeadTask | null) {
+  const queries = task?.searchQueries ?? [];
+  if (!queries.length) return [];
+
+  const sourceHost = hostnameForMatch(lead.raw.sourceUrl ?? lead.raw.website ?? lead.website);
+  const countryKey = normalizeDisplayMarket(lead.raw.queryCountry ?? lead.country);
+  const selected: SearchQuery[] = [];
+  const seen = new Set<string>();
+  const add = (query: SearchQuery) => {
+    const key = `${query.query}|${query.country ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    selected.push(query);
+  };
+
+  for (const query of queries) {
+    const matchesSource = Boolean(
+      sourceHost &&
+      query.searchResults?.some((result) => {
+        const host = hostnameForMatch(result.url ?? result.domain ?? "");
+        return Boolean(
+          host &&
+          (host === sourceHost ||
+            host.endsWith(`.${sourceHost}`) ||
+            sourceHost.endsWith(`.${host}`))
+        );
+      })
+    );
+    if (matchesSource) add(query);
+  }
+
+  for (const query of queries) {
+    if (selected.length >= 3) break;
+    const queryCountry = normalizeDisplayMarket(query.country ?? "");
+    if (countryKey && queryCountry && queryCountry === countryKey) add(query);
+  }
+
+  for (const query of queries) {
+    if (selected.length >= 3) break;
+    add(query);
+  }
+
+  return selected.slice(0, 3);
+}
+
+function hostnameForMatch(value: string | null | undefined) {
+  if (!value || value === "-") return "";
+  try {
+    const raw = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    return new URL(raw).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return (
+      value
+        .replace(/^https?:\/\//i, "")
+        .replace(/^www\./i, "")
+        .split("/")[0]
+        ?.toLowerCase() ?? ""
+    );
+  }
+}
+
+// AiWorkerLanding (the legacy v1 landing screen) was removed in 2026-05.
+// AiWorkerClient now defaults to view: "workbench" and renders the new
+// workbench / pool / conversation triad. Anything that pointed at
+// view === "landing" is gone.
+
+// ============================================================================
+// 2026-05 LeadHunt 2.0 — AiWorkerWorkbench
+// ----------------------------------------------------------------------------
+// New "工作台" home page redesign. Replaces the legacy AiWorkerLanding when
+// the user adds ?v=2 to the URL. Shows:
+//   - Greeting + tracking summary
+//   - 5 KPI cards (客户池总数 / 今日新增 / 待同步 CRM / 邮件待确认 / 需跟进)
+//   - Main "你想继续找哪类客户" search box + 5 quick-action chips
+//   - Recent customer pools (3 large cards)
+//   - Next-step todos + history task list
+// ============================================================================
+
+type WorkbenchProps = {
+  prompt: string;
+  onPromptChange: (value: string) => void;
+  onSubmit: () => void;
+  submitting: boolean;
+  taskHistory: LeadTaskListItem[];
+  taskSummary: LeadTaskSummary | null;
+  taskHistoryTotal: number;
+  taskHistoryPage: number;
+  taskHistoryPageSize: number;
+  taskHistorySearch: string;
+  taskHistoryStatus: WorkbenchPoolStatusFilter;
+  historyLoading: boolean;
+  onSelectHistoryTask: (taskId: string) => void;
+  onOpenSearchRun: (taskId: string) => void;
+  onRefreshHistory: () => void;
+  onHistorySearchChange: (value: string) => void;
+  onHistoryStatusChange: (value: WorkbenchPoolStatusFilter) => void;
+  onHistoryPageChange: (page: number) => void;
+  onDeleteTask: (taskId: string) => void;
+  deletingTaskId: string | null;
+  onContinueSearch?: (taskId: string) => void;
+};
+
+type WorkbenchQuickAction = {
+  label: string;
+  prompt: string;
+  icon: typeof Target;
+};
+
+type WorkbenchPoolCard = {
+  id: string;
+  title: string;
+  status: "active" | "completed" | "pending";
+  statusLabel: string;
+  markets: string[];
+  leadCount: number;
+  queryCount: number;
+  updatedLabel: string;
+  icon: typeof Globe2;
+  tone: "blue" | "green" | "orange";
+};
+
+function AiWorkerWorkbench({
+  prompt,
+  onPromptChange,
+  onSubmit,
+  submitting,
+  taskHistory,
+  taskSummary,
+  taskHistoryTotal,
+  taskHistoryPage,
+  taskHistoryPageSize,
+  taskHistorySearch,
+  taskHistoryStatus,
+  historyLoading,
+  onSelectHistoryTask,
+  onOpenSearchRun,
+  onRefreshHistory,
+  onHistorySearchChange,
+  onHistoryStatusChange,
+  onHistoryPageChange,
+  onDeleteTask,
+  deletingTaskId,
+  onContinueSearch
+}: WorkbenchProps) {
+  const greeting = useMemo(() => buildGreeting(), []);
+  const [openPoolMenuId, setOpenPoolMenuId] = useState<string | null>(null);
+  // 2026-05 Stage 3 follow-up: 跟踪客户池总数显示后端 summary 的全量
+  // task_count，而不是 limit=30 列表的长度。一个新任务挤掉旧任务时
+  // 列表数会保持 30，而真实总数应该 +1。
+  const trackingPoolCount = taskSummary?.taskCount ?? taskHistory.length;
+
+  // 2026-05 Stage 3 workbench KPI aggregation. All counters read ONLY
+  // from the backend list summary (computed over the user's full task
+  // history, not just the limit=30 listing window). Falls through to
+  // taskHistory aggregation when summary is unavailable so the page
+  // still renders during the first render before the response lands.
+  //
+  // 今日新增: sum of main-pool leadCount for tasks created today. The
+  // summary builds it server-side from lead_candidates + the same
+  // country-confidence gate the per-task lead_count uses, so the
+  // strip stays consistent with the per-task counters.
+  const todayLeadCount = useMemo(() => {
+    if (taskSummary) return taskSummary.todayLeadCount;
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    return taskHistory
+      .filter((task) => {
+        const created = new Date(task.createdAt).getTime();
+        return Number.isFinite(created) && created >= startOfDay.getTime();
+      })
+      .reduce((sum, task) => sum + (task.leadCount ?? 0), 0);
+  }, [taskHistory, taskSummary]);
+
+  // 待同步 CRM: full-history pendingCrmCount from summary. Used to
+  // fall back to summing the limit=30 list rows; that under-counts
+  // whenever a user has more than 30 historical tasks.
+  const pendingCrmAcrossPools =
+    taskSummary?.pendingCrmCount ??
+    taskHistory.reduce((sum, task) => sum + (task.pendingCrmCount ?? 0), 0);
+
+  // 邮件待确认: full-history pendingEmailCount from summary.
+  const pendingEmailAcrossPools =
+    taskSummary?.pendingEmailCount ??
+    taskHistory.reduce((sum, task) => sum + (task.pendingEmailCount ?? 0), 0);
+
+  // Reset scroll on mount so the greeting is always visible when the
+  // workbench appears (e.g. returning from the pool detail page).
+  const scrollHostRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    scrollHostRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, []);
+
+  const quickActions: WorkbenchQuickAction[] = [
+    {
+      label: "找同类客户",
+      prompt: "按已保存的客户画像，帮我找同类型买家客户。",
+      icon: UsersRound
+    },
+    {
+      label: "换国家继续搜",
+      prompt: "继续用同类客户画像搜索其他国家市场。",
+      icon: Globe2
+    },
+    {
+      label: "只找渠道商",
+      prompt: "只找经销商、分销商、代理商等渠道型买家。",
+      icon: Building2
+    },
+    {
+      label: "补充邮箱电话",
+      prompt: "为现有客户池补充缺失的邮箱与电话。",
+      icon: PhoneCall
+    },
+    {
+      label: "排除弱相关客户",
+      prompt: "把弱相关客户标记为 intelligence，从主表移除。",
+      icon: Filter
+    }
+  ];
+
+  // Customer-pool library — paged by the backend so users can reach all
+  // pools, not just the first three recent cards.
+  const poolCards = useMemo<WorkbenchPoolCard[]>(() => {
+    const tones: WorkbenchPoolCard["tone"][] = ["blue", "green", "orange"];
+    // Pick an icon based on the pool prompt/title content. Falls back to a
+    // generic Globe2 when nothing matches. This makes 5G pools render as
+    // antennas, oil/industrial as factories, solar as suns, channel as
+    // building, etc — same vocabulary as the design spec.
+    const pickIcon = (text: string): WorkbenchPoolCard["icon"] => {
+      const t = text.toLowerCase();
+      if (/5g|telecom|base station|基站|通信|olt|sfp|fiber|光纤|isp|wisp|无线/.test(t))
+        return RadioTower;
+      if (/油气|oil|gas|petro|industrial|工业|pump|valve|阀|压缩机|工厂/.test(t)) return Factory;
+      if (/光伏|solar|pv|inverter|panel|组件|逆变器/.test(t)) return SunMedium;
+      if (/经销|分销|代理|渠道|distributor|reseller|channel|wholesaler/.test(t)) return Building2;
+      if (/email|mail|phone|联系|邮箱|电话/.test(t)) return Mail;
+      return Globe2;
+    };
+    // Detect duplicate short titles within the visible page. When a
+    // user runs the same prompt repeatedly the cards otherwise look
+    // identical; append the run date so each card is distinguishable.
+    const titleCounts = new Map<string, number>();
+    for (const task of taskHistory) {
+      const t = summarizePoolTitle(task.title || task.prompt || "客户池");
+      titleCounts.set(t, (titleCounts.get(t) ?? 0) + 1);
+    }
+    return taskHistory.map((task, index) => {
+      const status = mapTaskStatusToPool(task.status);
+      const shortName = summarizePoolTitle(task.title || task.prompt || "客户池");
+      const isDuplicateTitle = (titleCounts.get(shortName) ?? 0) > 1;
+      const dateSuffix = (() => {
+        try {
+          // Use HH:mm so duplicate same-day tasks remain distinguishable.
+          return new Intl.DateTimeFormat("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(new Date(task.updatedAt));
+        } catch {
+          return "";
+        }
+      })();
+      const displayTitle =
+        isDuplicateTitle && dateSuffix ? `${shortName} · ${dateSuffix}` : shortName;
+      return {
+        id: task.id,
+        title: displayTitle,
+        status: status.kind,
+        statusLabel: status.label,
+        markets: (task.targetMarkets?.length
+          ? task.targetMarkets
+          : inferTaskMarkets(`${task.title ?? ""} ${task.prompt ?? ""}`)
+        ).slice(0, 3),
+        leadCount: task.leadCount ?? 0,
+        queryCount: task.queryCount ?? 0,
+        updatedLabel: formatHistoryDate(task.updatedAt),
+        icon: pickIcon(`${task.title ?? ""} ${task.prompt ?? ""}`),
+        tone: tones[index] ?? "blue"
+      };
+    });
+  }, [taskHistory]);
+
+  const hasPoolFilters = Boolean(taskHistorySearch.trim()) || taskHistoryStatus !== "all";
+  const poolTotalCount = hasPoolFilters
+    ? taskHistoryTotal
+    : taskHistoryTotal || taskSummary?.taskCount || taskHistory.length;
+  const poolPageCount = Math.max(1, Math.ceil(poolTotalCount / taskHistoryPageSize));
+  const poolRangeStart = poolTotalCount ? (taskHistoryPage - 1) * taskHistoryPageSize + 1 : 0;
+  const poolRangeEnd = Math.min(taskHistoryPage * taskHistoryPageSize, poolTotalCount);
+  const poolPageItems = paginationItems(taskHistoryPage, poolPageCount);
+  const [poolSearchDraft, setPoolSearchDraft] = useState(taskHistorySearch);
+
+  useEffect(() => {
+    setPoolSearchDraft(taskHistorySearch);
+  }, [taskHistorySearch]);
+
+  function applyPoolSearch() {
+    if (poolSearchDraft.trim() !== taskHistorySearch.trim()) {
+      onHistorySearchChange(poolSearchDraft);
+    }
+  }
+
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!prompt.trim() || submitting) return;
+    onSubmit();
+  }
+
+  function applyQuickAction(action: WorkbenchQuickAction) {
+    onPromptChange(action.prompt);
+  }
+
+  return (
+    <div className="aiWorkbench" ref={scrollHostRef}>
+      {/* Greeting */}
+      <header className="aiWorkbenchHead">
+        <div className="aiWorkbenchGreeting">
+          <h1>
+            {greeting.title}，王亚伟 <span aria-hidden="true">{greeting.emoji}</span>
+          </h1>
+          <p>{greeting.subtitle}</p>
+          <p className="aiWorkbenchTracker">
+            <Sparkles size={14} aria-hidden="true" />
+            AI 外贸员正在为你跟踪 {trackingPoolCount} 个客户池
+          </p>
+        </div>
+      </header>
+
+      {/* Search input + quick actions */}
+      <section className="aiWorkbenchSearch" aria-label="开始搜索">
+        <h2 className="aiWorkbenchSectionTitle">你想继续找哪类客户？</h2>
+        <form className="aiWorkbenchSearchForm" onSubmit={handleSubmit}>
+          <textarea
+            value={prompt}
+            onChange={(event) => onPromptChange(event.target.value)}
+            placeholder="例如：继续找中东 5G 基站维护客户，优先有邮箱和官网的系统集成商"
+            rows={2}
+            aria-label="搜索任务描述"
+          />
+          <div className="aiWorkbenchSearchActions">
+            <button type="submit" className="aiWorkbenchPrimaryBtn" disabled={submitting}>
+              <Search size={16} aria-hidden="true" />
+              {submitting ? "搜索中..." : "开始搜索"}
+            </button>
+            <button
+              type="button"
+              className="aiWorkbenchSecondaryBtn"
+              onClick={onRefreshHistory}
+              disabled={historyLoading}
+            >
+              <Clock size={16} aria-hidden="true" />
+              继续上次客户池
+            </button>
+          </div>
+        </form>
+
+        <div className="aiWorkbenchQuickRow" role="group" aria-label="快捷指令">
+          {quickActions.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              className="aiWorkbenchQuickChip"
+              onClick={() => applyQuickAction(action)}
+            >
+              <action.icon size={15} aria-hidden="true" />
+              {action.label}
+            </button>
+          ))}
+        </div>
+        <p className="aiWorkbenchSearchHint">
+          <Sparkles size={14} aria-hidden="true" />
+          本轮默认生成 30 条搜索指令，可继续追加
+        </p>
+      </section>
+
+      {/* Customer pool library */}
+      <section className="aiWorkbenchPools" aria-label="客户池库">
+        <header className="aiWorkbenchSectionHeader">
+          <div className="aiWorkbenchPoolTitleBlock">
+            <div className="aiWorkbenchPoolLibraryTitle">
+              <h2 className="aiWorkbenchSectionTitle">客户池库</h2>
+              <span>{poolTotalCount} 个</span>
+            </div>
+            <p className="aiWorkbenchPoolSummary">
+              今日新增 {todayLeadCount} · 待同步 CRM {pendingCrmAcrossPools} · 邮件待确认{" "}
+              {pendingEmailAcrossPools}
+            </p>
+          </div>
+          <div className="aiWorkbenchPoolTools">
+            <label className="aiWorkbenchPoolSearch">
+              <Search size={15} aria-hidden="true" />
+              <input
+                type="search"
+                value={poolSearchDraft}
+                onChange={(event) => setPoolSearchDraft(event.target.value)}
+                onBlur={applyPoolSearch}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    applyPoolSearch();
+                  }
+                }}
+                placeholder="搜索客户池"
+                aria-label="搜索客户池"
+              />
+            </label>
+            <div className="aiWorkbenchPoolTabs" role="tablist" aria-label="客户池状态筛选">
+              {(
+                [
+                  ["all", "全部"],
+                  ["active", "持续中"],
+                  ["completed", "已完成"],
+                  ["stopped", "已停止"]
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={taskHistoryStatus === value ? "active" : ""}
+                  onClick={() => onHistoryStatusChange(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button type="button" className="aiWorkbenchSortBtn" disabled>
+              最近更新
+              <ChevronDown size={14} aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+        {historyLoading ? (
+          <TableLoadingState
+            title="正在加载客户池列表"
+            description="正在同步客户池数量、搜索批次和待同步 CRM 状态。"
+          />
+        ) : poolCards.length ? (
+          <div className="aiWorkbenchPoolGrid">
+            {poolCards.map((pool) => {
+              const isDemo = pool.id.startsWith("demo-");
+              const isActivePool = pool.status === "active";
+              return (
+                <article className={`aiWorkbenchPoolCard tone-${pool.tone}`} key={pool.id}>
+                  <span className="aiWorkbenchPoolIcon" aria-hidden="true">
+                    <pool.icon size={22} />
+                  </span>
+                  <div className="aiWorkbenchPoolBody">
+                    <header className="aiWorkbenchPoolHead">
+                      <h3 className="aiWorkbenchPoolTitle" title={pool.title}>
+                        {pool.title}
+                      </h3>
+                      <div className="aiWorkbenchPoolHeadActions">
+                        <span className={`aiWorkbenchPoolBadge state-${pool.status}`}>
+                          {pool.statusLabel}
+                        </span>
+                        <div className="aiWorkbenchPoolMenuWrap">
+                          <button
+                            type="button"
+                            className="aiWorkbenchPoolMenuButton"
+                            aria-label={`打开 ${pool.title} 操作菜单`}
+                            aria-expanded={openPoolMenuId === pool.id}
+                            onClick={() =>
+                              setOpenPoolMenuId((current) => (current === pool.id ? null : pool.id))
+                            }
+                            disabled={isDemo || deletingTaskId === pool.id}
+                          >
+                            <MoreHorizontal size={16} aria-hidden="true" />
+                          </button>
+                          {openPoolMenuId === pool.id ? (
+                            <div className="aiWorkbenchPoolMenu" role="menu">
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="danger"
+                                disabled={deletingTaskId === pool.id}
+                                onClick={() => {
+                                  const confirmed =
+                                    typeof window === "undefined" ||
+                                    window.confirm(
+                                      "删除后该客户池将从工作台隐藏，已加入 CRM 的客户不会删除。确定删除吗？"
+                                    );
+                                  if (!confirmed) return;
+                                  setOpenPoolMenuId(null);
+                                  onDeleteTask(pool.id);
+                                }}
+                              >
+                                <Trash2 size={14} aria-hidden="true" />
+                                {deletingTaskId === pool.id ? "删除中..." : "删除客户池"}
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    </header>
+                    <div className="aiWorkbenchPoolMarkets">
+                      {pool.markets.length ? (
+                        pool.markets.map((market) => <span key={market}>{market}</span>)
+                      ) : (
+                        <span>市场待补充</span>
+                      )}
+                    </div>
+                    <p className="aiWorkbenchPoolDetail">
+                      <span>{pool.leadCount} 客户</span>
+                      <i />
+                      <span>{pool.queryCount} query</span>
+                      <i />
+                      <span>{pool.updatedLabel}</span>
+                    </p>
+                    <footer className="aiWorkbenchPoolFoot">
+                      <button
+                        type="button"
+                        className="aiWorkbenchPoolPrimary"
+                        disabled={deletingTaskId === pool.id}
+                        onClick={() => {
+                          if (isDemo || deletingTaskId === pool.id) return;
+                          if (isActivePool) {
+                            onOpenSearchRun(pool.id);
+                            return;
+                          }
+                          if (onContinueSearch) {
+                            onContinueSearch(pool.id);
+                            return;
+                          }
+                          onSelectHistoryTask(pool.id);
+                        }}
+                      >
+                        {isActivePool ? (
+                          <Search size={14} aria-hidden="true" />
+                        ) : (
+                          <Play size={14} aria-hidden="true" />
+                        )}
+                        {isActivePool ? "返回搜索界面" : "继续搜索 30 条"}
+                      </button>
+                      {!isActivePool ? (
+                        <button
+                          type="button"
+                          className="aiWorkbenchPoolSecondary"
+                          disabled={deletingTaskId === pool.id}
+                          onClick={() => {
+                            if (isDemo || deletingTaskId === pool.id) return;
+                            onOpenSearchRun(pool.id);
+                          }}
+                        >
+                          搜索记录
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="aiWorkbenchPoolSecondary"
+                        disabled={deletingTaskId === pool.id}
+                        onClick={() =>
+                          isDemo || deletingTaskId === pool.id
+                            ? undefined
+                            : onSelectHistoryTask(pool.id)
+                        }
+                      >
+                        查看客户池
+                      </button>
+                    </footer>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="aiWorkbenchPoolEmpty">
+            <span className="aiWorkbenchPoolEmptyIcon" aria-hidden="true">
+              <Database size={24} />
+            </span>
+            <strong>{hasPoolFilters ? "没有找到匹配的客户池" : "还没有客户池"}</strong>
+            <p>
+              {hasPoolFilters
+                ? "换个关键词或切回“全部”状态再看看。"
+                : "在上方输入客户类型、国家或产品关键词，开始创建第一个客户池。"}
+            </p>
+          </div>
+        )}
+        <footer className="aiWorkbenchPoolPager">
+          <p>
+            显示 {poolRangeStart}-{poolRangeEnd} / {poolTotalCount}
+          </p>
+          <div className="aiWorkbenchPagerControls">
+            <button
+              type="button"
+              onClick={() => onHistoryPageChange(taskHistoryPage - 1)}
+              disabled={taskHistoryPage <= 1 || historyLoading}
+            >
+              <ChevronLeft size={14} aria-hidden="true" />
+              上一页
+            </button>
+            {poolPageItems.map((item, index) =>
+              item === "ellipsis" ? (
+                <span className="aiWorkbenchPagerDots" key={`dots-${index}`}>
+                  ...
+                </span>
+              ) : (
+                <button
+                  key={item}
+                  type="button"
+                  className={item === taskHistoryPage ? "active" : ""}
+                  onClick={() => onHistoryPageChange(item)}
+                  disabled={historyLoading}
+                >
+                  {item}
+                </button>
+              )
+            )}
+            <button
+              type="button"
+              onClick={() => onHistoryPageChange(taskHistoryPage + 1)}
+              disabled={taskHistoryPage >= poolPageCount || historyLoading}
+            >
+              下一页
+              <ChevronRight size={14} aria-hidden="true" />
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function buildGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 6) {
+    return { title: "夜深了", subtitle: "今天继续扩充你的外贸客户池", emoji: "🌙" };
+  }
+  if (hour < 12) {
+    return { title: "早上好", subtitle: "今天继续扩充你的外贸客户池", emoji: "☀️" };
+  }
+  if (hour < 18) {
+    return { title: "下午好", subtitle: "今天继续扩充你的外贸客户池", emoji: "☕" };
+  }
+  return { title: "晚上好", subtitle: "今天继续扩充你的外贸客户池", emoji: "🌆" };
+}
+
+function paginationItems(currentPage: number, pageCount: number): Array<number | "ellipsis"> {
+  if (pageCount <= 5) {
+    return Array.from({ length: pageCount }, (_, index) => index + 1);
+  }
+
+  if (currentPage <= 3) {
+    return [1, 2, 3, "ellipsis", pageCount];
+  }
+
+  if (currentPage >= pageCount - 2) {
+    return [1, "ellipsis", pageCount - 2, pageCount - 1, pageCount];
+  }
+
+  return [1, "ellipsis", currentPage - 1, currentPage, currentPage + 1, "ellipsis", pageCount];
+}
+
+function inferTaskMarkets(text: string) {
+  const marketPatterns: Array<[string, RegExp]> = [
+    ["UAE", /\buae\b|阿联酋|迪拜|dubai/i],
+    ["Saudi Arabia", /saudi|沙特/i],
+    ["Qatar", /qatar|卡塔尔/i],
+    ["Oman", /oman|阿曼/i],
+    ["Kuwait", /kuwait|科威特/i],
+    ["Germany", /germany|deutschland|德国/i],
+    ["Indonesia", /indonesia|印尼|印度尼西亚/i],
+    ["Vietnam", /vietnam|越南/i],
+    ["Malaysia", /malaysia|马来西亚/i],
+    ["Brazil", /brazil|巴西/i],
+    ["Mexico", /mexico|墨西哥/i]
+  ];
+
+  return marketPatterns.filter(([, pattern]) => pattern.test(text)).map(([label]) => label);
+}
+
+function mapTaskStatusToPool(status: string): { kind: WorkbenchPoolCard["status"]; label: string } {
+  const lower = (status || "").toLowerCase();
+  if (lower === "running" || lower === "searching") {
+    return { kind: "active", label: "持续获客中" };
+  }
+  if (lower === "paused" || lower === "completed") {
+    return { kind: "completed", label: "已完成" };
+  }
+  if (lower === "failed" || lower === "cancelled") {
+    return { kind: "pending", label: "已停止" };
+  }
+  return { kind: "pending", label: "待触达" };
+}
+
+// ============================================================================
+// 2026-05 LeadHunt 2.0 — AiWorkerPool
+// ----------------------------------------------------------------------------
+// Customer pool detail page. Shows:
+//   - Header: pool title + status + country chips + meta + right actions
+//   - 6 KPI cards (客户池总数 / 高匹配 / 有联系方式 / 待加入 CRM / 已触达 / 回复)
+//   - Filter bar (search + 6 dropdowns + clear)
+//   - Selected filter chips
+//   - Bulk action bar (select N candidates + 4 actions)
+//   - Candidate table (12 cols: checkbox / 公司名 / 国家 / 类型 / 推荐指数 /
+//                     联系方式 / 电话 / 官网 / 来源批次 / CRM状态 / 邮件状态 /
+//                     最近动作 / 操作)
+//   - Pagination
+//   - Pool health hint (last item; no AI input bar — that was removed
+//     in 2026-05 to keep the page within one viewport).
+//
+// This is a static-first implementation. Real data wiring (filter state,
+// bulk actions to API, pagination state) comes in a follow-up commit.
+// ============================================================================
+
+type PoolProps = {
+  task: LeadTask | null;
+  taskHistoryItem: LeadTaskListItem | null;
+  leads: DisplayLead[];
+  loading: boolean;
+  approving: boolean;
+  onBack: () => void;
+  onOpenSearchRun: () => void;
+  onContinueSearch: () => void;
+  onBulkApprove: (leadIds: string[]) => void;
+  onOpenLeadDetail: (lead: DisplayLead) => void;
+  onApproveLead: (leadId: string) => void;
+};
+
+type PoolKpi = {
+  label: string;
+  value: string | number;
+  delta?: string;
+  icon: typeof Users;
+  tone: "blue" | "orange" | "teal" | "indigo" | "purple" | "rose" | "green";
+};
+
+type PoolFilterKey = "country" | "customerType" | "score" | "contact" | "crm" | "mail";
+
+type PoolFilters = Record<PoolFilterKey, string>;
+
+type PoolFilterOption = {
+  label: string;
+  value: string;
+};
+
+type PoolFilterSelect = {
+  key: PoolFilterKey;
+  label: string;
+  options: PoolFilterOption[];
+};
+
+type PoolLeadRow = {
+  lead: DisplayLead;
+  row: PoolTableRow;
+};
+
+type PoolTableRow = {
+  id: string;
+  companyName: string;
+  country: string;
+  industry: string;
+  scoreStars: number; // 0..5
+  scoreValue: number;
+  hasEmail: boolean;
+  emailCount: number;
+  emailFirst: string;
+  emailAll: string[];
+  hasPhone: boolean;
+  phoneCount: number;
+  phoneFirst: string;
+  phoneAll: string[];
+  website: string;
+  websiteShort: string;
+  sourceBatch: string;
+  crmStatus: "pending" | "synced" | "active";
+  crmStatusLabel: string;
+  mailStatus: "未触达" | "待发送" | "已发送" | "已回复";
+  lastAction: string;
+};
+
+const emptyPoolFilters: PoolFilters = {
+  country: "",
+  customerType: "",
+  score: "",
+  contact: "",
+  crm: "",
+  mail: ""
+};
+
+const poolScoreFilterOptions: PoolFilterOption[] = [
+  { value: "", label: "全部" },
+  { value: "high", label: "75+ 高匹配" },
+  { value: "medium", label: "60-74 中匹配" },
+  { value: "low", label: "50-59 待复核" },
+  { value: "below50", label: "50 以下" }
+];
+
+const poolContactFilterOptions: PoolFilterOption[] = [
+  { value: "", label: "全部" },
+  { value: "email", label: "有邮箱" },
+  { value: "phone", label: "有电话" },
+  { value: "emailOrPhone", label: "有邮箱或电话" },
+  { value: "emailAndPhone", label: "邮箱+电话" },
+  { value: "none", label: "无联系方式" }
+];
+
+const poolCrmStatusFilterOptions: PoolFilterOption[] = [
+  { value: "", label: "全部" },
+  { value: "joined", label: "已加入" },
+  { value: "notJoined", label: "未加入" }
+];
+
+const poolMailStatusFilterOptions: PoolFilterOption[] = [
+  { value: "", label: "全部" },
+  { value: "reached", label: "已触达" },
+  { value: "unreached", label: "未触达" }
+];
+
+function AiWorkerPool({
+  task,
+  taskHistoryItem,
+  leads,
+  loading,
+  approving,
+  onBack,
+  onOpenSearchRun,
+  onContinueSearch,
+  onBulkApprove,
+  onOpenLeadDetail,
+  onApproveLead
+}: PoolProps) {
+  const poolTitle = useMemo(() => {
+    if (taskHistoryItem?.title) {
+      return summarizePoolTitle(taskHistoryItem.title);
+    }
+    if (task?.id) return "客户池";
+    return "客户池";
+  }, [task, taskHistoryItem]);
+
+  const targetMarkets = useMemo(() => {
+    return taskTargetMarkets(task);
+  }, [task]);
+
+  const poolStatus = useMemo(() => {
+    return mapTaskStatusToPool(taskHistoryItem?.status ?? task?.status ?? "");
+  }, [task, taskHistoryItem]);
+  const isPoolActive = poolStatus.kind === "active";
+
+  // 2026-05 Stage 2: KPIs and the candidate table read ONLY from
+  // currentTask.leadCandidates (via the displayLeads prop). When the
+  // task hasn't loaded yet we render zeroes / placeholders rather
+  // than synthesised demo numbers — those used to leak across into
+  // production and made the page look fake.
+  const totalLeads = leads.length;
+  const queryCount = task?.searchQueries?.length ?? 0;
+  // 2026-05 V1-MVP+: align "高匹配" KPI with the backend qualification
+  // threshold (score >= 75 → status 'qualified', grade 'high'). The
+  // previous >=80 cutoff hid every backend-qualified lead that scored
+  // 75-79 (e.g. Kalaam Telecom 79, Alsaif 77, Contacts 76) and made the
+  // "0 高匹配 / 30 条 query" KPI feel like the agent failed even when
+  // the pool actually contained reachable buyers.
+  const highMatch = useMemo(() => leads.filter((lead) => lead.score >= 75).length, [leads]);
+  const withContact = useMemo(
+    () => leads.filter((lead) => lead.email !== "—" || lead.phone !== "—").length,
+    [leads]
+  );
+  const pendingCrm = useMemo(
+    () =>
+      leads.filter((lead) => {
+        const status = lead.raw.status ?? "";
+        const inCrm =
+          Boolean(lead.raw.crmLead) ||
+          status === "approved" ||
+          status === "contacted" ||
+          status === "email_sent";
+        return !inCrm;
+      }).length,
+    [leads]
+  );
+  const emailReached = useMemo(
+    () => leads.filter((lead) => hasSentEmail(lead.raw)).length,
+    [leads]
+  );
+  // Reply rate is unknown until backend exposes it; show 0 when no
+  // email actually went out so the table doesn't read as if 5 customers
+  // replied to 1 outbound email.
+  const repliedCount = useMemo(() => {
+    const replied = leads.filter((lead) => {
+      const drafts = lead.raw.outreachDrafts ?? [];
+      return drafts.some((draft) => (draft.sendLogs ?? []).some((log) => log.status === "replied"));
+    }).length;
+    return replied;
+  }, [leads]);
+  const replyRate = emailReached > 0 ? Math.round((repliedCount / emailReached) * 1000) / 10 : 0;
+
+  // Main vs review-tail counts. buildDisplayLeads already gives us a
+  // sorted combined list (mainLeads first, reviewTail after), so we
+  // recompute the split here for the "待复核 N 条" hint.
+  const mainLeadCount = useMemo(() => leads.filter((lead) => lead.actionable).length, [leads]);
+  const reviewTailCount = totalLeads - mainLeadCount;
+
+  // 2026-05 Stage 2: when the backend returns evidence/intelligence
+  // candidates that buildDisplayLeads filters out (content_evidence,
+  // intelligence, hidden_evidence), the user sees fewer rows than the
+  // raw API count. Surface the gap so they know we didn't lose data.
+  const hiddenEvidenceCount = Math.max(0, (task?.leadCandidates?.length ?? 0) - totalLeads);
+
+  const kpis: PoolKpi[] = [
+    {
+      label: "本池客户",
+      value: totalLeads,
+      // 2026-05 LeadHunt 2.0: no honest week-over-week source yet, so
+      // surface batch metadata instead of fake growth deltas.
+      delta: queryCount ? `${queryCount} 条 query` : "首批",
+      icon: Users,
+      tone: "blue"
+    },
+    {
+      label: "高匹配",
+      value: highMatch,
+      delta: totalLeads > 0 ? `占比 ${percent(highMatch, totalLeads)}` : "暂无数据",
+      icon: Star,
+      tone: "orange"
+    },
+    {
+      label: "有联系方式",
+      value: withContact,
+      delta: totalLeads > 0 ? `占比 ${percent(withContact, totalLeads)}` : "暂无数据",
+      icon: PhoneCall,
+      tone: "teal"
+    },
+    {
+      label: "待加入 CRM",
+      value: pendingCrm,
+      delta: totalLeads > 0 ? `占比 ${percent(pendingCrm, totalLeads)}` : "暂无数据",
+      icon: Database,
+      tone: "indigo"
+    },
+    {
+      label: "已触达",
+      value: emailReached,
+      delta: totalLeads > 0 ? `占比 ${percent(emailReached, totalLeads)}` : "暂无数据",
+      icon: Send,
+      tone: "purple"
+    },
+    {
+      label: "回复",
+      value: repliedCount,
+      delta: emailReached > 0 ? `回复率 ${replyRate}%` : "暂无数据",
+      icon: MessageCircle,
+      tone: "rose"
+    }
+  ];
+
+  // 2026-05 Stage 2: header chips reflect the real target markets
+  // for this task only. No fallback to UAE/Saudi/Qatar — that used to
+  // read like a hardcoded sample whenever currentTask hadn't loaded.
+  const countryChips = targetMarkets.slice(0, 6);
+
+  // Local UI state. selection / search / page is purely local; the
+  // data source is currentTask.leadCandidates via the leads prop.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [searchInput, setSearchInput] = useState("");
+  const [poolFilters, setPoolFilters] = useState<PoolFilters>(() => ({ ...emptyPoolFilters }));
+  const [openPoolFilterKey, setOpenPoolFilterKey] = useState<PoolFilterKey | null>(null);
+  const [pageNumber, setPageNumber] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const poolFiltersRef = useRef<HTMLElement>(null);
+
+  const poolLeadRows: PoolLeadRow[] = useMemo(
+    () => leads.map((lead) => ({ lead, row: buildPoolTableRow(lead) })),
+    [leads]
+  );
+
+  const countryFilterOptions = useMemo(
+    () =>
+      createPoolFilterOptions(
+        poolLeadRows.map(({ row }) => row.country),
+        "全部"
+      ),
+    [poolLeadRows]
+  );
+  const customerTypeFilterOptions = useMemo(
+    () =>
+      createPoolFilterOptions(
+        poolLeadRows.map(({ row }) => row.industry),
+        "全部"
+      ),
+    [poolLeadRows]
+  );
+  const filterSelects: PoolFilterSelect[] = useMemo(
+    () => [
+      { key: "country", label: "国家/地区", options: countryFilterOptions },
+      { key: "customerType", label: "客户类型", options: customerTypeFilterOptions },
+      { key: "score", label: "推荐指数", options: poolScoreFilterOptions },
+      { key: "contact", label: "联系方式", options: poolContactFilterOptions },
+      { key: "crm", label: "CRM 状态", options: poolCrmStatusFilterOptions },
+      { key: "mail", label: "邮件状态", options: poolMailStatusFilterOptions }
+    ],
+    [countryFilterOptions, customerTypeFilterOptions]
+  );
+  const hasActivePoolFilters = hasAnyPoolFilter(poolFilters);
+  const activePoolFilterChips = useMemo(
+    () =>
+      filterSelects.flatMap((select) => {
+        const value = poolFilters[select.key];
+        if (!value) return [];
+        const option = select.options.find((item) => item.value === value);
+        return [
+          {
+            key: select.key,
+            label: select.label,
+            valueLabel: option?.label ?? value
+          }
+        ];
+      }),
+    [filterSelects, poolFilters]
+  );
+
+  // Filter leads by text search plus the structured select filters above.
+  // Empty search / filters mean show everything.
+  const filteredLeadRows = useMemo(() => {
+    const needle = searchInput.trim().toLowerCase();
+    return poolLeadRows.filter((item) => {
+      const { lead, row } = item;
+      if (!matchesPoolLeadFilters(item, poolFilters)) return false;
+      if (!needle) return true;
+      const haystack = [
+        lead.companyName,
+        lead.country,
+        lead.website,
+        lead.email,
+        lead.phone,
+        lead.tag,
+        row.industry,
+        row.crmStatusLabel,
+        row.mailStatus,
+        row.lastAction,
+        row.sourceBatch
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [poolLeadRows, poolFilters, searchInput]);
+
+  const filteredCount = filteredLeadRows.length;
+  const totalPages = Math.max(1, Math.ceil(filteredCount / pageSize));
+  const safePage = Math.min(pageNumber, totalPages);
+  const pageStart = (safePage - 1) * pageSize;
+  const pageEnd = Math.min(pageStart + pageSize, filteredCount);
+  const pagedLeadRows = useMemo(
+    () => filteredLeadRows.slice(pageStart, pageEnd),
+    [filteredLeadRows, pageStart, pageEnd]
+  );
+  const pagedLeads = useMemo(() => pagedLeadRows.map(({ lead }) => lead), [pagedLeadRows]);
+
+  // Build table rows from the paged candidates. No demo fallback —
+  // empty state shows a single row with a placeholder message.
+  const rows: PoolTableRow[] = useMemo(() => pagedLeadRows.map(({ row }) => row), [pagedLeadRows]);
+
+  const allChecked = rows.length > 0 && rows.every((row) => selectedIds.has(row.id));
+
+  // 2026-05 Stage 2: derived helper — only candidates not yet in CRM
+  // are valid bulk-approve targets. Used to filter the current
+  // selection so a user can't re-approve already-synced rows.
+  const isPendingCrmCandidate = (lead: DisplayLead) => {
+    return !lead.raw.crmLead;
+  };
+
+  // Drop selection ids that no longer exist in the candidate list (e.g.
+  // after polling pulls a refreshed task) AND drop ids that have moved
+  // out of the pending-CRM bucket — the bulk-approve button should
+  // never claim "已选择 N 家" when those N have already been approved.
+  useEffect(() => {
+    setSelectedIds((current) => {
+      const stillPending = new Set(leads.filter(isPendingCrmCandidate).map((lead) => lead.id));
+      const next = new Set<string>();
+      current.forEach((id) => {
+        if (stillPending.has(id)) next.add(id);
+      });
+      return next.size === current.size ? current : next;
+    });
+  }, [leads]);
+
+  // How many of the currently selected ids are still pending CRM. The
+  // bulk-approve button uses this directly so it can't fire on a
+  // selection that's already been synced (race window: between click
+  // and the cleanup effect ticking).
+  const selectedPendingCount = useMemo(() => {
+    const pendingIds = new Set(leads.filter(isPendingCrmCandidate).map((lead) => lead.id));
+    let count = 0;
+    selectedIds.forEach((id) => {
+      if (pendingIds.has(id)) count += 1;
+    });
+    return count;
+  }, [leads, selectedIds]);
+
+  // Snap pageNumber back into range whenever the filtered set shrinks.
+  useEffect(() => {
+    if (pageNumber > totalPages) {
+      setPageNumber(totalPages);
+    }
+  }, [pageNumber, totalPages]);
+
+  useEffect(() => {
+    if (!openPoolFilterKey) return;
+
+    function handlePointerDown(event: MouseEvent) {
+      if (!poolFiltersRef.current?.contains(event.target as Node)) {
+        setOpenPoolFilterKey(null);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpenPoolFilterKey(null);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openPoolFilterKey]);
+
+  function toggleAll() {
+    if (allChecked) {
+      setSelectedIds(new Set());
+      return;
+    }
+    setSelectedIds(new Set(rows.map((row) => row.id)));
+  }
+
+  function toggleRow(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  return (
+    <div className="aiPool">
+      {/* Header */}
+      <header className="aiPoolHeader">
+        <div className="aiPoolHeaderTop">
+          <button type="button" className="aiPoolBack" onClick={onBack}>
+            <ChevronLeft size={16} aria-hidden="true" />
+            返回工作台
+          </button>
+        </div>
+        <div className="aiPoolHeaderRow">
+          <div className="aiPoolHeaderLeft">
+            <div className="aiPoolHeaderTitle">
+              <span className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
+                <RadioTower size={22} />
+              </span>
+              <h1>{poolTitle}</h1>
+              <span className={`aiPoolBadge state-${poolStatus.kind}`}>{poolStatus.label}</span>
+            </div>
+            <div className="aiPoolCountryChips">
+              {countryChips.map((country) => (
+                <span key={country} className="aiPoolCountryChip">
+                  {country}
+                </span>
+              ))}
+            </div>
+            <p className="aiPoolMeta">
+              {loading
+                ? "正在同步客户池客户"
+                : totalLeads > 0
+                  ? `本池 ${totalLeads} 家客户`
+                  : "本池暂无候选客户"}
+              {queryCount > 0 ? `，本批跑了 ${queryCount} 条 query` : ""}
+            </p>
+          </div>
+          <div className="aiPoolHeaderActions">
+            <button
+              type="button"
+              className="aiPoolPrimaryBtn"
+              onClick={isPoolActive ? onOpenSearchRun : onContinueSearch}
+            >
+              {isPoolActive ? (
+                <Search size={14} aria-hidden="true" />
+              ) : (
+                <Play size={14} aria-hidden="true" />
+              )}
+              {isPoolActive ? "返回搜索界面" : "继续搜索 30 条"}
+            </button>
+            <button type="button" className="aiPoolGhostBtn" disabled title="导出功能开发中">
+              <Download size={14} aria-hidden="true" />
+              导出
+            </button>
+            <button
+              type="button"
+              className="aiPoolGhostBtn"
+              disabled
+              title="批量加入 CRM 请在下方表格勾选客户后从批量操作栏触发"
+            >
+              <Database size={14} aria-hidden="true" />
+              批量加入 CRM
+            </button>
+            <button
+              type="button"
+              className="aiPoolGhostBtn"
+              disabled
+              title="批量生成邮件功能开发中"
+            >
+              <Mail size={14} aria-hidden="true" />
+              批量生成邮件
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* KPI cards */}
+      <section className="aiPoolKpis" aria-label="数据概览">
+        {kpis.map((kpi) => (
+          <article className={`aiPoolKpi tone-${kpi.tone}`} key={kpi.label}>
+            <span className="aiPoolKpiIcon" aria-hidden="true">
+              <kpi.icon size={20} />
+            </span>
+            <div className="aiPoolKpiBody">
+              <span className="aiPoolKpiLabel">{kpi.label}</span>
+              <strong className="aiPoolKpiValue">{kpi.value}</strong>
+              {kpi.delta ? <span className="aiPoolKpiDelta">{kpi.delta}</span> : null}
+            </div>
+          </article>
+        ))}
+      </section>
+
+      {/* Filter bar */}
+      <section className="aiPoolFilters" aria-label="筛选条件" ref={poolFiltersRef}>
+        <label className="aiPoolSearchInput">
+          <Search size={14} aria-hidden="true" />
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(event) => {
+              // 2026-05 Stage 2: snap back to page 1 immediately so a
+              // user typing on page 3 doesn't see an empty page flash
+              // before the effect-based clamp kicks in.
+              setSearchInput(event.target.value);
+              setPageNumber(1);
+            }}
+            placeholder="搜索公司、官网、邮箱、国家"
+          />
+        </label>
+        {filterSelects.map((dropdown) => {
+          const selectedValue = poolFilters[dropdown.key];
+          const selectedOption =
+            dropdown.options.find((option) => option.value === selectedValue) ??
+            dropdown.options[0];
+          const isOpen = openPoolFilterKey === dropdown.key;
+
+          return (
+            <div
+              key={dropdown.key}
+              className="aiPoolFilterDropdown"
+              data-active={poolFilters[dropdown.key] ? "true" : undefined}
+              data-filter-key={dropdown.key}
+              data-open={isOpen ? "true" : undefined}
+            >
+              <button
+                type="button"
+                className="aiPoolFilterTrigger"
+                aria-label={dropdown.label}
+                aria-expanded={isOpen}
+                aria-haspopup="listbox"
+                onClick={() => {
+                  setOpenPoolFilterKey((current) =>
+                    current === dropdown.key ? null : dropdown.key
+                  );
+                }}
+              >
+                <span className="aiPoolFilterLabel">{dropdown.label}</span>
+                <span className="aiPoolFilterValue">{selectedOption?.label ?? "全部"}</span>
+                <ChevronDown size={14} aria-hidden="true" />
+              </button>
+              {isOpen ? (
+                <div className="aiPoolFilterMenu" role="listbox" aria-label={dropdown.label}>
+                  {dropdown.options.map((option) => {
+                    const selected = option.value === selectedValue;
+                    return (
+                      <button
+                        key={option.value || "all"}
+                        type="button"
+                        className="aiPoolFilterOption"
+                        role="option"
+                        aria-selected={selected}
+                        onClick={() => {
+                          setPoolFilters((current) =>
+                            current[dropdown.key] === option.value
+                              ? current
+                              : { ...current, [dropdown.key]: option.value }
+                          );
+                          setOpenPoolFilterKey(null);
+                          setPageNumber(1);
+                        }}
+                      >
+                        <span>{option.label}</span>
+                        {selected ? <CheckCircle2 size={14} aria-hidden="true" /> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+        <button
+          type="button"
+          className="aiPoolFilterClear"
+          onClick={() => {
+            setSearchInput("");
+            setPoolFilters({ ...emptyPoolFilters });
+            setPageNumber(1);
+          }}
+          disabled={!searchInput && !hasActivePoolFilters}
+        >
+          清空筛选
+        </button>
+      </section>
+
+      {/* 2026-05 Stage 2: meta hint row replaces the old hardcoded
+          "Saudi Arabia / 推荐指数 60+ / 有邮箱" chips. Now shows the
+          real review-tail count and the batch query count, so users
+          know where the difference between the API total and the
+          main table comes from. */}
+      {activePoolFilterChips.length > 0 ||
+      reviewTailCount > 0 ||
+      queryCount > 0 ||
+      hiddenEvidenceCount > 0 ? (
+        <div className="aiPoolSelectedChips">
+          {activePoolFilterChips.map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              className="aiPoolSelectedChip is-removable"
+              title={`移除 ${chip.label} 筛选`}
+              onClick={() => {
+                setPoolFilters((current) => ({ ...current, [chip.key]: "" }));
+                setPageNumber(1);
+              }}
+            >
+              <span>
+                {chip.label}：{chip.valueLabel}
+              </span>
+              <X size={12} aria-hidden="true" />
+            </button>
+          ))}
+          {queryCount > 0 ? (
+            <span className="aiPoolSelectedChip" data-tone="info">
+              本批 {queryCount} 条 query
+            </span>
+          ) : null}
+          {totalLeads > 0 ? (
+            <span className="aiPoolSelectedChip" data-tone="info">
+              主客户 {mainLeadCount} 条
+            </span>
+          ) : null}
+          {reviewTailCount > 0 ? (
+            <span
+              className="aiPoolSelectedChip"
+              data-tone="warn"
+              title="国家/邮箱待补全的候选客户，需要先逐条复核再纳入主客户"
+            >
+              待复核 {reviewTailCount} 条
+            </span>
+          ) : null}
+          {hiddenEvidenceCount > 0 ? (
+            <span
+              className="aiPoolSelectedChip"
+              data-tone="muted"
+              title="内容证据/情报类候选已自动归档，不进入主客户表"
+            >
+              情报归档 {hiddenEvidenceCount} 条
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Bulk action bar (shown when selection exists) */}
+      {selectedIds.size > 0 ? (
+        <div className="aiPoolBulkBar" aria-label="批量操作">
+          <label className="aiPoolBulkSelectAll">
+            <input type="checkbox" checked={allChecked} onChange={toggleAll} aria-label="全选" />
+            <span>已选</span>
+            <strong>{selectedIds.size}</strong>
+            <span>家客户</span>
+            {selectedPendingCount < selectedIds.size ? (
+              <span className="aiPoolBulkSelectAllNote" title="已加入 CRM 的客户不会重复同步">
+                （其中 {selectedPendingCount} 家可加入 CRM）
+              </span>
+            ) : null}
+          </label>
+          <div className="aiPoolBulkActions">
+            <button
+              type="button"
+              className="aiPoolBulkAction primary"
+              disabled={approving || selectedPendingCount === 0}
+              title={selectedPendingCount === 0 ? "已选客户都已加入 CRM，无需重复同步" : undefined}
+              onClick={() => {
+                const pendingIds = new Set(
+                  leads.filter(isPendingCrmCandidate).map((lead) => lead.id)
+                );
+                const targetIds = Array.from(selectedIds).filter((id) => pendingIds.has(id));
+                if (targetIds.length === 0) return;
+                onBulkApprove(targetIds);
+                // Optimistically clear selection — refreshTask will land
+                // and the cleanup effect would clear it shortly anyway,
+                // but doing it eagerly avoids a half-second window where
+                // the bulk bar still reads "已选 N 家".
+                setSelectedIds(new Set());
+              }}
+            >
+              <Database size={14} aria-hidden="true" />
+              {selectedPendingCount === 0 ? "已加入 CRM" : "加入 CRM"}
+            </button>
+            <button
+              type="button"
+              className="aiPoolBulkAction"
+              disabled
+              title="批量生成邮件功能开发中，请先完成 CRM 同步"
+            >
+              <Mail size={13} aria-hidden="true" />
+              生成邮件
+            </button>
+            <button type="button" className="aiPoolBulkAction" disabled title="标记无效功能开发中">
+              <X size={13} aria-hidden="true" />
+              标记无效
+            </button>
+            <button type="button" className="aiPoolBulkAction" disabled title="导出选中功能开发中">
+              <Download size={13} aria-hidden="true" />
+              导出选中
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Candidate table */}
+      <section className="aiPoolTableWrap" aria-label="候选客户表">
+        {loading ? (
+          <TableLoadingState
+            title="正在加载客户池客户"
+            description="正在同步候选客户、联系方式和 CRM 状态。"
+          />
+        ) : (
+          <div className="aiPoolTableScroll">
+            <table className="aiPoolTable">
+              <thead>
+                <tr>
+                  <th className="col-check">
+                    <input
+                      type="checkbox"
+                      checked={allChecked}
+                      onChange={toggleAll}
+                      aria-label="全选当前页"
+                    />
+                  </th>
+                  <th className="col-company">公司名称</th>
+                  <th>国家/地区</th>
+                  <th>客户类型</th>
+                  <th className="col-score">推荐指数</th>
+                  <th className="col-email">邮箱</th>
+                  <th className="col-phone">电话</th>
+                  <th className="col-website">官网</th>
+                  <th>CRM 状态</th>
+                  <th>邮件状态</th>
+                  <th>最近动作</th>
+                  <th className="col-action">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.length ? (
+                  rows.map((row) => (
+                    <tr key={row.id} className={selectedIds.has(row.id) ? "selected" : undefined}>
+                      <td className="col-check">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(row.id)}
+                          onChange={() => toggleRow(row.id)}
+                          aria-label={`选择 ${row.companyName}`}
+                        />
+                      </td>
+                      <td className="col-company" title={row.companyName}>
+                        <span className="aiPoolCompanyName">{row.companyName}</span>
+                      </td>
+                      <td>{row.country}</td>
+                      <td>{row.industry}</td>
+                      <td className="col-score">
+                        <span className="aiPoolScoreStars" aria-hidden="true">
+                          {renderStars(row.scoreStars)}
+                        </span>
+                        <span className="aiPoolScoreValue">{row.scoreValue}</span>
+                      </td>
+                      <td
+                        className="col-email"
+                        title={row.emailCount ? row.emailAll.join("\n") : "暂无邮箱"}
+                      >
+                        {row.hasEmail ? (
+                          <span className="aiPoolContactValue">
+                            <Mail size={11} aria-hidden="true" />
+                            <span className="aiPoolContactText">{row.emailFirst}</span>
+                            {row.emailCount > 1 ? (
+                              <span className="aiPoolContactMore">…</span>
+                            ) : null}
+                          </span>
+                        ) : (
+                          <span className="aiPoolContactBadge muted">— 邮箱 0</span>
+                        )}
+                      </td>
+                      <td
+                        className="col-phone"
+                        title={row.phoneCount ? row.phoneAll.join("\n") : "暂无电话"}
+                      >
+                        {row.hasPhone ? (
+                          <span className="aiPoolContactValue">
+                            <PhoneCall size={11} aria-hidden="true" />
+                            <span className="aiPoolContactText">{row.phoneFirst}</span>
+                            {row.phoneCount > 1 ? (
+                              <span className="aiPoolContactMore">…</span>
+                            ) : null}
+                          </span>
+                        ) : (
+                          <span className="aiPoolContactBadge muted">电话 0</span>
+                        )}
+                      </td>
+                      <td className="col-website" title={row.website}>
+                        {row.websiteShort && row.websiteShort !== "—" ? (
+                          <a
+                            className="aiPoolWebsite"
+                            href={websiteHref(row.website)}
+                            onClick={(event) => event.stopPropagation()}
+                            rel="noreferrer noopener"
+                            target="_blank"
+                          >
+                            {row.websiteShort}
+                          </a>
+                        ) : (
+                          <span className="aiPoolWebsite">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <span className={`aiPoolCrmBadge state-${row.crmStatus}`}>
+                          {row.crmStatusLabel}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="aiPoolMailStatus">{row.mailStatus}</span>
+                      </td>
+                      <td className="col-action-meta">{row.lastAction}</td>
+                      <td className="col-action">
+                        <button
+                          type="button"
+                          className="aiPoolRowAction"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            const lead = pagedLeads.find((item) => item.id === row.id);
+                            if (lead) {
+                              onOpenLeadDetail(lead);
+                            }
+                          }}
+                        >
+                          详情
+                        </button>
+                        <button
+                          type="button"
+                          className="aiPoolRowAction"
+                          disabled={approving || row.crmStatus === "synced"}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (row.crmStatus !== "synced") {
+                              onApproveLead(row.id);
+                            }
+                          }}
+                        >
+                          {row.crmStatus === "synced" ? "已加入" : "加入 CRM"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="leadEmptyCell" colSpan={12}>
+                      {searchInput || hasActivePoolFilters
+                        ? "没有匹配当前筛选条件的候选客户。"
+                        : "暂无候选客户。回到搜索页继续搜索 30 条来扩充客户池。"}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <footer className="aiPoolTableFooter">
+          <p className="aiPoolTableFootHint">
+            显示 {filteredCount === 0 ? 0 : pageStart + 1}-{pageEnd} / {filteredCount}
+            {filteredCount !== totalLeads ? `（全部 ${totalLeads}）` : ""}
+            <span className="aiPoolTableFootSep">·</span>
+            点击公司可查看完整邮箱、电话、地址、来源 query 和评分原因
+          </p>
+          <div className="aiPoolPagination">
+            <span className="aiPoolPageSize">
+              每页
+              <select
+                value={pageSize}
+                onChange={(event) => {
+                  setPageSize(Number(event.target.value));
+                  setPageNumber(1);
+                }}
+              >
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+              </select>
+            </span>
+            <button
+              type="button"
+              className="aiPoolPageBtn"
+              disabled={safePage <= 1}
+              onClick={() => setPageNumber((current) => Math.max(1, current - 1))}
+            >
+              上一页
+            </button>
+            <span className="aiPoolPageIndicator">
+              {safePage} / {totalPages}
+            </span>
+            <button
+              type="button"
+              className="aiPoolPageBtn"
+              disabled={safePage >= totalPages}
+              onClick={() => setPageNumber((current) => Math.min(totalPages, current + 1))}
+            >
+              下一页
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function summarizePoolTitle(raw: string): string {
+  const trimmed = raw.trim();
+  // Common prefix in user prompts
+  const cleaned = trimmed.replace(/^帮我找/, "").replace(/^找/, "");
+  const firstChunk = cleaned.split(/[，,]|目标/)[0]?.trim() || cleaned;
+  // If the user prompt already ends with "客户" / "客户池", don't append
+  // an extra suffix that produces awkward strings like
+  // "...买家客户客户池". Just trim length and return.
+  const alreadyHasPoolSuffix = /客户池$/.test(firstChunk);
+  const alreadyEndsWithCustomer = /客户$/.test(firstChunk);
+  let label = firstChunk;
+  if (!alreadyHasPoolSuffix) {
+    label = alreadyEndsWithCustomer ? firstChunk + "池" : firstChunk + "客户池";
+  }
+  if (label.length > 24) {
+    return label.slice(0, 22) + "…";
+  }
+  return label;
+}
+
+function renderStars(filled: number): string {
+  const full = "★".repeat(Math.max(0, Math.min(5, Math.floor(filled))));
+  const empty = "☆".repeat(Math.max(0, 5 - Math.floor(filled)));
+  return full + empty;
+}
+
+// 2026-05 lead-table polish: cell formatting helpers shared by both
+// the search-run new-lead table and the pool-detail full table.
+
+function pickFirstContactValue(
+  contacts: LeadContact[] | undefined,
+  type: "email" | "phone"
+): { first: string; all: string[]; count: number } {
+  const all = (contacts ?? [])
+    .filter((c) => c.type === type)
+    .map((c) => c.value)
+    .filter((v) => typeof v === "string" && v.length > 0);
+  return { first: all[0] ?? "", all, count: all.length };
+}
+
+// Trim a website URL down to a short, readable form: drop the
+// scheme (http/https) and any trailing path. Designs show plain
+// domains like "azrait.sa" rather than the full URL with /path.
+function formatWebsiteShort(website: string | null | undefined): string {
+  if (!website || website === "—") return "—";
+  let raw = String(website).trim();
+  if (!raw) return "—";
+  raw = raw.replace(/^https?:\/\//i, "");
+  raw = raw.replace(/^www\./i, "");
+  // Cut the path off so the column stays narrow.
+  const slash = raw.indexOf("/");
+  if (slash > 0) raw = raw.slice(0, slash);
+  // Drop trailing slash if any.
+  raw = raw.replace(/\/+$/, "");
+  return raw || "—";
+}
+
+// Build a safe href for the website cell anchor. Accepts either a
+// bare domain ("azrait.sa") or a full URL ("https://azrait.sa/...")
+// and always returns an https URL the browser can open.
+function websiteHref(website: string | null | undefined): string {
+  const raw = (website ?? "").trim();
+  if (!raw || raw === "—") return "#";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `https://${raw.replace(/^\/+/, "")}`;
+}
+
+function percent(part: number, total: number): string {
+  if (!total) return "—";
+  return `${((part / total) * 100).toFixed(1)}%`;
+}
+
+function buildPoolTableRow(lead: DisplayLead): PoolTableRow {
+  // Count emails / phones from the raw contact list (not the formatted
+  // display string). The display string joins phones with " ; ", so a
+  // naive split on whitespace would yield silly numbers like "电话 16".
+  const contacts = lead.raw.contacts ?? [];
+  const emails = pickFirstContactValue(contacts, "email");
+  const phones = pickFirstContactValue(contacts, "phone");
+  const emailCount = emails.count;
+  const phoneCount = phones.count;
+  const crmStage = lead.raw.crmLead?.stage ?? null;
+  const sentEmail = hasSentEmail(lead.raw);
+  const status = lead.raw.status ?? "";
+  const isApproved = status === "approved" || status === "contacted" || status === "email_sent";
+  const crmActive = Boolean(crmStage);
+  // Most recent action label: newest row reflects what just happened
+  // ("已加入 CRM"/"已发送邮件") instead of the static "新发现".
+  let lastAction = "新发现";
+  if (sentEmail) {
+    lastAction = "邮件已发送";
+  } else if (crmActive) {
+    lastAction = "已加入 CRM";
+  } else if (isApproved) {
+    lastAction = "待写入 CRM";
+  }
+  return {
+    id: lead.id,
+    companyName: lead.companyName,
+    country: lead.country || "—",
+    industry: lead.tag || "通用买家",
+    scoreStars: Math.max(1, Math.min(5, Math.round(lead.score / 20))),
+    scoreValue: lead.score,
+    hasEmail: emailCount > 0,
+    emailCount,
+    emailFirst: emails.first,
+    emailAll: emails.all,
+    hasPhone: phoneCount > 0,
+    phoneCount,
+    phoneFirst: phones.first,
+    phoneAll: phones.all,
+    website: lead.website || "—",
+    websiteShort: formatWebsiteShort(lead.website),
+    sourceBatch: lead.source || "第 1 批",
+    crmStatus: crmActive ? "synced" : "pending",
+    crmStatusLabel: crmActive ? "已加入CRM" : "待加入CRM",
+    mailStatus: sentEmail ? "已发送" : isApproved || crmActive ? "待发送" : "未触达",
+    lastAction
+  };
+}
+
+function hasAnyPoolFilter(filters: PoolFilters): boolean {
+  return Object.values(filters).some(Boolean);
+}
+
+function createPoolFilterOptions(values: string[], allLabel: string): PoolFilterOption[] {
+  const seen = new Set<string>();
+  const options: PoolFilterOption[] = [{ value: "", label: allLabel }];
+
+  values.forEach((rawValue) => {
+    const value = normalizePoolFilterValue(rawValue);
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    options.push({ value, label: displayPoolFilterValue(value) });
+  });
+
+  return options;
+}
+
+function normalizePoolFilterValue(value: string): string {
+  return String(value ?? "").trim();
+}
+
+function displayPoolFilterValue(value: string): string {
+  if (value === "-" || value === "—") return "未标注";
+  return value;
+}
+
+function matchesPoolLeadFilters({ row }: PoolLeadRow, filters: PoolFilters): boolean {
+  if (filters.country && row.country !== filters.country) return false;
+  if (filters.customerType && row.industry !== filters.customerType) return false;
+  if (filters.score && !matchesPoolScoreFilter(row.scoreValue, filters.score)) return false;
+  if (filters.contact && !matchesPoolContactFilter(row, filters.contact)) return false;
+  if (filters.crm && !matchesPoolCrmFilter(row, filters.crm)) return false;
+  if (filters.mail && !matchesPoolMailFilter(row, filters.mail)) return false;
+  return true;
+}
+
+function matchesPoolScoreFilter(score: number, filter: string): boolean {
+  if (filter === "high") return score >= 75;
+  if (filter === "medium") return score >= 60 && score < 75;
+  if (filter === "low") return score >= 50 && score < 60;
+  if (filter === "below50") return score < 50;
+  return true;
+}
+
+function matchesPoolContactFilter(row: PoolTableRow, filter: string): boolean {
+  if (filter === "email") return row.hasEmail;
+  if (filter === "phone") return row.hasPhone;
+  if (filter === "emailOrPhone") return row.hasEmail || row.hasPhone;
+  if (filter === "emailAndPhone") return row.hasEmail && row.hasPhone;
+  if (filter === "none") return !row.hasEmail && !row.hasPhone;
+  return true;
+}
+
+function matchesPoolCrmFilter(row: PoolTableRow, filter: string): boolean {
+  if (filter === "joined") return row.crmStatus === "synced" || row.crmStatus === "active";
+  if (filter === "notJoined") return row.crmStatus === "pending";
+  return true;
+}
+
+function matchesPoolMailFilter(row: PoolTableRow, filter: string): boolean {
+  const reached = row.mailStatus === "已发送" || row.mailStatus === "已回复";
+  if (filter === "reached") return reached;
+  if (filter === "unreached") return !reached;
+  return true;
+}
+
 type ConversationProps = {
   prompt: string;
   status: string;
   error: string;
-  command: string;
   currentTask: LeadTask | null;
-  keywordRows: KeywordRow[];
-  profileSourceRows: ProfileSourceRow[];
-  flowRows: FlowRow[];
   leads: DisplayLead[];
-  crmRows: CrmRow[];
-  sentCount: number;
   crmSyncedCount: number;
   pendingFollowupCount: number;
   searchResult: SearchRunResult | null;
@@ -1273,25 +3440,19 @@ type ConversationProps = {
   approving: boolean;
   selectedLeadId: string | null;
   onSelectLead: (leadId: string) => void;
-  onCommandChange: (value: string) => void;
-  onSendCommand: () => void;
+  onOpenLeadDetail: (lead: DisplayLead) => void;
   onOpenMail: () => void;
-  onOpenCrm: () => void;
+  onOpenCrm: (leadId?: string) => void;
   onBack: () => void;
+  onContinueSearch: () => void;
 };
 
 function AiWorkerConversation({
   prompt,
   status,
   error,
-  command,
   currentTask,
-  keywordRows,
-  profileSourceRows,
-  flowRows,
   leads,
-  crmRows,
-  sentCount,
   crmSyncedCount,
   pendingFollowupCount,
   searchResult,
@@ -1300,40 +3461,42 @@ function AiWorkerConversation({
   approving,
   selectedLeadId,
   onSelectLead,
-  onCommandChange,
-  onSendCommand,
+  onOpenLeadDetail,
   onOpenMail,
   onOpenCrm,
-  onBack
+  onBack,
+  onContinueSearch
 }: ConversationProps) {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount =
-    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
-    0;
-  const rawSearchResults = useMemo(() => buildDisplaySearchResults(currentTask), [currentTask]);
-  const rawResultCount =
-    currentTask?.searchQueries?.reduce((total, query) => total + (query.resultCount ?? 0), 0) ??
-    rawSearchResults.length;
+  // 2026-05 polish: progress numerator must include running queries,
+  // not just completed. The Brave step lands candidates in the DB
+  // (and the new-lead table starts to fill) BEFORE the worker pool
+  // marks the query "completed" — that final flip happens after
+  // qualification, dedupe, and lead writing finish. Counting only
+  // completed queries makes the progress bar sit at 0/20 while
+  // candidates are already showing up, which the user reads as
+  // "nothing is happening" or "data appeared from thin air".
+  //
+  // Sub-counters keep their literal meaning for the explainer line
+  // under the progress bar so the user can see what's actually
+  // finished versus what's mid-qualification.
+  const completedQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "completed").length ?? 0;
+  const runningQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "running").length ?? 0;
+  // executedCount = "已执行" — every query that's in flight or done.
+  // Pending queries are the only thing left out. failedQueryCount is
+  // computed below via useMemo and folded in at usage sites.
   const actionableLeads = leads.filter(isActionableDisplayLead);
   const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
   const hasActionableLeads = actionableLeads.length > 0;
   const running = creating || searching || approving;
   const leadQualityCounts = useMemo(() => summarizeLeadQualityCounts(currentTask), [currentTask]);
-  const activitySteps = buildActivitySteps({
-    creating,
-    searching,
-    currentTask,
-    searchResult,
-    leads,
-    leadQualityCounts,
-    hasError: Boolean(error)
-  });
-  const activityMetrics = buildActivityMetrics({
-    currentTask,
-    searchResult,
-    leads,
-    leadQualityCounts
-  });
+  // Live execution log surfaced in the right-hand panel of the run card.
+  // Reuses buildActivityLogs which derives messages from agentSteps +
+  // searchQueries + leadQualityCounts. The other AI activity helpers
+  // (buildActivitySteps / buildActivityMetrics) belong to the legacy
+  // AgentSearchActivity widget which is no longer rendered here.
   const activityLogs = buildActivityLogs({
     creating,
     searching,
@@ -1344,11 +3507,21 @@ function AiWorkerConversation({
     hasError: Boolean(error)
   });
   const [leadPage, setLeadPage] = useState(1);
-  const leadPageCount = Math.max(1, Math.ceil(leads.length / leadPageSize));
+  const [showBackConfirm, setShowBackConfirm] = useState(false);
+  // Continuation searches are cumulative: keep the existing customer
+  // pool visible while the backend plans/appends the next 30 queries,
+  // then append newly found leads into this same list.
+  const currentBatchLeads = leads;
+
+  const leadPageCount = Math.max(1, Math.ceil(currentBatchLeads.length / leadPageSize));
   const leadStartIndex = (leadPage - 1) * leadPageSize;
-  const pagedLeads = leads.slice(leadStartIndex, leadStartIndex + leadPageSize);
-  const leadRangeStart = leads.length ? leadStartIndex + 1 : 0;
-  const leadRangeEnd = Math.min(leadStartIndex + leadPageSize, leads.length);
+  const pagedLeads = currentBatchLeads.slice(leadStartIndex, leadStartIndex + leadPageSize);
+  const leadRangeStart = currentBatchLeads.length ? leadStartIndex + 1 : 0;
+  const leadRangeEnd = Math.min(leadStartIndex + leadPageSize, currentBatchLeads.length);
+
+  useEffect(() => {
+    setLeadPage(1);
+  }, [currentTask?.id]);
 
   useEffect(() => {
     if (leadPage > leadPageCount) {
@@ -1356,309 +3529,696 @@ function AiWorkerConversation({
     }
   }, [leadPage, leadPageCount]);
 
-  useEffect(() => {
-    if (!selectedLeadId) return;
-    const selectedIndex = leads.findIndex((lead) => lead.id === selectedLeadId);
-    if (selectedIndex < 0) return;
-    const nextPage = Math.floor(selectedIndex / leadPageSize) + 1;
-    setLeadPage((current) => (current === nextPage ? current : nextPage));
-  }, [leads, selectedLeadId]);
-
   function changeLeadPage(nextPage: number) {
     const safePage = Math.min(Math.max(nextPage, 1), leadPageCount);
     setLeadPage(safePage);
-    const firstLeadOnPage = leads[(safePage - 1) * leadPageSize];
+    const firstLeadOnPage = currentBatchLeads[(safePage - 1) * leadPageSize];
     if (firstLeadOnPage) {
       onSelectLead(firstLeadOnPage.id);
     }
   }
 
+  // 2026-05 LeadHunt 2.0 — derived helpers for the search-in-progress
+  // page. Layout follows ui/ai-search.png: title + KPI strip + run-batch
+  // card (progress + step pills + realtime log) + new-lead table +
+  // 3 conversion cards + health hint. Pure-frontend; data is whatever
+  // the live LeadTask polling already provides.
+  const poolTitle = summarizePoolTitle(prompt || "客户池");
+  const poolStatus = mapTaskStatusToPool(
+    currentTask?.status ?? (searching ? "running" : "pending")
+  );
+  const targetMarkets = useMemo(() => taskTargetMarkets(currentTask), [currentTask]);
+  const countryChips =
+    targetMarkets.length > 0 ? targetMarkets.slice(0, 6) : ["UAE", "Saudi Arabia", "Qatar", "Oman"];
+  const failedQueryCount = useMemo(
+    () =>
+      currentTask?.searchQueries?.filter((query) => query.executionStatus === "failed").length ?? 0,
+    [currentTask]
+  );
+  const pendingQueryCount = useMemo(
+    () =>
+      currentTask?.searchQueries?.filter(
+        (query) => query.executionStatus === "pending" || query.executionStatus === "running"
+      ).length ?? 0,
+    [currentTask]
+  );
+  // 2026-05 LeadHunt 2.0: when the backend marks the task as
+  // failed/completed/cancelled/paused, the UI must converge to a
+  // terminal display even if a few searchQueries remain in
+  // pending/running (the worker bailed out without finalizing them).
+  // Without this, pendingQueryCount > 0 keeps isRunActive=true and the
+  // page reads "进行中 / ETA / pending" forever.
+  const isTerminalTask =
+    currentTask?.status === "failed" ||
+    currentTask?.status === "completed" ||
+    currentTask?.status === "cancelled" ||
+    currentTask?.status === "paused";
+  // The run is complete when the task is terminal, OR when we've drained
+  // every query and the local searching/creating flags are also off.
+  // Mixed success+failure surfaces the failure count on the run header
+  // so the page never reads "已完成" + "进行中" at the same time.
+  const isRunComplete =
+    isTerminalTask || (queryCount > 0 && pendingQueryCount === 0 && !searching && !creating);
+  // A run is "active" only when the task itself is still active. If the
+  // task is terminal but a few queries got stranded in pending/running,
+  // we must NOT treat it as active — that's the bug that pinned the
+  // page at "19/40 第 N 批进行中 ETA 6 分钟".
+  const isRunActive = !isTerminalTask && (searching || creating || pendingQueryCount > 0);
+
+  useEffect(() => {
+    if (!isRunActive && showBackConfirm) {
+      setShowBackConfirm(false);
+    }
+  }, [isRunActive, showBackConfirm]);
+
+  // Stranded query count for the failure subline. Only meaningful in
+  // terminal state — during active runs these are just queued work.
+  const strandedQueryCount = isTerminalTask ? pendingQueryCount : 0;
+  // 2026-05 polish: progress = completed + failed + running (everything
+  // that's been picked up). Running queries are mid-flight — Brave has
+  // returned, candidates are being saved — so users should see them as
+  // "already executed", not "stuck at zero". This is computed here
+  // (after failedQueryCount is declared) so any earlier helpers that
+  // used the old completed-only meaning have already been updated to
+  // reference completedQueryCount explicitly.
+  const executedCount = completedQueryCount + failedQueryCount + runningQueryCount;
+  const allBraveQueriesFailed = queryCount > 0 && failedQueryCount === queryCount;
+  const hasVisibleRunIssue = allBraveQueriesFailed || strandedQueryCount > 0;
+  const plannedBatchQueryCount = 30;
+  const isPlanningSearchQueries = isRunActive && (creating || searching) && pendingQueryCount === 0;
+  const displayQueryTotal = queryCount + (isPlanningSearchQueries ? plannedBatchQueryCount : 0);
+  const progressQueryTotal = displayQueryTotal || queryCount;
+  const progressPercent = progressQueryTotal
+    ? Math.min(100, Math.round((executedCount / progressQueryTotal) * 100))
+    : 0;
+  const displayBatchNumber = Math.max(
+    1,
+    Math.ceil(Math.max(queryCount || plannedBatchQueryCount, 1) / plannedBatchQueryCount)
+  );
+  const planningBatchNumber = Math.floor(queryCount / plannedBatchQueryCount) + 1;
+  // Rough ETA: each remaining query typically takes ~15s in the polling
+  // backend. Floor at 1 minute so we don't say "0 minutes" while there
+  // are still queries pending. When everything is done it's hidden.
+  const estimateEtaMinutes = useMemo(() => {
+    if (!isRunActive || isPlanningSearchQueries) return 0;
+    const remaining = pendingQueryCount;
+    if (remaining <= 0) return 0;
+    const seconds = remaining * 15;
+    return Math.max(1, Math.ceil(seconds / 60));
+  }, [isRunActive, isPlanningSearchQueries, pendingQueryCount]);
+  const currentRunningQuery = useMemo(
+    () =>
+      isRunActive
+        ? (currentTask?.searchQueries?.find((query) => query.executionStatus === "running") ?? null)
+        : null,
+    [currentTask, isRunActive]
+  );
+  const currentQueryDisplay = currentRunningQuery
+    ? {
+        label: "正在搜索",
+        country: currentRunningQuery.country || targetMarkets[0] || "—",
+        query: currentRunningQuery.query,
+        title: currentRunningQuery.query
+      }
+    : isPlanningSearchQueries
+      ? {
+          label: "正在生成",
+          country: queryCount > 0 ? `第 ${planningBatchNumber} 批` : "搜索指令",
+          query:
+            queryCount > 0
+              ? `正在追加生成下一批 ${plannedBatchQueryCount} 条搜索指令，已有 ${queryCount} 条会继续保留`
+              : `正在读取产品画像和客户画像，生成本批 ${plannedBatchQueryCount} 条搜索指令`,
+          title:
+            queryCount > 0
+              ? `正在追加生成下一批 ${plannedBatchQueryCount} 条搜索指令，已有 ${queryCount} 条会继续保留`
+              : `正在读取产品画像和客户画像，生成本批 ${plannedBatchQueryCount} 条搜索指令`
+        }
+      : isRunActive
+        ? {
+            label: "等待执行",
+            country: targetMarkets[0] || "搜索指令",
+            query: "已生成搜索指令，正在等待下一条开始执行",
+            title: "已生成搜索指令，正在等待下一条开始执行"
+          }
+        : {
+            label: isRunComplete ? "已完成" : "未开始",
+            country: "搜索指令",
+            query: queryCount
+              ? `本轮共生成 ${queryCount} 条搜索指令`
+              : "任务启动后会先生成搜索指令",
+            title: queryCount ? `本轮共生成 ${queryCount} 条搜索指令` : "任务启动后会先生成搜索指令"
+          };
+  const showLeadTableLoading =
+    currentBatchLeads.length === 0 && (isPlanningSearchQueries || isRunActive);
+
+  function handleBackToWorkbench() {
+    if (isRunActive) {
+      setShowBackConfirm(true);
+      return;
+    }
+    onBack();
+  }
+
+  // 5-step pills: 生成指令 / Brave 搜索 / 清洗候选 / ICP 评分 / 写入客户池.
+  // State derived from agentSteps + searchQueries when available.
+  type RunStep = {
+    label: string;
+    state: "completed" | "running" | "pending" | "failed";
+    stateLabel: string;
+    icon: typeof Sparkles;
+  };
+  const runStepPills: RunStep[] = useMemo(() => {
+    const stepByName = (name: string) => currentTask?.agentSteps?.find((s) => s.nodeName === name);
+    const planning = stepByName("plan_search");
+    const search = stepByName("brave_search");
+    const normalize = stepByName("normalize_leads");
+    const score = stepByName("score_icp");
+    const stateLabelOf = (s?: { status?: string }): RunStep["state"] => {
+      const status = (s?.status ?? "").toLowerCase();
+      if (status === "completed") return "completed";
+      if (status === "running") return "running";
+      if (status === "failed") return "failed";
+      return "pending";
+    };
+    const stateText = (state: RunStep["state"]) =>
+      state === "completed"
+        ? "已完成"
+        : state === "running"
+          ? "进行中"
+          : state === "failed"
+            ? "失败"
+            : "等待中";
+    // 2026-05 LeadHunt 2.0: when the whole run is complete (no pending,
+    // no running, not actively searching) we collapse pending downstream
+    // steps into "completed" — otherwise the page reads as e.g.
+    // "26/28 query, 写入客户池 进行中" which contradicts the run-level
+    // "本批已跑完" status. Partial query failures are treated as
+    // skipped noise; only an all-query failure turns Brave red.
+    const stepStateAfterRun = (raw: RunStep["state"]): RunStep["state"] =>
+      isRunComplete && (raw === "running" || raw === "pending") ? "completed" : raw;
+    // 生成指令: planning step, but if any query exists we know it's done
+    // (legacy tasks never expose a "plan_search" agent step).
+    const planningRaw = stateLabelOf(planning);
+    const planningState: RunStep["state"] =
+      planningRaw === "pending" && queryCount ? "completed" : planningRaw;
+    // Brave 搜索: show failure only if every query in the batch failed.
+    const searchRaw = stepStateAfterRun(stateLabelOf(search));
+    const searchState: RunStep["state"] =
+      isRunComplete && allBraveQueriesFailed ? "failed" : searchRaw;
+    const hasLiveBatchLeads = currentBatchLeads.length > 0;
+    const normalizeRaw = stepStateAfterRun(stateLabelOf(normalize));
+    const scoreRaw = stepStateAfterRun(stateLabelOf(score));
+    const normalizeState: RunStep["state"] =
+      !isRunComplete && hasLiveBatchLeads && normalizeRaw === "pending" ? "running" : normalizeRaw;
+    const scoreState: RunStep["state"] =
+      !isRunComplete && hasLiveBatchLeads && scoreRaw === "pending" ? "running" : scoreRaw;
+    // 写入客户池: this is "completed" once the run is over with at
+    // least some leads landed. If the run ended with zero leads we
+    // mark it failed so the timeline reflects reality. While active,
+    // it tracks the score step (the last node before the lead pool is
+    // updated) plus a small heuristic for when leads start landing
+    // live.
+    const writeState: RunStep["state"] = isRunComplete
+      ? leads.length > 0
+        ? "completed"
+        : "failed"
+      : hasLiveBatchLeads
+        ? "running"
+        : scoreState;
+    return [
+      {
+        label: "生成指令",
+        state: planningState,
+        stateLabel: stateText(planningState),
+        icon: Sparkles
+      },
+      {
+        label: "Brave 搜索",
+        state: searchState,
+        stateLabel: stateText(searchState),
+        icon: Search
+      },
+      {
+        label: "清洗候选",
+        state: normalizeState,
+        stateLabel: stateText(normalizeState),
+        icon: Filter
+      },
+      {
+        label: "ICP 评分",
+        state: scoreState,
+        stateLabel: stateText(scoreState),
+        icon: Star
+      },
+      {
+        label: "写入客户池",
+        state: writeState,
+        stateLabel: stateText(writeState),
+        icon: Database
+      }
+    ];
+  }, [
+    currentBatchLeads.length,
+    currentTask,
+    allBraveQueriesFailed,
+    failedQueryCount,
+    isRunComplete,
+    leads.length,
+    queryCount,
+    strandedQueryCount
+  ]);
+
+  function formatLogTime(index: number, total: number) {
+    // Synthetic ascending HH:mm timestamps so the realtime log reads
+    // chronologically. The real backend doesn't expose per-step times
+    // yet; once it does, this falls back to log.detail.
+    const now = new Date();
+    const minutesAgo = total - index - 1;
+    const stamp = new Date(now.getTime() - minutesAgo * 60_000);
+    return `${stamp.getHours().toString().padStart(2, "0")}:${stamp.getMinutes().toString().padStart(2, "0")}`;
+  }
+
   return (
-    <>
-      <div className="aiConversationBar">
-        <button className="aiConversationBack" type="button" onClick={onBack}>
-          <ChevronLeft size={16} aria-hidden="true" />
-          返回工作台
-        </button>
-      </div>
-      <div className="chatScroll">
-        <div className="taskBubble">{prompt}</div>
-
-        <p className="agentText">
-          我将先帮你筛选符合要求的目标客户，再生成邮件触达任务，最后同步到 CRM
-          系统并标记标签。当前第一步是筛选目标客户，系统会输出 AI 扩展词、搜索指令和候选客户列表。
-        </p>
-
-        <div className={error ? "apiStatusLine error" : "apiStatusLine"}>
-          <strong>{status}</strong>
-          {currentTask ? <span>任务 ID：{currentTask.id}</span> : null}
-          {error ? <span>{error}</span> : null}
+    <div className="aiPool aiSearchRunPool">
+      {/* Header — same shape as AiWorkerPool */}
+      <header className="aiPoolHeader">
+        <div className="aiPoolHeaderTop">
+          <button type="button" className="aiPoolBack" onClick={handleBackToWorkbench}>
+            <ChevronLeft size={16} aria-hidden="true" />
+            返回工作台
+          </button>
         </div>
-
-        <AgentSearchActivity
-          active={creating || searching}
-          steps={activitySteps}
-          metrics={activityMetrics}
-          queryCount={queryCount}
-          executedCount={executedCount}
-          resultCount={searchResult?.resultCount ?? 0}
-          leadCount={leads.length}
-          leadQualityCounts={leadQualityCounts}
-          logs={activityLogs}
-          hasError={Boolean(error)}
-        />
-
-        <div className="flow">
-          {flowRows.map((row, index) => (
-            <div className={`flowRow ${row.state}`} key={row.title}>
-              <div className={row.state === "pending" ? "flowDot pending" : "flowDot"}>
-                {row.state === "pending" ? index + 1 : row.state === "failed" ? "!" : "✓"}
-              </div>
-              <div>
-                <strong>{row.title}</strong>
-                <span>{row.description}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <section className="keywordCard aiExpansionCard">
-          <div className="keywordHead">
-            <div>
-              <div className="keywordTitle">
-                <span className="keywordIcon">
-                  <Sparkles size={16} aria-hidden="true" />
-                </span>
-                AI 扩展词
-              </div>
-              <div className="keywordSubtitle">
-                根据产品画像、参考客户官网和目标市场自动扩展，并组合成首批搜索指令。
-              </div>
-            </div>
-            <span className="keywordStatusPill">已同步</span>
-          </div>
-          {profileSourceRows.length ? (
-            <div className="profileSourceGrid">
-              {profileSourceRows.map((row) => (
-                <div className="profileSourceRow" key={row.label}>
-                  <span>{row.label}</span>
-                  <div>
-                    {row.values.map((value) => (
-                      <strong key={value}>{value}</strong>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : null}
-          {keywordRows.map((row) => (
-            <div className="keywordRow" key={row.label}>
-              <span className="keywordRowLabel">{row.label}</span>
-              <div className="keywordChips">
-                {row.values.map((value) => (
-                  <span className="keywordChip" key={value}>
-                    {value}
+        <div className="aiPoolHeaderRow">
+          <div className="aiPoolHeaderLeft">
+            {/* Single inline row: icon + title + status pill + country
+                chips, matching the design. The legacy two-row variant
+                (chips below title) is the AiWorkerPool detail page. */}
+            <div className="aiPoolHeaderTitle aiSearchRunHeaderTitle">
+              <span className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
+                <RadioTower size={22} />
+              </span>
+              <h1>{poolTitle}</h1>
+              <span className={`aiPoolBadge state-${poolStatus.kind}`}>{poolStatus.label}</span>
+              <div className="aiPoolCountryChips aiSearchRunCountryChips">
+                {countryChips.map((country) => (
+                  <span key={country} className="aiPoolCountryChip">
+                    {country}
                   </span>
                 ))}
               </div>
             </div>
-          ))}
-          <div className="keywordActions">
-            <span className="keywordMeta">
-              搜索指令会一次性执行完本轮全部 query；目录站、B2B
-              平台和内容页会降权，主候选表优先展示可触达客户
-            </span>
-          </div>
-        </section>
-
-        <div className="executionTitle">
-          <span className={searching ? "flowDot" : leads.length ? "flowDot" : "flowDot pending"}>
-            {leads.length || searching ? "✓" : "1"}
-          </span>
-          执行任务
-        </div>
-        <div className="flow executionFlow">
-          <div className={searching ? "flowRow active" : "flowRow done"}>
-            <div className="flowDot">✓</div>
-            <div>
-              <strong>筛选目标客户</strong>
-              <span>
-                {searching ? "正在调用 Brave 搜索" : queryCount ? "搜索指令已就绪" : "等待任务创建"}
-              </span>
-            </div>
-          </div>
-          <div className={leadQualityCounts.rawEvidence ? "flowRow active" : "flowRow pending"}>
-            <div className={leadQualityCounts.rawEvidence ? "flowDot" : "flowDot pending"}>
-              {leadQualityCounts.rawEvidence ? "✓" : "2"}
-            </div>
-            <div>
-              <strong>线索清洗结果</strong>
-              <span>
-                {searchResult ? formatLeadQualitySummary(leadQualityCounts) : "等待首轮搜索结果"}
-              </span>
-            </div>
           </div>
         </div>
+      </header>
 
-        <section className="leadTableCard rawResultCard">
-          <div className="rawResultHead">
-            <div>
-              <span>Brave 原始搜索结果</span>
-              <strong>
-                {rawResultCount
-                  ? `当前已命中 ${rawResultCount} 条原始结果，展示前 ${Math.min(rawSearchResults.length, 20)} 条`
-                  : "等待首轮 Brave 搜索结果"}
+      {/* 持续搜索批次 — main run card */}
+      <section className="aiSearchRunCard" aria-label="持续搜索批次">
+        <header className="aiSearchRunHead">
+          <div className="aiSearchRunHeadLeft">
+            <h2>持续搜索批次</h2>
+            {isRunActive ? null : isRunComplete && hasVisibleRunIssue ? (
+              <p>
+                {(() => {
+                  const parts: string[] = [`${completedQueryCount} 条成功`];
+                  if (allBraveQueriesFailed) parts.push(`${failedQueryCount} 条失败`);
+                  if (strandedQueryCount > 0) parts.push(`${strandedQueryCount} 条未完成`);
+                  return `本批已停止：${parts.join("，")}`;
+                })()}
+              </p>
+            ) : !isRunComplete ? (
+              <p>{status}</p>
+            ) : null}
+          </div>
+          <div className="aiSearchRunHeadActions">
+            <button
+              type="button"
+              className="aiPoolPrimaryBtn"
+              onClick={onContinueSearch}
+              disabled={running}
+            >
+              <Play size={14} aria-hidden="true" />
+              继续搜索 30 条
+            </button>
+            <button
+              type="button"
+              className="aiPoolGhostBtn"
+              disabled
+              title="搜索方向调整功能开发中"
+            >
+              调整搜索方向
+            </button>
+          </div>
+        </header>
+
+        <div className="aiSearchRunBody">
+          {/* Left: progress + current query */}
+          <div className="aiSearchRunProgress">
+            {/* Big "第 N 批正在搜索中..." headline + ETA, matching the
+                design. The batch number uses the count of completed
+                searchQueries divided by 30 (one batch per the legacy
+                "继续搜索 30 条" affordance), defaulting to 1. */}
+            <div className="aiSearchRunHeadline">
+              <span className="aiSearchRunHeadlineDot" aria-hidden="true">
+                {isRunActive ? <Sparkles size={14} /> : <CheckCircle2 size={14} />}
+              </span>
+              <strong className="aiSearchRunHeadlineTitle">
+                {isRunActive
+                  ? isPlanningSearchQueries
+                    ? queryCount > 0
+                      ? `正在生成第 ${planningBatchNumber} 批搜索指令...`
+                      : "正在生成搜索指令..."
+                    : `第 ${displayBatchNumber} 批正在搜索中...`
+                  : isRunComplete
+                    ? hasVisibleRunIssue
+                      ? allBraveQueriesFailed
+                        ? "本批搜索失败"
+                        : "本批已停止"
+                      : "本批搜索已完成"
+                    : "等待启动"}
               </strong>
+              {isRunActive && estimateEtaMinutes > 0 ? (
+                <span className="aiSearchRunHeadlineEta">预计还需 {estimateEtaMinutes} 分钟</span>
+              ) : null}
             </div>
-            <span className="rawResultBadge">
-              {searchResult
-                ? searchResult.hasMore
-                  ? `剩余 ${searchResult.remainingQueries ?? 0} 条未执行`
-                  : "已执行完本轮搜索指令"
-                : "实时"}
-            </span>
-          </div>
-          <div className="leadTableWrap">
-            <table className="leadTable rawResultTable">
-              <thead>
-                <tr>
-                  <th>标题</th>
-                  <th>域名</th>
-                  <th>来源 query 国家</th>
-                  <th>来源查询</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rawSearchResults.length ? (
-                  rawSearchResults.slice(0, 20).map((result) => (
-                    <tr key={result.id}>
-                      <td className="rawResultTitle">{result.title}</td>
-                      <td>{result.domain}</td>
-                      <td title="仅代表这条搜索指令的目标国家，不代表客户官网真实国家。">
-                        {result.country}
-                      </td>
-                      <td className="rawResultQuery">{result.query}</td>
-                      <td>{result.status}</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td className="leadEmptyCell" colSpan={5}>
-                      {searching ? "正在等待 Brave 返回原始命中..." : "暂无原始搜索结果"}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
 
-        <section className="leadTableCard">
-          <div className="leadTableWrap">
-            <table className="leadTable">
+            {/* Progress bar + inline "N / M query 已执行" label on the right.
+                2026-05 polish: numerator includes running queries —
+                see executedCount comment. The explainer subline below
+                the bar tells the user "N done, M cleaning candidates"
+                so the literal completion count isn't lost. */}
+            <div className="aiSearchRunProgressRow">
+              <div className="aiSearchRunProgressBar" aria-hidden="true">
+                <div
+                  className="aiSearchRunProgressFill"
+                  style={{
+                    width: `${progressPercent}%`
+                  }}
+                />
+              </div>
+              <p className="aiSearchRunProgressLabel">
+                <strong>{executedCount}</strong>
+                <span>/ {displayQueryTotal || "—"} query 已执行</span>
+              </p>
+            </div>
+            {isRunActive && executedCount > 0 ? (
+              <p className="aiSearchRunProgressBreakdown">
+                其中 <b>{completedQueryCount}</b> 条已完成
+                {runningQueryCount > 0 ? `，${runningQueryCount} 条处理中` : ""}
+                {allBraveQueriesFailed ? `，${failedQueryCount} 条失败` : ""}
+              </p>
+            ) : null}
+
+            <div className="aiSearchRunCurrent">
+              <span className="aiSearchRunCurrentLabel">{currentQueryDisplay.label}</span>
+              <span className="aiSearchRunCurrentCountry">{currentQueryDisplay.country}</span>
+              <code className="aiSearchRunCurrentQuery" title={currentQueryDisplay.title}>
+                {currentQueryDisplay.query}
+              </code>
+            </div>
+
+            {/* Lead counter underneath. Continuation searches are
+                cumulative, so this keeps the pool total visible while
+                the next batch is being planned/executed. */}
+            <p className="aiSearchRunStat">
+              {isRunActive ? "已发现" : "累计客户"} <strong>{currentBatchLeads.length}</strong> 家
+              {isRunActive ? "候选客户" : "客户"}
+              {allBraveQueriesFailed ? `，${failedQueryCount} 条 query 失败` : ""}
+              {strandedQueryCount > 0 ? `，${strandedQueryCount} 条 query 未完成` : ""}
+            </p>
+
+            {/* 5-step horizontal timeline below the progress card.
+                Each step is icon + label/state pair, dashed lines
+                between them — matches the design's flat row. */}
+            <div className="aiSearchRunSteps" role="list">
+              {runStepPills.map((step) => (
+                <div
+                  className={`aiSearchRunStep state-${step.state}`}
+                  key={step.label}
+                  role="listitem"
+                >
+                  <span className="aiSearchRunStepIcon" aria-hidden="true">
+                    {step.state === "completed" ? (
+                      <CheckCircle2 size={14} />
+                    ) : step.state === "running" ? (
+                      <Sparkles size={14} />
+                    ) : step.state === "failed" ? (
+                      <X size={14} />
+                    ) : (
+                      <step.icon size={14} />
+                    )}
+                  </span>
+                  <span className="aiSearchRunStepText">
+                    <span className="aiSearchRunStepLabel">{step.label}</span>
+                    <span className="aiSearchRunStepState">{step.stateLabel}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Right: realtime log */}
+          <aside className="aiSearchRunLog" aria-label="实时执行记录">
+            <header className="aiSearchRunLogHead">
+              <h3>实时执行记录</h3>
+              <span
+                className={`aiSearchRunLogPulse ${
+                  isRunActive ? "live" : isRunComplete ? "done" : "idle"
+                }`}
+                aria-hidden="true"
+              >
+                {isRunActive
+                  ? "实时更新中"
+                  : isRunComplete
+                    ? failedQueryCount > 0 || strandedQueryCount > 0
+                      ? "已停止（含未完成）"
+                      : "已完成"
+                    : "未启动"}
+              </span>
+            </header>
+            <ol className="aiSearchRunLogList">
+              {activityLogs.slice(0, 4).map((log, index) => (
+                <li
+                  className={`aiSearchRunLogItem state-${log.state} palette-${index}`}
+                  key={`${log.title}-${index}`}
+                >
+                  <span className="aiSearchRunLogTime">
+                    {formatLogTime(index, Math.min(activityLogs.length, 4))}
+                  </span>
+                  <span className="aiSearchRunLogBullet" aria-hidden="true" />
+                  <span className="aiSearchRunLogText">
+                    <strong>{log.title}</strong>
+                    <em>{log.detail}</em>
+                  </span>
+                </li>
+              ))}
+              {activityLogs.length === 0 ? (
+                <li className="aiSearchRunLogItem state-pending palette-0">
+                  <span className="aiSearchRunLogTime">--:--</span>
+                  <span className="aiSearchRunLogBullet" aria-hidden="true" />
+                  <span className="aiSearchRunLogText">
+                    <strong>等待任务调度</strong>
+                    <em>{status}</em>
+                  </span>
+                </li>
+              ) : null}
+            </ol>
+          </aside>
+        </div>
+      </section>
+
+      {/* 客户列表 */}
+      <section className="aiPoolTableWrap aiSearchRunTableWrap" aria-label="客户列表">
+        <header className="aiSearchRunTableHead">
+          <h3>客户列表</h3>
+          <p>点击公司可查看完整邮箱、电话、来源 query 和评分原因</p>
+        </header>
+        {showLeadTableLoading ? (
+          <TableLoadingState
+            title={isPlanningSearchQueries ? "正在生成搜索指令" : "正在搜索候选客户"}
+            description={
+              isPlanningSearchQueries
+                ? `后端正在生成 ${plannedBatchQueryCount} 条搜索指令，完成后会自动开始搜索。`
+                : "正在等待后端搜索、清洗和评分，客户会陆续进入列表。"
+            }
+          />
+        ) : (
+          <div className="aiPoolTableScroll">
+            <table className="aiPoolTable">
               <thead>
                 <tr>
-                  <th>
-                    <span className="leadCheck" />
-                  </th>
-                  <th>公司名称</th>
-                  <th>推荐指数</th>
-                  <th>数据来源</th>
-                  <th>来源页</th>
-                  <th>国家/地区</th>
-                  <th>客户简述</th>
-                  <th>电话</th>
-                  <th>邮箱</th>
-                  <th>官网</th>
-                  <th>社媒</th>
-                  <th>地址</th>
+                  <th className="col-company">公司名称</th>
+                  <th className="col-country">国家/地区</th>
+                  <th className="col-type">类型</th>
+                  <th className="col-score">推荐指数</th>
+                  <th className="col-email">邮箱</th>
+                  <th className="col-phone">电话</th>
+                  <th className="col-website">官网</th>
+                  <th className="col-status">状态</th>
+                  <th className="col-action">操作</th>
                 </tr>
               </thead>
               <tbody>
-                {leads.length ? (
-                  pagedLeads.map((lead) => (
-                    <tr key={lead.id}>
-                      <td>
-                        <button
-                          className={
-                            lead.id === selectedLeadId
-                              ? "leadCheckButton active"
-                              : "leadCheckButton"
-                          }
-                          type="button"
-                          aria-label={`选择 ${lead.companyName}`}
-                          onClick={() => onSelectLead(lead.id)}
-                        />
-                      </td>
-                      <td className="leadCompanyCell">{lead.companyName}</td>
-                      <td>
-                        <span className="stars">{scoreStars(lead.score)}</span>
-                      </td>
-                      <td>
-                        {lead.source} <span className="realBadge">实时</span>
-                      </td>
-                      <td className="leadSourceCell" title={lead.sourceUrl}>
-                        {lead.sourceUrl ? (
-                          <a
-                            className="leadSourceLink"
-                            href={lead.sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            aria-label={`打开来源页 ${lead.sourceUrl}`}
+                {currentBatchLeads.length ? (
+                  pagedLeads.map((lead) => {
+                    const emails = pickFirstContactValue(lead.raw.contacts, "email");
+                    const phones = pickFirstContactValue(lead.raw.contacts, "phone");
+                    const websiteShort = formatWebsiteShort(lead.website);
+                    const websiteFull = lead.website && lead.website !== "—" ? lead.website : "";
+                    const inCrm = Boolean(lead.raw.crmLead);
+                    const isFresh = lead.stage === "新发现" || lead.stage === "main";
+                    return (
+                      <tr
+                        key={lead.id}
+                        className={[
+                          isFresh ? "is-fresh" : "",
+                          selectedLeadId === lead.id ? "selected" : ""
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        onClick={() => onSelectLead(lead.id)}
+                      >
+                        <td className="col-company" title={lead.companyName}>
+                          {isFresh ? <span className="aiSearchRunFreshBadge">新增</span> : null}
+                          <span className="aiSearchRunCompanyName">{lead.companyName}</span>
+                        </td>
+                        <td className="col-country" title={lead.country}>
+                          {lead.country}
+                        </td>
+                        <td className="col-type" title={lead.tag}>
+                          {lead.tag}
+                        </td>
+                        <td className="col-score">
+                          <span className="aiSearchRunScoreStars" aria-hidden="true">
+                            {renderStars(lead.score / 20)}
+                          </span>
+                          <span className="aiSearchRunScore">{lead.score}</span>
+                        </td>
+                        <td
+                          className="col-email"
+                          title={emails.count ? emails.all.join("\n") : "暂无邮箱"}
+                        >
+                          {emails.count > 0 ? (
+                            <span className="aiSearchRunContactValue">
+                              <span className="aiSearchRunContactText">{emails.first}</span>
+                              {emails.count > 1 ? (
+                                <span className="aiSearchRunContactMore">…</span>
+                              ) : null}
+                            </span>
+                          ) : (
+                            <span className="aiSearchRunContactMuted">—</span>
+                          )}
+                        </td>
+                        <td
+                          className="col-phone"
+                          title={phones.count ? phones.all.join("\n") : "暂无电话"}
+                        >
+                          {phones.count > 0 ? (
+                            <span className="aiSearchRunContactValue">
+                              <span className="aiSearchRunContactText">{phones.first}</span>
+                              {phones.count > 1 ? (
+                                <span className="aiSearchRunContactMore">…</span>
+                              ) : null}
+                            </span>
+                          ) : (
+                            <span className="aiSearchRunContactMuted">—</span>
+                          )}
+                        </td>
+                        <td className="col-website" title={websiteFull || websiteShort}>
+                          {websiteFull ? (
+                            <a
+                              className="aiSearchRunWebsite"
+                              href={websiteHref(websiteFull)}
+                              onClick={(event) => event.stopPropagation()}
+                              rel="noreferrer noopener"
+                              target="_blank"
+                            >
+                              {websiteShort}
+                            </a>
+                          ) : (
+                            <span className="aiSearchRunWebsite">—</span>
+                          )}
+                        </td>
+                        <td className="col-status">
+                          <span className={`aiPoolStatusPill ${inCrm ? "synced" : "pending"}`}>
+                            {inCrm ? "已加入CRM" : "待加入CRM"}
+                          </span>
+                        </td>
+                        <td className="col-action">
+                          <button
+                            type="button"
+                            className="aiPoolRowAction"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onOpenLeadDetail(lead);
+                            }}
                           >
-                            <span>{lead.sourceLabel}</span>
-                            <ExternalLink size={14} aria-hidden="true" />
-                          </a>
-                        ) : (
-                          "-"
-                        )}
-                      </td>
-                      <td title={lead.country}>{lead.country}</td>
-                      <td title={lead.tag}>{lead.tag}</td>
-                      <td title={lead.phone}>{lead.phone}</td>
-                      <td title={lead.email}>{lead.email}</td>
-                      <td title={lead.website}>{lead.website}</td>
-                      <td title={lead.social}>{lead.social}</td>
-                      <td>{lead.address}</td>
-                    </tr>
-                  ))
+                            详情
+                          </button>
+                          <button
+                            type="button"
+                            className="aiPoolRowAction"
+                            onClick={() => onOpenCrm(lead.id)}
+                            disabled={inCrm}
+                            title={inCrm ? "已加入 CRM" : "加入 CRM"}
+                          >
+                            {inCrm ? "已加入" : "加入 CRM"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 ) : (
                   <tr>
-                    <td className="leadEmptyCell" colSpan={12}>
-                      {searching
-                        ? "正在搜索并清洗候选客户..."
-                        : "暂无候选客户。创建任务后会自动执行本轮全部搜索指令。"}
+                    <td className="leadEmptyCell" colSpan={9}>
+                      <div className="aiSearchRunEmptyState">
+                        <span className="aiSearchRunEmptyIcon" aria-hidden="true">
+                          <Search size={20} />
+                        </span>
+                        <strong>
+                          {isPlanningSearchQueries
+                            ? "正在生成搜索指令"
+                            : isRunActive
+                              ? "正在搜索并清洗候选客户"
+                              : "暂无候选客户"}
+                        </strong>
+                        <span>
+                          {isPlanningSearchQueries
+                            ? `生成 ${plannedBatchQueryCount} 条搜索指令后，客户会在清洗完成时出现在这里。`
+                            : isRunActive
+                              ? "搜索结果会按客户质量陆续进入列表。"
+                              : "任务创建后会先生成搜索指令，再自动执行搜索。"}
+                        </span>
+                      </div>
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
-          <div className="leadActionBar">
-            <div className="leadTools">
-              <button
-                className="leadAction"
-                type="button"
-                data-open-mail="true"
-                onClick={onOpenMail}
-                disabled={running || !hasActionableLeads}
-              >
-                ✉ 发邮件
-              </button>
-              <button className="leadAction" type="button" data-open-crm="true" onClick={onOpenCrm}>
-                <Database size={16} aria-hidden="true" /> 加入 CRM
-              </button>
-            </div>
+        )}
+        <footer className="aiPoolTableFooter">
+          {currentBatchLeads.length ? (
+            <p className="aiPoolTableFootHint">
+              显示 {leadRangeStart}-{leadRangeEnd} / {currentBatchLeads.length}
+              <span className="aiPoolTableFootSep">·</span>
+              主客户 {actionableLeads.length} 条，ICP 75+ {qualifiedCount} 条
+            </p>
+          ) : (
+            <p className="aiPoolTableFootHint aiPoolTableFootHintMuted">
+              {isPlanningSearchQueries
+                ? `正在生成 ${plannedBatchQueryCount} 条搜索指令，候选客户会在搜索后陆续进入列表`
+                : isRunActive
+                  ? "正在搜索并清洗候选客户，结果会陆续进入列表"
+                  : "暂无候选客户，任务执行后客户会进入列表"}
+            </p>
+          )}
+          {currentBatchLeads.length ? (
             <div className="projectPager leadPager">
-              <span>
-                主客户 {actionableLeads.length} 条，ICP 75+ {qualifiedCount} 条
-                {leads.length ? ` · 当前显示 ${leadRangeStart}-${leadRangeEnd}` : ""}
-              </span>
+              <span>每页 {leadPageSize}</span>
               <button
                 type="button"
                 onClick={() => changeLeadPage(leadPage - 1)}
-                disabled={leadPage <= 1 || !leads.length}
+                disabled={leadPage <= 1}
               >
                 上一页
               </button>
@@ -1668,350 +4228,123 @@ function AiWorkerConversation({
               <button
                 type="button"
                 onClick={() => changeLeadPage(leadPage + 1)}
-                disabled={leadPage >= leadPageCount || !leads.length}
+                disabled={leadPage >= leadPageCount}
               >
                 下一页
               </button>
             </div>
-          </div>
-        </section>
+          ) : null}
+        </footer>
+      </section>
 
-        <section className="crmSyncPreview">
-          <div className="crmSyncHead">
-            <div>
-              <span>CRM 同步预览</span>
-              <strong>
-                {crmSyncedCount
-                  ? `已同步 ${crmSyncedCount} 家客户，剩余 ${Math.max(crmRows.length - crmSyncedCount, 0)} 家待同步。`
-                  : `本次将同步 ${crmRows.length} 家客户，字段已按 CRM 客户库整理。`}
-              </strong>
+      {/* 下一步转化 — 三张转化卡（按设计图）：色块 icon + 标题 +
+          完整两行描述 + 卡片底部左侧的彩色按钮。 */}
+      <section className="aiSearchRunBottomBar" aria-label="下一步转化">
+        <h2 className="aiSearchRunBottomTitle">下一步转化</h2>
+        <div className="aiSearchRunBottomCards">
+          <article className="aiSearchRunBottomCard tone-blue">
+            <div className="aiPoolIcon aiPoolIconBlue" aria-hidden="true">
+              <span className="aiPoolIconText">CRM</span>
             </div>
-            <button
-              className="crmSyncOpen"
-              type="button"
-              data-open-crm-preview="true"
-              onClick={onOpenCrm}
-            >
-              查看 CRM 数据 <ExternalLink size={15} aria-hidden="true" />
-            </button>
-          </div>
+            <div className="aiSearchRunBottomBody">
+              <p className="aiSearchRunBottomCardTitle">CRM 同步</p>
+              <p className="aiSearchRunBottomMeta">
+                <strong>{Math.max(leads.length - crmSyncedCount, 0)}</strong>{" "}
+                家客户待同步，字段已整理，可进入客户库。
+              </p>
+              <button
+                type="button"
+                className="aiSearchRunBottomCta tone-blue"
+                onClick={() => onOpenCrm()}
+              >
+                确认同步
+              </button>
+            </div>
+          </article>
+
+          <article className="aiSearchRunBottomCard tone-green">
+            <div className="aiPoolIcon aiPoolIconGreen" aria-hidden="true">
+              <Mail size={20} />
+            </div>
+            <div className="aiSearchRunBottomBody">
+              <p className="aiSearchRunBottomCardTitle">邮件触达</p>
+              <p className="aiSearchRunBottomMeta">
+                <strong>{actionableLeads.length}</strong> 封邮件待确认，主题：中国 B2B
+                工厂产品推荐。
+              </p>
+              <button
+                type="button"
+                className="aiSearchRunBottomCta tone-green"
+                onClick={onOpenMail}
+                disabled={running || !hasActionableLeads}
+              >
+                发送邮件
+              </button>
+            </div>
+          </article>
+
+          <article className="aiSearchRunBottomCard tone-orange">
+            <div className="aiPoolIcon aiPoolIconOrange" aria-hidden="true">
+              <Bell size={20} />
+            </div>
+            <div className="aiSearchRunBottomBody">
+              <p className="aiSearchRunBottomCardTitle">跟进提醒</p>
+              <p className="aiSearchRunBottomMeta">
+                <strong>{pendingFollowupCount}</strong> 家客户需跟进，最近提醒：3 天后。
+              </p>
+              <button
+                type="button"
+                className="aiSearchRunBottomCta tone-orange"
+                disabled
+                title="跟进提醒功能开发中"
+              >
+                查看跟进
+              </button>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      {showBackConfirm ? (
+        <div className="aiSearchLeaveBackdrop" role="presentation">
           <div
-            className="crmPreviewThumb"
-            role="button"
-            tabIndex={0}
-            aria-label="打开 CRM 数据弹窗"
-            data-crm-preview-thumb="true"
-            onClick={onOpenCrm}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                onOpenCrm();
-              }
-            }}
+            className="aiSearchLeaveDialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-search-leave-title"
           >
-            <div className="crmPreviewStats">
-              <span>
-                <b>{crmSyncedCount}</b>已同步 CRM
-              </span>
-              <span>
-                <b>{Math.max(crmRows.length - crmSyncedCount, 0)}</b>待同步客户
-              </span>
-              <span>
-                <b>{pendingFollowupCount}</b>待跟进提醒
-              </span>
-            </div>
-            <div className="crmPreviewRows">
-              {crmRows.length ? (
-                crmRows.slice(0, 3).map((row) => (
-                  <div className="crmPreviewRow" key={row.id}>
-                    <strong>{row.companyName}</strong>
-                    <span>{row.country}</span>
-                    <span>{row.industry}</span>
-                    <span>{row.stage}</span>
-                    <b>{row.score}</b>
-                  </div>
-                ))
-              ) : (
-                <div className="crmPreviewRow">
-                  <strong>等待候选客户</strong>
-                  <span>-</span>
-                  <span>搜索后生成</span>
-                  <span>待处理</span>
-                  <b>0</b>
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
-
-        <p className="projectSummary">
-          {sentCount
-            ? `已完成 ${sentCount} 封 Gmail 发送，${crmSyncedCount} 家客户已同步 CRM，${pendingFollowupCount} 个 3 天后跟进提醒已创建。`
-            : leads.length
-              ? `我已为您找到 ${actionableLeads.length} 家主客户，其中 ${qualifiedCount} 家达到 ICP 75 分以上。下一步可以选择客户进入邮件触达。`
-              : "任务创建后，系统会先生成搜索策略，再调用搜索接口清洗候选客户。当前页面已经接入真实任务链路，等待首批候选客户返回。"}
-        </p>
-
-        <section className="projectCard resultCard">
-          <table className="taskTable">
-            <thead>
-              <tr>
-                <th>群发任务</th>
-                <th>发送状态</th>
-                <th>邮件数量</th>
-                <th>成功数/打开数</th>
-                <th>邮件主题</th>
-                <th>任务状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>{currentTask?.id ? currentTask.id.slice(0, 8).toUpperCase() : "待创建"}</td>
-                <td>
-                  <span className="statusTag">
-                    {sentCount ? "已发送" : leads.length ? "待确认" : "待搜索"}
-                  </span>
-                </td>
-                <td>{leads.length}</td>
-                <td>{sentCount}封/0封</td>
-                <td>中国 B2B 工厂产品推荐</td>
-                <td>{currentTask?.status ?? "pending"}</td>
-                <td>
-                  <button
-                    className="tableSendBtn"
-                    type="button"
-                    data-open-mail="true"
-                    onClick={onOpenMail}
-                    disabled={running || !hasActionableLeads}
-                  >
-                    发送
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section className="finalSummary">
-          <h3>本次任务总结</h3>
-          <p>
-            系统已基于任务文本、产品画像、客户画像和高级搜索策略库生成关键词与搜索 query。
-            搜索接口返回候选客户后，会自动清洗公司、联系人、ICP 分数，并可进入人工确认和开发信生成。
-          </p>
-          <p>
-            邮件发送前仍会打开确认弹窗；确认后客户可同步进入 CRM，并按 3 天后跟进的节奏继续推进。
-          </p>
-        </section>
-      </div>
-
-      <div className="projectComposer">
-        <label className="srOnly" htmlFor="project-command">
-          继续输入任务
-        </label>
-        <textarea
-          aria-label="继续输入任务"
-          id="project-command"
-          name="command"
-          placeholder="请输入内容... 例如：重新执行搜索 / 打开邮件确认弹窗"
-          value={command}
-          onChange={(event) => onCommandChange(event.target.value)}
-        />
-        <div className="composerBottom">
-          <label className="srOnly" htmlFor="project-hosting-mode">
-            托管模式
-          </label>
-          <select
-            aria-label="托管模式"
-            defaultValue="semi"
-            id="project-hosting-mode"
-            name="hostingMode"
-          >
-            <option value="semi">半托管</option>
-            <option value="full">全托管</option>
-          </select>
-          <button
-            className="sendCircle"
-            type="button"
-            onClick={onSendCommand}
-            disabled={running || command.trim().length === 0}
-          >
-            ↑
-          </button>
-        </div>
-      </div>
-    </>
-  );
-}
-
-type AgentSearchActivityProps = {
-  active: boolean;
-  steps: ActivityStep[];
-  metrics: ActivityMetric[];
-  queryCount: number;
-  executedCount: number;
-  resultCount: number;
-  leadCount: number;
-  leadQualityCounts: LeadQualityCounts;
-  logs: ActivityLog[];
-  hasError: boolean;
-};
-
-function AgentSearchActivity({
-  active,
-  steps,
-  metrics,
-  queryCount,
-  executedCount,
-  resultCount,
-  leadCount,
-  leadQualityCounts,
-  logs,
-  hasError
-}: AgentSearchActivityProps) {
-  const activeMessages = [
-    "正在拆解目标市场和客户画像",
-    "正在调用 Brave Search 获取官网/目录页",
-    "正在标记文章页、社媒页和电商风险",
-    "正在合并域名并写入候选池",
-    "正在计算 ICP 分数和推荐理由"
-  ];
-  const [messageIndex, setMessageIndex] = useState(0);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-
-  useEffect(() => {
-    if (!active) {
-      setMessageIndex(0);
-      setElapsedSeconds(0);
-      return;
-    }
-
-    const messageTimer = window.setInterval(() => {
-      setMessageIndex((index) => (index + 1) % activeMessages.length);
-    }, 1400);
-    const elapsedTimer = window.setInterval(() => {
-      setElapsedSeconds((seconds) => seconds + 1);
-    }, 1000);
-
-    return () => {
-      window.clearInterval(messageTimer);
-      window.clearInterval(elapsedTimer);
-    };
-  }, [active, activeMessages.length]);
-
-  const headline = active
-    ? activeMessages[messageIndex]
-    : leadQualityCounts.rawEvidence
-      ? `${leadQualityCounts.rawEvidence} 条原始候选证据，${leadQualityCounts.main} 条主客户`
-      : resultCount
-        ? `本轮搜索已完成，命中 ${resultCount} 条 Brave 原始结果`
-        : leadCount
-          ? `已有 ${leadCount} 条主客户写入列表`
-          : hasError
-            ? "搜索接口失败，任务已保留"
-            : "等待搜索任务启动";
-  const subline = active
-    ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令，清洗后会拆分为主客户、待国家复核和拒绝。`
-    : leadQualityCounts.rawEvidence
-      ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；${formatLeadQualitySummary(leadQualityCounts)}。`
-      : resultCount
-        ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令。`
-        : leadCount
-          ? `已执行 ${executedCount}/${queryCount || "-"} 条搜索指令；接口失败时会保留已返回候选，可重新执行搜索补齐。`
-          : hasError
-            ? `已保留 ${queryCount || "-"} 条搜索指令，修复配置或网络后可重新执行搜索。`
-            : queryCount
-              ? `已生成 ${queryCount} 条搜索指令，将一次性执行本轮全部 query。`
-              : "创建任务后会自动生成搜索指令并开始执行。";
-  const workText = active
-    ? headline
-    : resultCount || leadCount
-      ? "搜索记录已生成"
-      : hasError
-        ? "搜索失败，可重新执行"
-        : "等待分配搜索任务";
-
-  return (
-    <section
-      className={active ? "agentSearchActivity isActive" : "agentSearchActivity"}
-      aria-live="polite"
-      data-search-activity="true"
-    >
-      <div className="agentActivityHeader">
-        <div className="agentActivityMark" aria-hidden="true">
-          <Search size={18} />
-        </div>
-        <div className="agentActivityCopy">
-          <strong>{headline}</strong>
-          <span>{subline}</span>
-        </div>
-        {active ? (
-          <span className="agentActivityDots" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </span>
-        ) : (
-          <span className={hasError ? "agentActivityBadge error" : "agentActivityBadge"}>
-            {hasError ? "需重试" : resultCount ? "已完成" : "待启动"}
-          </span>
-        )}
-      </div>
-
-      <div className="agentActivityRail">
-        {steps.map((step, index) => (
-          <div className={`agentActivityStep ${step.state}`} key={step.title}>
-            <span className="agentStepDot">
-              {step.state === "done" ? "✓" : step.state === "failed" ? "!" : index + 1}
+            <span className="aiSearchLeaveIcon" aria-hidden="true">
+              <Clock size={22} />
             </span>
-            <strong>{step.title}</strong>
-            <small>{step.detail}</small>
+            <div className="aiSearchLeaveBody">
+              <h2 id="ai-search-leave-title">搜索会继续在后台执行</h2>
+              <p>
+                离开这个页面不会停止当前搜索。回到工作台后，你可以在“客户池”里找到这个任务，点击“搜索记录”继续查看实时进度。
+              </p>
+            </div>
+            <div className="aiSearchLeaveActions">
+              <button
+                type="button"
+                className="aiSearchLeaveSecondary"
+                onClick={() => setShowBackConfirm(false)}
+              >
+                留在搜索页
+              </button>
+              <button
+                type="button"
+                className="aiSearchLeavePrimary"
+                onClick={() => {
+                  setShowBackConfirm(false);
+                  onBack();
+                }}
+              >
+                返回工作台
+              </button>
+            </div>
           </div>
-        ))}
-      </div>
-
-      {active ? (
-        <div className="agentActivityScan" aria-hidden="true">
-          <span />
-          <span />
-          <span />
         </div>
       ) : null}
-
-      <div className="agentActivityMetrics">
-        {metrics.map((metric) => (
-          <div className={`agentActivityMetric ${metric.tone ?? "gray"}`} key={metric.label}>
-            <span>{metric.label}</span>
-            <strong>{metric.value}</strong>
-          </div>
-        ))}
-      </div>
-
-      <div className={active ? "agentActivityWorkbar isActive" : "agentActivityWorkbar"}>
-        <span>正在工作:</span>
-        <strong>{workText}</strong>
-        <b>{active ? formatElapsedTime(elapsedSeconds) : "--:--"}</b>
-        <em>
-          {active
-            ? "AI正在任务执行"
-            : resultCount || leadCount
-              ? "AI任务已记录"
-              : hasError
-                ? "执行失败"
-                : "等待启动"}
-        </em>
-      </div>
-
-      <div className="agentActivityLogs" aria-label="AI 执行日志">
-        {logs.map((log) => (
-          <div className={`agentActivityLog ${log.state}`} key={log.title}>
-            <span className="agentLogDot" aria-hidden="true" />
-            <strong>{log.title}</strong>
-            <small>{log.detail}</small>
-          </div>
-        ))}
-      </div>
-    </section>
+    </div>
   );
 }
 
@@ -2105,6 +4438,19 @@ const planningStepNames = [
 const searchStepNames = ["brave_search", "normalize_leads", "extract_contacts", "score_icp"];
 
 function isBackendTaskActive(task: LeadTask) {
+  // 2026-05 LeadHunt 2.0: terminal task.status wins over stale agent
+  // step rows. A failed/completed/cancelled/paused task must never be
+  // treated as active even if a worker forgot to flip its leftover
+  // step rows from "running" to a final state — that's exactly what
+  // pinned the search page in the P0 bug.
+  if (
+    task.status === "failed" ||
+    task.status === "completed" ||
+    task.status === "cancelled" ||
+    task.status === "paused"
+  ) {
+    return false;
+  }
   if (task.status === "running" || task.status === "pending") {
     return true;
   }
@@ -2221,335 +4567,6 @@ function normalizeCreatedTask(payload: CreateLeadTaskResponse): LeadTask {
   };
 }
 
-function buildKeywordRows(task: LeadTask | null, taskSurfaceActive = false): KeywordRow[] {
-  const pendingRows = fallbackKeywordRows.map((row) => keywordRow(row.label, [], ["正在生成"]));
-  const searchInstructionRow = keywordRow(
-    "搜索指令",
-    unique(collectSearchQueries(task).map((query) => query.query)),
-    task || taskSurfaceActive ? ["正在生成"] : fallbackSearchQueries
-  );
-
-  if (!task) {
-    return taskSurfaceActive
-      ? [...pendingRows, searchInstructionRow]
-      : [...fallbackKeywordRows, searchInstructionRow];
-  }
-
-  const groups = task.inputPayload?.keywordGroups ?? firstKeywordGroups(task.searchQueries) ?? {};
-
-  return [
-    keywordRow(
-      "产品扩展词",
-      [...(groups.productTerms ?? []), ...(groups.longTailProductTerms ?? [])],
-      ["正在生成"]
-    ),
-    keywordRow("客户类型词", groups.customerIntentTerms, ["正在生成"]),
-    keywordRow("品牌/型号词", groups.brandTerms, ["正在生成"]),
-    keywordRow(
-      "场景/市场词",
-      [...(groups.scenarioTerms ?? []), ...(groups.marketTerms ?? [])],
-      ["正在生成"]
-    ),
-    keywordRow("ICP 风险词", groups.excludeTerms, ["正在生成"]),
-    searchInstructionRow
-  ];
-}
-
-function buildProfileSourceRows(task: LeadTask | null): ProfileSourceRow[] {
-  const signals = task?.inputPayload?.profileSignals;
-  const siteEvidence = task?.inputPayload?.siteEvidence;
-  if (!signals && !siteEvidence) {
-    return [];
-  }
-
-  const rows: ProfileSourceRow[] = [];
-  const productSources = siteEvidence?.productSites?.length
-    ? formatSiteEvidenceValues(siteEvidence.productSites)
-    : formatSourceUrls(signals?.productUrlsUsed);
-  const referenceSources = siteEvidence?.referenceCustomerSites?.length
-    ? formatSiteEvidenceValues(siteEvidence.referenceCustomerSites)
-    : formatSourceUrls(signals?.referenceCustomerUrlsUsed);
-
-  if (productSources.length) {
-    rows.push({
-      label: siteEvidence?.productSites?.length ? "产品网页证据" : "产品画像URL",
-      values: productSources
-    });
-  }
-  if (referenceSources.length) {
-    rows.push({
-      label: siteEvidence?.referenceCustomerSites?.length ? "客户网页证据" : "客户画像URL",
-      values: referenceSources
-    });
-  }
-  if (siteEvidence?.summary?.attempted) {
-    rows.push({
-      label: "读取状态",
-      values: [
-        `已读取 ${siteEvidence.summary.read ?? 0}/${siteEvidence.summary.attempted}`,
-        `失败 ${siteEvidence.summary.failed ?? 0}`
-      ]
-    });
-  }
-  if (signals?.marketSelection) {
-    const selectedMarkets = signals.marketSelection.targetMarkets ?? [];
-    const secondaryMarkets = signals.marketSelection.secondaryMarkets ?? [];
-    const promptMarkets = signals.marketSelection.promptMarkets ?? [];
-    const profileMarkets = signals.marketSelection.profileMarkets ?? [];
-    rows.push({
-      label: "目标市场来源",
-      values: [
-        `主市场：${selectedMarkets.length ? selectedMarkets.join(", ") : "-"}`,
-        `次级池：${secondaryMarkets.length ? secondaryMarkets.join(", ") : "-"}`,
-        `用户输入：${promptMarkets.length ? promptMarkets.join(", ") : "-"}`,
-        `画像保存：${profileMarkets.length ? profileMarkets.join(", ") : "-"}`,
-        `来源：${formatMarketSource(signals.marketSelection.marketSource)}`
-      ]
-    });
-  }
-  if (signals?.qualityGate) {
-    const executed = signals.qualityGate.executedQueryCount ?? 0;
-    const remaining = signals.qualityGate.remainingQueries ?? 0;
-    rows.push({
-      label: "质量诊断",
-      values: [
-        `前 ${executed} 条质量波动，系统保留原搜索计划并继续执行剩余 ${remaining} 条 query。`,
-        ...(signals.qualityGate.reasons?.length
-          ? [`原因：${signals.qualityGate.reasons.join(", ")}`]
-          : [])
-      ]
-    });
-  }
-  if (signals?.qualityFallbackSuggestion?.queryCount) {
-    rows.push({
-      label: "Fallback 建议",
-      values: [
-        `状态：${signals.qualityFallbackSuggestion.status === "suggestion_only" ? "仅建议，未改写 pending" : (signals.qualityFallbackSuggestion.status ?? "-")}`,
-        `建议追加：${signals.qualityFallbackSuggestion.queryCount} 条`,
-        ...formatFallbackSuggestionSamples(signals.qualityFallbackSuggestion.sampleQueries)
-      ]
-    });
-  }
-  if (signals?.aiPlanning?.rejectedQueryCount) {
-    rows.push({
-      label: "Query 守门",
-      values: [`已拦截 ${signals.aiPlanning.rejectedQueryCount} 条异常 GPT query`]
-    });
-  }
-  if (signals?.crmSampleCount) {
-    rows.push({ label: "CRM 样本", values: [`${signals.crmSampleCount} 个已选客户`] });
-  }
-
-  return rows;
-}
-
-function formatMarketSource(source: string | undefined) {
-  const labels: Record<string, string> = {
-    prompt: "用户输入优先",
-    profile: "客户画像默认",
-    merged: "合并",
-    none: "未识别"
-  };
-  return source ? (labels[source] ?? source) : "-";
-}
-
-function formatFallbackSuggestionSamples(
-  samples: NonNullable<ProfileSignals["qualityFallbackSuggestion"]>["sampleQueries"]
-) {
-  return (samples ?? [])
-    .slice(0, 2)
-    .map((item) => `建议：${[item.country, item.query].filter(Boolean).join(" | ")}`);
-}
-
-function keywordRow(
-  label: string,
-  values: string[] | undefined,
-  fallback: string[] = []
-): KeywordRow {
-  return {
-    label,
-    values: (values?.length ? values : fallback).slice(0, label === "搜索指令" ? 8 : 6)
-  };
-}
-
-function collectSearchQueries(task: LeadTask | null): SearchQuery[] {
-  const merged = new Map<string, SearchQuery>();
-
-  for (const query of [
-    ...(task?.inputPayload?.searchQueries ?? []),
-    ...(task?.searchQueries ?? [])
-  ]) {
-    if (!query.query?.trim()) {
-      continue;
-    }
-    const key = query.query.trim();
-    const existing = merged.get(key);
-    merged.set(key, mergeSearchQuery(existing, query));
-  }
-
-  return Array.from(merged.values());
-}
-
-function mergeSearchQuery(existing: SearchQuery | undefined, next: SearchQuery): SearchQuery {
-  if (!existing) {
-    return next;
-  }
-
-  return {
-    ...existing,
-    ...next,
-    provider: next.provider ?? existing.provider,
-    keywordGroups: next.keywordGroups ?? existing.keywordGroups,
-    country: next.country ?? existing.country,
-    operatorSource: next.operatorSource ?? existing.operatorSource,
-    operatorName: next.operatorName ?? existing.operatorName,
-    strategyTemplate: next.strategyTemplate ?? existing.strategyTemplate,
-    templateId: next.templateId ?? existing.templateId,
-    resultCount: next.resultCount ?? existing.resultCount,
-    qualifiedCount: next.qualifiedCount ?? existing.qualifiedCount,
-    effectivenessScore: next.effectivenessScore ?? existing.effectivenessScore,
-    searchResults: next.searchResults ?? existing.searchResults
-  };
-}
-
-function buildActivitySteps({
-  creating,
-  searching,
-  currentTask,
-  searchResult,
-  leads,
-  leadQualityCounts,
-  hasError
-}: {
-  creating: boolean;
-  searching: boolean;
-  currentTask: LeadTask | null;
-  searchResult: SearchRunResult | null;
-  leads: DisplayLead[];
-  leadQualityCounts: LeadQualityCounts;
-  hasError: boolean;
-}): ActivityStep[] {
-  const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount =
-    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
-    0;
-  const actionableLeads = leads.filter(isActionableDisplayLead);
-  const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
-  const hasReturnedLeads = leads.length > 0;
-
-  return [
-    {
-      title: "任务规划",
-      detail: creating ? "读取画像并拆解目标市场" : currentTask ? "任务上下文已生成" : "等待任务",
-      state: creating ? "active" : currentTask ? "done" : "pending"
-    },
-    {
-      title: "生成指令",
-      detail: queryCount ? `已生成 ${queryCount} 条 query` : creating ? "组合关键词" : "等待关键词",
-      state: queryCount ? "done" : creating ? "active" : "pending"
-    },
-    {
-      title: "Brave 搜索",
-      detail: searching
-        ? `正在执行 ${executedCount}/${queryCount || "-"} 条`
-        : searchResult
-          ? `执行 ${searchResult.executedQueries} 条，命中 ${searchResult.resultCount} 条`
-          : executedCount
-            ? `已执行 ${executedCount} 条，候选已回写`
-            : hasError
-              ? "接口失败，可重新执行"
-              : "等待搜索",
-      state: searching
-        ? "active"
-        : searchResult || executedCount
-          ? "done"
-          : hasError
-            ? "failed"
-            : "pending"
-    },
-    {
-      title: "清洗候选",
-      detail: searchResult
-        ? formatLeadQualitySummary(leadQualityCounts)
-        : hasReturnedLeads
-          ? `已有 ${leads.length} 条主客户进入表格`
-          : searching
-            ? "标记社媒/文章/电商风险"
-            : hasError
-              ? "未返回候选，等待重试"
-              : "等待结果",
-      state: searching
-        ? "active"
-        : searchResult || hasReturnedLeads
-          ? "done"
-          : hasError
-            ? "failed"
-            : "pending"
-    },
-    {
-      title: "ICP 评分",
-      detail: leads.length
-        ? `已产出 ${leads.length} 条主客户，${qualifiedCount} 条 75+`
-        : searching
-          ? "正在评分和归因"
-          : "等待清洗",
-      state: leads.length ? "done" : searching ? "active" : "pending"
-    }
-  ];
-}
-
-function buildActivityMetrics({
-  currentTask,
-  searchResult,
-  leads,
-  leadQualityCounts
-}: {
-  currentTask: LeadTask | null;
-  searchResult: SearchRunResult | null;
-  leads: DisplayLead[];
-  leadQualityCounts: LeadQualityCounts;
-}): ActivityMetric[] {
-  const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount =
-    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
-    0;
-  const failedQueries = searchResult?.failedQueries ?? 0;
-  const reviewOrRejectedCount =
-    leadQualityCounts.needsCountryReview +
-    leadQualityCounts.intelligenceReview +
-    leadQualityCounts.evidenceReview +
-    leadQualityCounts.rejected;
-
-  return [
-    {
-      label: "搜索指令",
-      value: queryCount ? `${executedCount}/${queryCount}` : "待生成",
-      tone: "blue"
-    },
-    {
-      label: "Brave 命中",
-      value: searchResult
-        ? String(searchResult.resultCount)
-        : executedCount
-          ? `已执行 ${executedCount}`
-          : "等待",
-      tone: "orange"
-    },
-    {
-      label: "主客户",
-      value: String(leadQualityCounts.main || leads.length),
-      tone: "green"
-    },
-    {
-      label: failedQueries ? "失败指令" : "待复核/拒绝",
-      value: searchResult
-        ? String(failedQueries || reviewOrRejectedCount)
-        : String(reviewOrRejectedCount),
-      tone: failedQueries ? "orange" : "gray"
-    }
-  ];
-}
-
 function buildActivityLogs({
   creating,
   searching,
@@ -2568,9 +4585,17 @@ function buildActivityLogs({
   hasError: boolean;
 }): ActivityLog[] {
   const queryCount = currentTask?.searchQueries?.length ?? 0;
-  const executedCount =
-    currentTask?.searchQueries?.filter((query) => query.executionStatus === "completed").length ??
-    0;
+  // 2026-05 polish: same as the conversation view — count completed +
+  // failed + running so the "数据搜索中 — 正在执行 N/M" log line moves
+  // as soon as Brave work begins, instead of waiting for the worker
+  // pool to flip executionStatus to "completed" after qualification.
+  const completedQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "completed").length ?? 0;
+  const failedQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "failed").length ?? 0;
+  const runningQueryCount =
+    currentTask?.searchQueries?.filter((q) => q.executionStatus === "running").length ?? 0;
+  const executedCount = completedQueryCount + failedQueryCount + runningQueryCount;
   const actionableLeads = leads.filter(isActionableDisplayLead);
   const qualifiedCount = actionableLeads.filter((lead) => lead.score >= 75).length;
   const hasTask = Boolean(currentTask);
@@ -2658,18 +4683,6 @@ function formatHistoryDate(value: string) {
   }
 }
 
-function formatElapsedTime(totalSeconds: number) {
-  const minutes = Math.floor(totalSeconds / 60)
-    .toString()
-    .padStart(2, "0");
-  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
-  return `${minutes}:${seconds}`;
-}
-
-function firstKeywordGroups(queries: SearchQuery[] | undefined) {
-  return queries?.find((query) => query.keywordGroups)?.keywordGroups ?? null;
-}
-
 function summarizeSearchResultFromTask(task: LeadTask): SearchRunResult {
   const completedQueries =
     task.searchQueries?.filter((query) => query.executionStatus === "completed") ?? [];
@@ -2703,60 +4716,26 @@ function summarizeSearchResultFromTask(task: LeadTask): SearchRunResult {
   };
 }
 
-function buildDisplaySearchResults(task: LeadTask | null): DisplaySearchResult[] {
-  const rows: DisplaySearchResult[] = [];
-  const seen = new Set<string>();
-
-  for (const query of task?.searchQueries ?? []) {
-    for (const result of query.searchResults ?? []) {
-      const key = searchResultKey(result);
-      if (!key || seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      rows.push({
-        id: `${query.id ?? query.query}:${key}`,
-        title: result.title || formatWebsite(result.url) || "Untitled result",
-        domain: result.domain || formatWebsite(result.url),
-        url: result.url || "",
-        country: query.country ?? "-",
-        query: query.query,
-        status: query.executionStatus ?? "-"
-      });
-    }
-  }
-
-  return rows;
-}
-
-function searchResultKey(result: SearchResult) {
-  if (result.url) {
-    return result.url.replace(/\/$/, "").toLowerCase();
-  }
-
-  return result.title?.trim().toLowerCase() ?? "";
-}
-
 function buildDisplayLeads(task: LeadTask | null): DisplayLead[] {
   const targetMarkets = taskTargetMarkets(task);
   const candidates = task?.leadCandidates ?? [];
   const sortLeads = (leads: LeadCandidate[]) =>
     leads
-    .map((lead) => ({
-      displayLead: buildDisplayLead(lead),
-      priority: displayLeadPriority(lead, targetMarkets)
-    }))
-    .sort((left, right) => {
-      const adjustedDelta =
-        right.displayLead.score + right.priority - (left.displayLead.score + left.priority);
-      if (adjustedDelta !== 0) return adjustedDelta;
-      const scoreDelta = right.displayLead.score - left.displayLead.score;
-      if (scoreDelta !== 0) return scoreDelta;
-      const priorityDelta = right.priority - left.priority;
-      if (priorityDelta !== 0) return priorityDelta;
-      return left.displayLead.companyName.localeCompare(right.displayLead.companyName);
-    })
-    .map(({ displayLead }) => displayLead);
+      .map((lead) => ({
+        displayLead: buildDisplayLead(lead),
+        priority: displayLeadPriority(lead, targetMarkets)
+      }))
+      .sort((left, right) => {
+        const adjustedDelta =
+          right.displayLead.score + right.priority - (left.displayLead.score + left.priority);
+        if (adjustedDelta !== 0) return adjustedDelta;
+        const scoreDelta = right.displayLead.score - left.displayLead.score;
+        if (scoreDelta !== 0) return scoreDelta;
+        const priorityDelta = right.priority - left.priority;
+        if (priorityDelta !== 0) return priorityDelta;
+        return left.displayLead.companyName.localeCompare(right.displayLead.companyName);
+      })
+      .map(({ displayLead }) => displayLead);
 
   const mainLeads = sortLeads(candidates.filter(isDisplayableLeadCandidate));
   const reviewTailLimit = Math.max(8, 20 - mainLeads.length);
@@ -2967,7 +4946,7 @@ function buildDisplayLead(lead: LeadCandidate): DisplayLead {
     email: email || "-",
     website: formatWebsite(lead.website ?? lead.sourceUrl),
     social: social || "-",
-    address: country,
+    address: inferLeadAddress(lead.countryEvidence),
     stage: displayLeadStage(lead),
     actionable: isDisplayableLeadCandidate(lead),
     raw: lead
@@ -3024,9 +5003,15 @@ function extractDisplayAttributedCompanyName(value: string) {
 
 function cleanupDisplayCompanyName(value: string | null | undefined) {
   return (value ?? "")
-    .replace(/\b(home|official site|website|about us|contact us|logo|tagline|awesome image|pdf)\b/gi, "")
+    .replace(
+      /\b(home|official site|website|about us|contact us|logo|tagline|awesome image|pdf)\b/gi,
+      ""
+    )
     .replace(/^\s*(?:welcome to|official)\s+/i, "")
-    .replace(/^\s*(?:created|designed|powered|developed|maintained|hosted)\s+by\s+|^\s*website\s+by\s+/i, "")
+    .replace(
+      /^\s*(?:created|designed|powered|developed|maintained|hosted)\s+by\s+|^\s*website\s+by\s+/i,
+      ""
+    )
     .replace(/\s+\b(?:homepage|home page)\b$/i, "")
     .replace(/\s+/g, " ")
     .replace(/^[|:\\\-\s]+|[|:\\\-\s]+$/g, "")
@@ -3036,7 +5021,12 @@ function cleanupDisplayCompanyName(value: string | null | undefined) {
 function isLikelyDisplayCompanyName(value: string, domainName: string) {
   const name = cleanupDisplayCompanyName(value);
   const lower = name.toLowerCase();
-  if (!name || name.length > 72 || isForbiddenDisplayCompanyName(value) || looksLikeDisplayProductTitle(name)) {
+  if (
+    !name ||
+    name.length > 72 ||
+    isForbiddenDisplayCompanyName(value) ||
+    looksLikeDisplayProductTitle(name)
+  ) {
     return false;
   }
 
@@ -3052,7 +5042,10 @@ function isLikelyDisplayCompanyName(value: string, domainName: string) {
 }
 
 function isForbiddenDisplayCompanyName(value: string) {
-  const normalized = (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normalized = (value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
   return (
     !normalized ||
     displayForbiddenCompanyNameTerms.has(normalized) ||
@@ -3584,15 +5577,22 @@ function pendingFollowups(lead: LeadCandidate) {
   return lead.followupTasks?.filter((task) => task.status === "pending") ?? [];
 }
 
-function formatMailSentStatus(result: MailSendResult) {
-  if (result.crmLead && result.followupTask) {
-    return "邮件已通过 Gmail 发送，客户已同步 CRM，并创建 3 天后跟进提醒。";
-  }
-  if (result.crmLead) {
-    return "邮件已通过 Gmail 发送，客户已同步 CRM。";
-  }
+function formatMailSuccessDetail(result: MailSendResult) {
+  const totalCount = result.totalCount ?? result.successCount ?? 1;
+  const successCount = result.successCount ?? totalCount;
+  const actionText = result.scheduled ? "已安排发送" : "已成功发送";
+  return totalCount > 1
+    ? `${actionText} ${successCount}/${totalCount} 位收件人。`
+    : `${actionText} 1 位收件人。`;
+}
 
-  return "邮件已通过 Gmail 发送。";
+function formatMailSentStatus(result: MailSendResult) {
+  const totalCount = result.totalCount ?? result.successCount ?? 1;
+  const successCount = result.successCount ?? totalCount;
+  const sentText = totalCount > 1 ? `${successCount}/${totalCount} 位收件人` : "1 位收件人";
+  const actionText = result.scheduled ? "已安排 Gmail 定时发送" : "邮件已通过 Gmail 发送";
+
+  return `${actionText}给 ${sentText}。`;
 }
 
 type IcpReasonPayload = {
@@ -3759,7 +5759,11 @@ function evidenceBriefFromPayload(status: string | undefined, payload: IcpReason
   if (leadType === "government_information") {
     return "\u653f\u5e9c\u4fe1\u606f\u7ebf\u7d22";
   }
-  if (leadType === "intelligence" || status === "intelligence" || status === "intelligence_review") {
+  if (
+    leadType === "intelligence" ||
+    status === "intelligence" ||
+    status === "intelligence_review"
+  ) {
     if (intelligenceType === "government_tender") {
       return "\u653f\u5e9c\u62db\u6807\u60c5\u62a5" + suffix;
     }
@@ -3861,90 +5865,6 @@ function toMailLead(lead: DisplayLead): MailConfirmationLead {
     email: lead.email === "-" ? `sales@${lead.website.replace(/^www\./, "")}` : lead.email,
     score: lead.score
   };
-}
-
-function buildFlowRows(
-  task: LeadTask | null,
-  state: {
-    creating: boolean;
-    searching: boolean;
-    approving: boolean;
-    leadCount: number;
-    leadQualityCounts: LeadQualityCounts;
-    sentCount: number;
-    crmSyncedCount: number;
-    pendingFollowupCount: number;
-  }
-): FlowRow[] {
-  const queryCount = task?.searchQueries?.length ?? 0;
-  const approvedCount =
-    task?.leadCandidates?.filter((lead) => lead.status === "approved").length ?? 0;
-  const hasError = task?.agentSteps?.some((step) => step.status === "failed") ?? false;
-
-  return [
-    {
-      title: "任务规划",
-      description: state.creating
-        ? "正在读取画像并生成搜索策略"
-        : task
-          ? `已生成 ${queryCount} 条搜索指令`
-          : "等待创建任务",
-      state: hasError ? "failed" : task ? "done" : state.creating ? "active" : "pending"
-    },
-    {
-      title: "筛选目标客户",
-      description: state.searching
-        ? "正在执行搜索并清洗候选客户"
-        : state.leadCount
-          ? formatLeadQualitySummary(state.leadQualityCounts)
-          : task
-            ? state.leadQualityCounts.rawEvidence
-              ? formatLeadQualitySummary(state.leadQualityCounts)
-              : "搜索指令已就绪，等待返回候选客户"
-            : "等待任务规划完成",
-      state:
-        state.leadCount || state.leadQualityCounts.rawEvidence
-          ? "done"
-          : task || state.searching
-            ? "active"
-            : "pending"
-    },
-    {
-      title: "邮件触达",
-      description: state.approving
-        ? "正在生成开发信草稿"
-        : state.sentCount
-          ? `已发送 ${state.sentCount} 封 Gmail 开发信`
-          : approvedCount
-            ? `已审批 ${approvedCount} 家客户，等待邮件确认`
-            : state.leadCount
-              ? "选择客户后生成可确认发送的开发信"
-              : "等待候选客户确认",
-      state:
-        state.sentCount || approvedCount
-          ? "done"
-          : state.leadCount || state.approving
-            ? "active"
-            : "pending"
-    },
-    {
-      title: "同步 CRM 并标记",
-      description: state.crmSyncedCount
-        ? `已同步 ${state.crmSyncedCount} 家客户，创建 ${state.pendingFollowupCount} 个跟进提醒`
-        : approvedCount || state.sentCount
-          ? "邮件确认后同步 CRM 并创建跟进提醒"
-          : "等待邮件确认后同步",
-      state: state.crmSyncedCount ? "done" : approvedCount || state.sentCount ? "active" : "pending"
-    }
-  ];
-}
-
-function scoreStars(score: number) {
-  if (score >= 85) return "★★★★★";
-  if (score >= 70) return "★★★★☆";
-  if (score >= 50) return "★★★☆☆";
-  if (score > 0) return "★★☆☆☆";
-  return "☆☆☆☆☆";
 }
 
 function formatWebsite(value: string | null | undefined) {
@@ -4183,7 +6103,10 @@ function digitsOnly(value: string) {
 function formatEmailContacts(values: string[] | undefined, companyUrl?: string | null) {
   const companyDomain = domainFromUrl(companyUrl);
   return unique(values ?? [])
-    .sort((left, right) => emailContactPriority(left, companyDomain) - emailContactPriority(right, companyDomain))
+    .sort(
+      (left, right) =>
+        emailContactPriority(left, companyDomain) - emailContactPriority(right, companyDomain)
+    )
     .slice(0, 1)
     .join(" ; ");
 }
@@ -4207,33 +6130,10 @@ function domainsMatch(emailDomain: string, companyDomain: string) {
   );
 }
 
-function formatSourceUrls(values: string[] | undefined) {
-  return unique(
-    (values ?? []).map((value) => formatWebsite(value)).filter((value) => value !== "-")
-  ).slice(0, 4);
-}
-
-function formatSiteEvidenceValues(values: SiteEvidenceRow[] | undefined) {
-  return (values ?? [])
-    .map((value) => {
-      const domain = value.domain || formatWebsite(value.finalUrl || value.url);
-      if (value.status === "read") {
-        return `${domain} 已读取${value.wordCount ? ` ${value.wordCount}词` : ""}`;
-      }
-      return `${domain} 读取失败`;
-    })
-    .slice(0, 4);
-}
-
 function unique(values: string[]) {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
 function countDistinct(values: string[]) {
   return new Set(values.filter((value) => value && value !== "-")).size;
-}
-
-function averageScore(rows: Array<{ score: number }>) {
-  if (!rows.length) return 0;
-  return Math.round(rows.reduce((total, row) => total + row.score, 0) / rows.length);
 }

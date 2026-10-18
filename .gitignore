@@ -5,12 +5,16 @@
 node_modules/
 dist/
 build/
+output/
 .next/
 coverage/
 .turbo/
 design/
+ui/
+.logs/
 
 *.log
+*.tsbuildinfo
 npm-debug.log*
 pnpm-debug.log*
 yarn-debug.log*

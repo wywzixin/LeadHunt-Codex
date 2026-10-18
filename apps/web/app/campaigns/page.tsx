@@ -1,27 +1,16 @@
 "use client";
 
 import {
-  Bold,
-  CalendarDays,
   ChevronDown,
-  Code2,
-  Eye,
   Filter,
-  Grid2X2,
-  Italic,
-  Link,
-  MoreHorizontal,
-  Paperclip,
   Search,
   Send,
   Sparkles,
   UploadCloud,
-  Underline,
-  Undo2,
   UserPlus,
   X
 } from "lucide-react";
-import type { KeyboardEvent, ReactNode } from "react";
+import type { KeyboardEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../app-shell";
 import {
@@ -414,32 +403,39 @@ export default function CampaignsPage() {
       title="邮件营销"
     >
       <section className="campaignShell">
-        <header className="campaignHeader">
-          <nav className="templatePrimaryTabs" aria-label="邮件营销页面切换">
+        <header className="campaignTopBar">
+          <nav className="campaignTopTabs" role="tablist" aria-label="邮件营销页面切换">
             <button
-              className={activeView === "records" ? "active" : ""}
-              type="button"
-              onClick={() => setActiveView("records")}
-            >
-              发送记录
-            </button>
-            <button
+              aria-selected={activeView === "compose"}
               className={activeView === "compose" ? "active" : ""}
-              type="button"
               onClick={() => setActiveView("compose")}
+              role="tab"
+              type="button"
             >
               发邮件
             </button>
-            <a href="/templates">邮件模板</a>
+            <button
+              aria-selected={activeView === "records"}
+              className={activeView === "records" ? "active" : ""}
+              onClick={() => setActiveView("records")}
+              role="tab"
+              type="button"
+            >
+              发送记录
+            </button>
+            <a className="campaignTopLink" href="/templates">
+              邮件模板
+            </a>
           </nav>
           <div className="campaignGmailStatus">
-            <span>发件邮箱</span>
-            <strong>{fromEmail}</strong>
-            <b>{gmailAuthorized ? "已授权" : "未授权"}</b>
-            <button type="button">
-              <CalendarDays aria-hidden="true" size={15} />
-              草稿箱
-            </button>
+            <span className="gmailLogo" aria-hidden="true">G</span>
+            <div>
+              <strong>{fromEmail}</strong>
+              <small>
+                <em className={`dot ${gmailAuthorized ? "connected" : "warning"}`} aria-hidden="true" />
+                {gmailAuthorized ? "Gmail 已授权" : "Gmail 未授权"}
+              </small>
+            </div>
           </div>
         </header>
 
@@ -448,7 +444,6 @@ export default function CampaignsPage() {
         ) : (
         <div className="campaignGrid">
           <section className="campaignComposer">
-            <InfoRow label="发件邮箱" value={fromEmail} badge={gmailAuthorized ? "Google OAuth 已授权" : "Google OAuth 未授权"} action="重新授权" />
             <CampaignRecipientsRow
               recipients={recipients}
               inputValue={recipientInput}
@@ -457,77 +452,57 @@ export default function CampaignsPage() {
               onAction={handleRecipientAction}
               onRemove={removeRecipient}
             />
-            <InfoRow label="回复邮箱" value={fromEmail} hint="客户回复直接进入个人邮箱" />
-            <InfoRow label="邮件模板" action="模板">
-              <select
-                aria-label="选择邮件模板"
-                className="campaignTemplateSelect"
-                data-campaign-template-select="true"
-                value={selectedTemplateId}
-                onChange={(event) => applyTemplate(event.target.value)}
-              >
-                {templates.map((template) => (
-                  <option key={template.id} value={template.id}>
-                    {template.type === "system" ? "系统" : "个人"} - {template.name}
-                  </option>
-                ))}
-              </select>
-            </InfoRow>
-            <InfoRow label="邮件主题" hint="共 1 个 | 可添加多主题" action="添加">
-              <input
-                className="campaignSubjectInput"
-                value={subject}
-                onChange={(event) => setSubject(event.target.value)}
-              />
-            </InfoRow>
-
-            <div className="campaignSchedule">
-              <span>发送时间</span>
-              <label>
-                <input defaultChecked name="send-time" type="radio" />
-                立即发送
-              </label>
-              <label>
-                <input name="send-time" type="radio" />
-                定时发送
-              </label>
+            <div className="campaignFieldRow">
+              <strong>邮件模板</strong>
+              <div className="campaignFieldControl">
+                <select
+                  aria-label="选择邮件模板"
+                  className="campaignTemplateSelect"
+                  data-campaign-template-select="true"
+                  onChange={(event) => applyTemplate(event.target.value)}
+                  value={selectedTemplateId}
+                >
+                  {templates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.type === "system" ? "系统" : "个人"} · {template.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="campaignFieldRow">
+              <strong>邮件主题</strong>
+              <div className="campaignFieldControl">
+                <input
+                  className="campaignSubjectInput"
+                  onChange={(event) => setSubject(event.target.value)}
+                  placeholder="例如：Reliable telecom spare parts ready to ship"
+                  value={subject}
+                />
+              </div>
             </div>
 
             <div className="campaignEditorHead">
-              <span>邮件内容</span>
-              <button type="button" onClick={rewriteEmail} disabled={rewriting}>
-                {rewriting ? "改写中..." : "AI 一键改写"}
-              </button>
+              <span>邮件正文</span>
               <small className="campaignStatus" aria-live="polite">{status}</small>
-            </div>
-
-            <div className="campaignToolbar" aria-label="邮件编辑工具栏">
-              {[Undo2, Undo2, Bold, Italic, Underline, Link, Grid2X2, Code2, Eye, MoreHorizontal].map((Icon, index) => (
-                <button key={index} type="button">
-                  <Icon aria-hidden="true" size={16} />
-                </button>
-              ))}
-              <button type="button">
-                系统字体 <ChevronDown aria-hidden="true" size={14} />
-              </button>
-              <button type="button">
-                14px <ChevronDown aria-hidden="true" size={14} />
-              </button>
             </div>
             <textarea
               className="campaignEditor campaignEditorInput"
-              value={body}
               onChange={(event) => setBody(event.target.value)}
+              value={body}
             />
 
             <footer className="campaignComposerActions">
-              <button type="button" onClick={resetDraft}>重置</button>
-              <button type="button" onClick={() => setStatus("当前页面已显示预览内容，可继续编辑。")}>预览</button>
-              <button type="button" onClick={() => setStatus("测试页未写入 Gmail 草稿箱，请在 AI 外贸员邮件确认弹窗执行存草稿。")}>存草稿</button>
-              <button type="button" onClick={saveDraftAsTemplate}>另存为模板</button>
-              <button className="primary" type="button" onClick={sendCampaignEmail} disabled={sending || !recipients.length || !gmailAuthorized}>
+              <button onClick={resetDraft} type="button">重置</button>
+              <button onClick={saveDraftAsTemplate} type="button">另存为模板</button>
+              <button
+                className="primary"
+                disabled={sending || !recipients.length || !gmailAuthorized}
+                onClick={sendCampaignEmail}
+                type="button"
+              >
                 <Send aria-hidden="true" size={16} />
-                {sending ? "发送中" : "发送"}
+                {sending ? "发送中" : `发送${recipients.length ? ` (${recipients.length})` : ""}`}
               </button>
             </footer>
           </section>
@@ -535,15 +510,14 @@ export default function CampaignsPage() {
           <aside className="campaignRewrite">
             <header>
               <h2>
-                <Sparkles aria-hidden="true" size={20} />
+                <Sparkles aria-hidden="true" size={18} />
                 AI 改写
               </h2>
-              <button type="button">×</button>
             </header>
             <div className="rewriteSelectors">
               <label>
                 <span>输出邮件使用的语言</span>
-                <select value={outputLanguage} onChange={(event) => setOutputLanguage(event.target.value)}>
+                <select onChange={(event) => setOutputLanguage(event.target.value)} value={outputLanguage}>
                   <option>英语 - English</option>
                   <option>阿拉伯语 - Arabic</option>
                   <option>法语 - French</option>
@@ -551,7 +525,7 @@ export default function CampaignsPage() {
               </label>
               <label>
                 <span>邮件语气</span>
-                <select value={tone} onChange={(event) => setTone(event.target.value)}>
+                <select onChange={(event) => setTone(event.target.value)} value={tone}>
                   <option>尊敬</option>
                   <option>有说服力</option>
                   <option>简洁</option>
@@ -560,36 +534,23 @@ export default function CampaignsPage() {
               </label>
             </div>
             <label className="rewriteOriginal">
-              <span>原文 <small>今日可使用次数：100次</small></span>
+              <span>改写要求</span>
               <textarea
-                value={rewriteInstruction}
                 onChange={(event) => setRewriteInstruction(event.target.value)}
+                placeholder="例如：把语气写得更正式，突出我们能整套项目供货，也能单独提供模块和备件。"
+                value={rewriteInstruction}
               />
             </label>
             <div className="rewriteButtons">
-              <button className="primary" type="button" onClick={rewriteEmail} disabled={rewriting}>
-                {rewriting ? "生成中" : "重新生成"}
+              <button
+                className="primary"
+                disabled={rewriting}
+                onClick={rewriteEmail}
+                type="button"
+              >
+                {rewriting ? "生成中" : "一键改写"}
               </button>
-              <button type="button" onClick={() => setStatus("改写结果已在下方展示。")}>
-                <Paperclip aria-hidden="true" size={14} />
-                一键复制
-              </button>
-              <button type="button" onClick={saveDraftAsTemplate}>
-                <CalendarDays aria-hidden="true" size={14} />
-                存为模板
-              </button>
-              <button type="button" onClick={() => setBody(rewriteResult)}>应用</button>
             </div>
-            <section className="rewriteResult">
-              <div>
-                <h3>改写结果</h3>
-                <span>{rewriting ? "生成中" : "已同步"}</span>
-              </div>
-              <article>
-                <p>Subject: {subject}</p>
-                <p>{rewriteResult}</p>
-              </article>
-            </section>
           </aside>
         </div>
         )}
@@ -861,32 +822,6 @@ function CampaignRecipientPanel({
           <button type="button" onClick={onClose}>确认</button>
         </footer>
       </aside>
-    </div>
-  );
-}
-
-function InfoRow({
-  label,
-  value,
-  badge,
-  hint,
-  action,
-  children
-}: {
-  label: string;
-  value?: string;
-  badge?: string;
-  hint?: string;
-  action?: string;
-  children?: ReactNode;
-}) {
-  return (
-    <div className="campaignInfoRow">
-      <strong>{label}</strong>
-      {children ? <div className="campaignInfoControl">{children}</div> : <p>{value}</p>}
-      {badge ? <span>{badge}</span> : null}
-      {hint ? <small>{hint}</small> : null}
-      {action ? <button type="button">{action}</button> : null}
     </div>
   );
 }

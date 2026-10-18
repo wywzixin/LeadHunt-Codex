@@ -1,7 +1,7 @@
 import { Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service.js";
-import { normalizeTags, syncLeadToCrm, type SyncLeadToCrmInput } from "./crm-sync.js";
+import { ensureApprovedCandidatesInCrm, normalizeTags, syncLeadToCrm, type SyncLeadToCrmInput } from "./crm-sync.js";
 
 const crmLeadInclude = {
   lead: {
@@ -112,6 +112,8 @@ export class CrmService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   async listCustomers(userId: string, options: { view: CrmView; group: CrmGroup }) {
+    await ensureApprovedCandidatesInCrm(this.prisma, userId);
+
     const records = await this.prisma.crmLead.findMany({
       where: {
         lead: {
@@ -453,6 +455,8 @@ export class CrmService {
       overview: {
         emailTasks: emailLogs.length,
         emailMessages: emailLogs.length,
+        replyMessages: replies.length,
+        openMessages: openedEmailCount,
         smsTasks: 0,
         smsMessages: 0,
         favoriteCompanies,
@@ -650,7 +654,7 @@ function buildSearchPreference(
       count
     }));
 
-  return rows.length > 0 ? rows : [{ rank: 1, keyword: "通信5G", count: 0 }];
+  return rows;
 }
 
 function extractKeyword(query: { query: string; operatorName: string | null; keywordGroups: Prisma.JsonValue | null }) {

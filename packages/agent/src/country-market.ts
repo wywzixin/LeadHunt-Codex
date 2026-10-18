@@ -120,6 +120,7 @@ const regionCodes = [
   "JE",
   "JO",
   "KZ",
+  "KE",
   "KI",
   "KP",
   "KR",
@@ -164,6 +165,7 @@ const regionCodes = [
   "NZ",
   "NI",
   "NE",
+  "NG",
   "NU",
   "NF",
   "MK",
@@ -185,6 +187,7 @@ const regionCodes = [
   "QA",
   "RE",
   "RO",
+  "RU",
   "RW",
   "BL",
   "SH",
@@ -232,6 +235,7 @@ const regionCodes = [
   "TM",
   "TC",
   "TV",
+  "UA",
   "UG",
   "AE",
   "GB",
@@ -277,7 +281,19 @@ const siteOverrides: Record<string, string> = {
   GB: ".uk"
 };
 
-const globallyUsedCountryDomains = new Set([".ai", ".am", ".cc", ".co", ".fm", ".io", ".ly", ".me", ".tv", ".to", ".ws"]);
+const globallyUsedCountryDomains = new Set([
+  ".ai",
+  ".am",
+  ".cc",
+  ".co",
+  ".fm",
+  ".io",
+  ".ly",
+  ".me",
+  ".tv",
+  ".to",
+  ".ws"
+]);
 
 const braveSupportedCountries = new Set([
   "AR",

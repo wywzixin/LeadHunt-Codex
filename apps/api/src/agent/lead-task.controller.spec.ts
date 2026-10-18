@@ -33,6 +33,7 @@ function createController() {
     approveCandidatesForUser: vi
       .fn()
       .mockResolvedValue({ ok: true, approvedCount: 1, draftCount: 1 }),
+    softDeleteTaskForUser: vi.fn().mockResolvedValue({ ok: true, taskId: "task-1" }),
     updateTaskStatusForUser: vi.fn().mockResolvedValue({ id: "task-1", status: "paused" })
   };
 
@@ -73,6 +74,7 @@ describe("LeadTaskController", () => {
     await controller.get(requestWithCookie(), "task-1");
     await controller.events(requestWithCookie(), "task-1");
     await controller.leads(requestWithCookie(), "task-1");
+    await controller.delete(requestWithCookie(), "task-1");
     await controller.executeSearch(requestWithCookie(), "task-1", { limit: 1 });
     await controller.summary(requestWithCookie(), "task-1");
     await controller.approve(requestWithCookie(), "task-1", {
@@ -85,6 +87,7 @@ describe("LeadTaskController", () => {
     expect(workflowService.getTaskForUser).toHaveBeenCalledWith("user-1", "task-1");
     expect(workflowService.getTaskEventsForUser).toHaveBeenCalledWith("user-1", "task-1");
     expect(workflowService.getTaskLeadsForUser).toHaveBeenCalledWith("user-1", "task-1");
+    expect(workflowService.softDeleteTaskForUser).toHaveBeenCalledWith("user-1", "task-1");
     expect(workflowService.executeBraveSearchForTask).toHaveBeenCalledWith("user-1", "task-1", {
       limit: 1
     });

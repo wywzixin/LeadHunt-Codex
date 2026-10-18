@@ -7,18 +7,16 @@ import {
   Clock3,
   Edit3,
   Inbox,
-  Info,
   Mail,
-  MoreVertical,
   RefreshCw,
   Search,
   Send,
-  Settings,
   ShieldCheck,
   Tag,
   Trash2
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { TableLoadingState } from "../table-loading-state";
 
 type GmailAccount = {
   id: string;
@@ -64,23 +62,23 @@ const folderGroups: Array<{
   items: Array<{ icon: typeof Inbox; label: string; folder?: MailboxFolder }>;
 }> = [
   {
-    title: "收件箱",
+    title: "收件",
     items: [
       { icon: Inbox, label: "全部收件", folder: "inbox" },
-      { icon: Clock3, label: "待处理邮件" },
       { icon: Mail, label: "未读邮件" },
+      { icon: Clock3, label: "待处理邮件" },
       { icon: Archive, label: "草稿箱" }
     ]
   },
   {
-    title: "发件箱",
+    title: "发件",
     items: [{ icon: Send, label: "全部发件", folder: "sent" }]
   },
   {
-    title: "文件夹",
+    title: "归档",
     items: [
       { icon: Tag, label: "标签邮件" },
-      { icon: Trash2, label: "已删除邮件" },
+      { icon: Trash2, label: "已删除" },
       { icon: ShieldCheck, label: "垃圾邮件" }
     ]
   }
@@ -91,6 +89,7 @@ export function MailboxClient() {
   const [data, setData] = useState<GmailAccountResponse>(emptyGmailData);
   const [folder, setFolder] = useState<MailboxFolder>("inbox");
   const [messages, setMessages] = useState<MailboxMessage[]>([]);
+  const [loadingAccount, setLoadingAccount] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
@@ -99,7 +98,7 @@ export function MailboxClient() {
 
   const connectedEmail = data.account?.email ?? "未授权";
   const connectedAt = useMemo(() => {
-    if (!data.account?.connectedAt) return "未连接";
+    if (!data.account?.connectedAt) return null;
     return new Intl.DateTimeFormat("zh-CN", {
       dateStyle: "medium",
       timeStyle: "short"
@@ -108,12 +107,13 @@ export function MailboxClient() {
 
   async function loadAccount() {
     const returnStatus = getOAuthReturnStatus();
+    setLoadingAccount(true);
     setStatus(returnStatus ?? "正在检查 Gmail 授权状态...");
     try {
       const response = await fetch("/api/gmail/account", { credentials: "include" });
       if (!response.ok) {
         setData(emptyGmailData);
-        setStatus(returnStatus ?? "尚未授权 Gmail，请先点击下方按钮完成 Google OAuth。");
+        setStatus(returnStatus ?? "尚未授权 Gmail，请先点击右上角按钮完成 Google OAuth。");
         return;
       }
 
@@ -125,10 +125,12 @@ export function MailboxClient() {
         return;
       }
 
-      setStatus(returnStatus ?? "尚未授权 Gmail，请先点击下方按钮完成 Google OAuth。");
+      setStatus(returnStatus ?? "尚未授权 Gmail，请先点击右上角按钮完成 Google OAuth。");
     } catch {
       setData(emptyGmailData);
       setStatus(returnStatus ?? "无法读取 Gmail 授权状态，请稍后重试。");
+    } finally {
+      setLoadingAccount(false);
     }
   }
 
@@ -147,7 +149,7 @@ export function MailboxClient() {
 
       const payload = (await response.json()) as { messages: MailboxMessage[]; total: number };
       setMessages(payload.messages);
-      setStatus(`已同步 ${payload.messages.length} 封 ${nextFolder === "inbox" ? "收件箱" : "发件箱"}邮件`);
+      setStatus(`已同步 ${payload.messages.length} 封 ${nextFolder === "inbox" ? "收件" : "发件"}邮件`);
     } catch {
       setMessages([]);
       setStatus("网络异常，无法读取邮件。");
@@ -192,6 +194,8 @@ export function MailboxClient() {
   }
 
   async function revokeGmail() {
+    if (!data.connected) return;
+    if (typeof window !== "undefined" && !window.confirm("确定要解除当前 Gmail 授权吗？")) return;
     setStatus("撤销中...");
     try {
       const response = await fetch("/api/gmail/account", {
@@ -242,184 +246,207 @@ export function MailboxClient() {
 
   return (
     <section className="mailboxShell">
-      <aside className="mailboxFolderPane">
-        <button className="mailboxCompose" type="button">
-          <Edit3 aria-hidden="true" size={18} />
-          写信
-        </button>
-        {folderGroups.map((group) => (
-          <div className="mailboxFolderGroup" key={group.title}>
-            <h2>{group.title}</h2>
-            {group.items.map((item) => {
-              const Icon = item.icon;
-              const active = item.folder === folder;
-              return (
-                <button
-                  className={active ? "active" : ""}
-                  key={item.label}
-                  type="button"
-                  onClick={() => item.folder && changeFolder(item.folder)}
-                  disabled={!item.folder}
-                >
-                  <Icon aria-hidden="true" size={17} />
-                  {item.label}
-                </button>
-              );
-            })}
-          </div>
-        ))}
-      </aside>
-
-      <div className="mailboxContent">
-        {activeMessage ? (
-          <section className="mailboxListPanel mailboxDetailMode">
-            <header className="mailboxToolbar">
-              <button type="button" className="mailboxBackBtn" onClick={closeDetail}>
-                <ArrowLeft aria-hidden="true" size={17} />
-                返回邮件列表
-              </button>
-              <button type="button" onClick={() => activeMessage && selectMessage(activeMessage.id)}>
-                <RefreshCw aria-hidden="true" size={17} />
-              </button>
-              <button type="button">
-                <MoreVertical aria-hidden="true" size={17} />
-              </button>
-              <span className="mailboxToolbarSpacer" />
-              <button className="mailboxSettings" type="button">
-                <Settings aria-hidden="true" size={18} />
-              </button>
-            </header>
-            <article className="mailboxDetailArticle">
-              <h3>{activeMessage.subject}</h3>
-              <div className="mailboxDetailMeta">
-                <span className="mailboxDetailAvatar">
-                  {(activeMessage.fromName || activeMessage.fromEmail || "?").trim().slice(0, 1).toUpperCase()}
-                </span>
-                <div>
-                  <strong>{activeMessage.fromName || activeMessage.fromEmail}</strong>
-                  <small>&lt;{activeMessage.fromEmail}&gt;</small>
-                </div>
-                <time>{formatMailDateTime(activeMessage.receivedAt)}</time>
-              </div>
-              <p className="mailboxDetailTo">收件人：{activeMessage.to || connectedEmail}</p>
-              <div className="mailboxDetailBody">
-                {activeMessage.bodyHtml ? (
-                  <iframe
-                    className="mailboxDetailIframe"
-                    sandbox=""
-                    title="邮件正文"
-                    srcDoc={`<base target="_blank">${activeMessage.bodyHtml}`}
-                  />
-                ) : (
-                  <pre className="mailboxDetailText">{activeMessage.body || activeMessage.snippet}</pre>
-                )}
-              </div>
-            </article>
-          </section>
-        ) : (
-          <section className="mailboxListPanel">
-            <header className="mailboxToolbar">
-              <label>
-                <input type="checkbox" />
-              </label>
-              <button type="button" onClick={() => loadMessages(folder, keyword)} disabled={!data.connected || loadingMessages}>
-                <RefreshCw aria-hidden="true" size={17} />
-              </button>
-              <button type="button">
-                <MoreVertical aria-hidden="true" size={17} />
-              </button>
-              <button className="mailboxFilter" type="button">
-                全部 <ChevronDown aria-hidden="true" size={14} />
-              </button>
-              <form className="mailboxSearch" onSubmit={submitSearch}>
-                <Search aria-hidden="true" size={17} />
-                <input
-                  placeholder="搜索 Gmail 邮件 (例如 from:google has:attachment)"
-                  value={keyword}
-                  onChange={(event) => setKeyword(event.target.value)}
-                />
-              </form>
-              <button className="mailboxSettings" type="button">
-                <Settings aria-hidden="true" size={18} />
-              </button>
-            </header>
-            <div className="mailboxSyncBanner">
-              <Info aria-hidden="true" size={16} />
-              {loadingDetail ? "正在加载邮件正文..." : status}
-            </div>
-            <div className="mailboxRows">
-              {loadingMessages && messages.length === 0 ? (
-                <div className="mailboxEmptyHint">正在从 Gmail 加载邮件...</div>
-              ) : messages.length === 0 ? (
-                <div className="mailboxEmptyHint">
-                  {data.connected
-                    ? "当前文件夹没有邮件，可以换关键字或刷新。"
-                    : "尚未授权 Gmail，授权后会显示真实邮件列表。"}
-                </div>
+      {/* Top status / auth bar */}
+      <header className="mailboxStatusBar" aria-label="Gmail 授权状态">
+        <div className="mailboxStatusLeft">
+          <span className="gmailLogo" aria-hidden="true">G</span>
+          <div>
+            <strong>{connectedEmail}</strong>
+            <small>
+              {data.connected ? (
+                <>
+                  <em className="dot connected" aria-hidden="true" />
+                  Gmail 已授权 · 通过 Google OAuth 同步真实收发件{connectedAt ? ` · ${connectedAt}` : ""}
+                </>
               ) : (
-                messages.map((row) => (
-                  <button
-                    type="button"
-                    className={`mailboxRow ${row.unread ? "unread" : ""} ${row.id === selectedMessageId ? "active" : ""}`}
-                    key={row.id}
-                    onClick={() => selectMessage(row.id)}
-                  >
-                    <span className="mailboxRowAvatar">
-                      {(row.fromName || row.fromEmail || "?").trim().slice(0, 1).toUpperCase()}
-                    </span>
-                    <div className="mailboxRowSender">
-                      <strong>{row.fromName || row.fromEmail}</strong>
-                      <small>{row.fromEmail}</small>
-                    </div>
-                    <div className="mailboxRowSubject">
-                      <b>{row.subject}</b>
-                      <span className="mailboxSnippet">{row.snippet}</span>
-                    </div>
-                    <time>{formatMailDate(row.receivedAt)}</time>
-                  </button>
-                ))
+                <>
+                  <em className="dot warning" aria-hidden="true" />
+                  尚未授权 Gmail · 授权后才能同步真实邮件
+                </>
               )}
-            </div>
-          </section>
-        )}
-
-        <section className="gmailAuthorizationPanel">
-          <h2>发件邮箱授权示意</h2>
-          <div className="gmailAuthTable">
-            <div>
-              <strong>授权方式</strong>
-              <p>
-                <span>G</span>
-                Google OAuth 登录并授权 Gmail
-              </p>
-            </div>
-            <div>
-              <strong>当前发件邮箱</strong>
-              <p>
-                {connectedEmail}
-                <b>{data.connected ? "已授权" : "未授权"}</b>
-              </p>
-            </div>
+            </small>
           </div>
-          <div className="gmailAuthNotice">
-            <Info aria-hidden="true" size={17} />
-            授权后，本页通过 Gmail API（labels=INBOX/SENT）拉取真实邮件列表与正文，不保存邮箱密码。退出授权后立即停止读取。
-          </div>
-          <div className="gmailAuthActions">
-            <button className="primary" type="button" onClick={connectGmail}>
-              <span>G</span>
+        </div>
+        <div className="mailboxStatusActions">
+          {data.connected ? (
+            <>
+              <button className="mailboxStatusGhost" onClick={connectGmail} type="button">
+                重新授权
+              </button>
+              <button className="mailboxStatusGhost danger" onClick={revokeGmail} type="button">
+                解除授权
+              </button>
+            </>
+          ) : (
+            <button className="mailboxStatusPrimary" onClick={connectGmail} type="button">
+              <span aria-hidden="true">G</span>
               使用 Google 授权 Gmail
             </button>
-            <button type="button" onClick={revokeGmail}>
-              解除授权
-            </button>
-            <small>{connectedAt}</small>
-          </div>
+          )}
+        </div>
+      </header>
+
+      <div className="mailboxBody">
+        <aside className="mailboxFolderPane">
+          <button className="mailboxCompose" type="button">
+            <Edit3 aria-hidden="true" size={16} />
+            写信
+          </button>
+          {folderGroups.map((group) => (
+            <div className="mailboxFolderGroup" key={group.title}>
+              <h2>{group.title}</h2>
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                const active = item.folder === folder;
+                return (
+                  <button
+                    aria-current={active ? "page" : undefined}
+                    className={active ? "active" : ""}
+                    key={item.label}
+                    onClick={() => item.folder && changeFolder(item.folder)}
+                    type="button"
+                  >
+                    <Icon aria-hidden="true" size={15} />
+                    <span>{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </aside>
+
+        <section className={`mailboxListPanel ${activeMessage ? "mailboxDetailMode" : ""}`}>
+          {activeMessage ? (
+            <>
+              <header className="mailboxToolbar mailboxToolbarDetail">
+                <button className="mailboxBackBtn" onClick={closeDetail} type="button">
+                  <ArrowLeft aria-hidden="true" size={15} />
+                  返回邮件列表
+                </button>
+                <button
+                  className="mailboxIconBtn"
+                  onClick={() => activeMessage && selectMessage(activeMessage.id)}
+                  title="刷新"
+                  type="button"
+                >
+                  <RefreshCw aria-hidden="true" size={15} />
+                </button>
+                <span className="mailboxToolbarSpacer" />
+                <small className="mailboxStatusText">{loadingDetail ? "正在加载邮件正文..." : status}</small>
+              </header>
+              <article className="mailboxDetailArticle">
+                <h3>{activeMessage.subject || "(无主题)"}</h3>
+                <div className="mailboxDetailMeta">
+                  <span className={`mailboxAvatar tone${avatarTone(activeMessage.fromName || activeMessage.fromEmail)}`}>
+                    {avatarLetter(activeMessage.fromName || activeMessage.fromEmail)}
+                  </span>
+                  <div>
+                    <strong>{activeMessage.fromName || activeMessage.fromEmail}</strong>
+                    <small>&lt;{activeMessage.fromEmail}&gt;</small>
+                  </div>
+                  <time>{formatMailDateTime(activeMessage.receivedAt)}</time>
+                </div>
+                <p className="mailboxDetailTo">收件人：{activeMessage.to || connectedEmail}</p>
+                <div className="mailboxDetailBody">
+                  {activeMessage.bodyHtml ? (
+                    <iframe
+                      className="mailboxDetailIframe"
+                      sandbox=""
+                      srcDoc={`<base target="_blank">${activeMessage.bodyHtml}`}
+                      title="邮件正文"
+                    />
+                  ) : (
+                    <pre className="mailboxDetailText">{activeMessage.body || activeMessage.snippet}</pre>
+                  )}
+                </div>
+              </article>
+            </>
+          ) : (
+            <>
+              <header className="mailboxToolbar">
+                <button
+                  className="mailboxIconBtn"
+                  disabled={!data.connected || loadingMessages}
+                  onClick={() => loadMessages(folder, keyword)}
+                  title="刷新"
+                  type="button"
+                >
+                  <RefreshCw aria-hidden="true" size={15} className={loadingMessages ? "spinning" : ""} />
+                </button>
+                <button className="mailboxFilter" disabled title="筛选功能开发中" type="button">
+                  全部
+                  <ChevronDown aria-hidden="true" size={13} />
+                </button>
+                <form className="mailboxSearch" onSubmit={submitSearch}>
+                  <Search aria-hidden="true" size={15} />
+                  <input
+                    onChange={(event) => setKeyword(event.target.value)}
+                    placeholder="搜索 Gmail 邮件 (支持 from: / has:attachment)"
+                    value={keyword}
+                  />
+                </form>
+                <small className="mailboxStatusText">{status}</small>
+              </header>
+              <div className="mailboxRows">
+                {loadingAccount || (loadingMessages && messages.length === 0) ? (
+                  <TableLoadingState
+                    title={loadingAccount ? "正在检查 Gmail 授权" : "正在加载邮件列表"}
+                    description={loadingAccount ? "正在读取 Gmail 授权状态。" : "正在从 Gmail 同步当前文件夹邮件。"}
+                    compact
+                  />
+                ) : messages.length === 0 ? (
+                  <div className="mailboxEmptyHint">
+                    {data.connected
+                      ? "当前文件夹没有邮件，可以换关键字或刷新。"
+                      : "尚未授权 Gmail，授权后会显示真实邮件列表。"}
+                  </div>
+                ) : (
+                  messages.map((row) => (
+                    <button
+                      className={`mailboxRow${row.unread ? " unread" : ""}${row.id === selectedMessageId ? " active" : ""}`}
+                      key={row.id}
+                      onClick={() => selectMessage(row.id)}
+                      type="button"
+                    >
+                      <span className={`mailboxAvatar tone${avatarTone(row.fromName || row.fromEmail)}`}>
+                        {avatarLetter(row.fromName || row.fromEmail)}
+                      </span>
+                      <div className="mailboxRowSender">
+                        <strong>{row.fromName || row.fromEmail}</strong>
+                        <small>{row.fromEmail}</small>
+                      </div>
+                      <div className="mailboxRowSubject">
+                        <b>{row.subject}</b>
+                        <span className="mailboxSnippet">{row.snippet}</span>
+                      </div>
+                      <time>{formatMailDate(row.receivedAt)}</time>
+                    </button>
+                  ))
+                )}
+              </div>
+            </>
+          )}
         </section>
       </div>
     </section>
   );
+}
 
+function avatarLetter(value: string) {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return "?";
+  const first = trimmed.charAt(0);
+  return /[A-Za-z0-9]/.test(first) ? first.toUpperCase() : first;
+}
+
+function avatarTone(value: string) {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return 1;
+  let hash = 0;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    hash = (hash * 31 + trimmed.charCodeAt(i)) >>> 0;
+  }
+  return (hash % 6) + 1;
 }
 
 function formatMailDate(value: string) {
@@ -458,11 +485,11 @@ function getOAuthReturnStatus() {
   }
 
   if (params.get("reason") === "expired") {
-    return "Gmail 授权链接已过期，请重新点击下方按钮发起授权。";
+    return "Gmail 授权链接已过期，请重新点击右上角按钮发起授权。";
   }
   if (params.get("reason") === "invalid_state") {
-    return "Gmail 授权状态无效，请重新点击下方按钮发起授权。";
+    return "Gmail 授权状态无效，请重新点击右上角按钮发起授权。";
   }
 
-  return "Gmail 授权失败，请重新点击下方按钮发起授权。";
+  return "Gmail 授权失败，请重新点击右上角按钮发起授权。";
 }
