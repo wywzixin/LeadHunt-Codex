@@ -1,5 +1,7 @@
 # GPT-5.5 API 调用说明
 
+> 密钥配置：复制 `.env.example` 为本地 `.env`，填写 `OPENAI_API_KEY` 和 `BRAVE_SEARCH_API_KEY`。不要把真实密钥写进源码、文档、会话记录或提交。Node.js 示例需预先加载环境变量（如使用 `node --env-file=.env`）。
+
 本项目分成两类 AI 能力：
 
 - GPT-5.5：负责产品画像、客户画像、高级搜索策略生成、搜索结果清洗、ICP 判断、开发信生成。
@@ -16,7 +18,7 @@ V1 Agent 架构已确定直接采用 LangGraph。LangGraph 负责流程编排、
 | 项目 | 值 |
 |------|-----|
 | 模型名称 | `gpt-5.5` |
-| API Key | `REDACTED_OPENAI_API_KEY` |
+| API Key | 从本地 `.env` 的 `OPENAI_API_KEY` 读取 |
 | 协议 | 兼容 OpenAI Chat Completions API |
 
 ## 两种访问方式
@@ -32,7 +34,7 @@ const res = await fetch('http://43.167.204.62:8080/v1/chat/completions', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'Authorization': 'Bearer REDACTED_OPENAI_API_KEY'
+    'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
   },
   body: JSON.stringify({
     model: 'gpt-5.5',
@@ -59,7 +61,7 @@ const res = await fetch('https://field-safely-translator-charges.trycloudflare.c
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'Authorization': 'Bearer REDACTED_OPENAI_API_KEY'
+    'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
   },
   body: JSON.stringify({
     model: 'gpt-5.5',
@@ -86,13 +88,13 @@ const OpenAI = require('openai')
 
 // 本地直连
 const client = new OpenAI({
-  apiKey: 'REDACTED_OPENAI_API_KEY',
+  apiKey: process.env.OPENAI_API_KEY,
   baseURL: 'http://43.167.204.62:8080/v1'
 })
 
 // Cloudflare Workers / HTTPS 环境
 // const client = new OpenAI({
-//   apiKey: 'REDACTED_OPENAI_API_KEY',
+//   apiKey: process.env.OPENAI_API_KEY,
 //   baseURL: 'https://field-safely-translator-charges.trycloudflare.com/v1'
 // })
 

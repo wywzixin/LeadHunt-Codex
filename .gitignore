@@ -17,3 +17,16 @@ yarn-debug.log*
 
 .DS_Store
 Thumbs.db
+
+# Local credentials, captured browser sessions and generated artifacts
+/tmp/
+/runtime/
+/release/
+/sessions/
+.tmp-*
+.tmp_*
+*cookies*.txt
+client_secret*.json
+credentials*.json
+*.network-request
+*.network-response
